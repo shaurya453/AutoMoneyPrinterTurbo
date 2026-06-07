@@ -278,6 +278,128 @@ def _format_ffmpeg_concat_path(file_path: str) -> str:
     return _escape_ffmpeg_concat_path(absolute_path.replace("\\", "/"))
 
 
+def _srt_time_to_seconds(ts: str) -> float:
+    """Parse an SRT timestamp 'HH:MM:SS,mmm' into a float second value."""
+    h, m, s_ms = ts.split(":")
+    s, ms = s_ms.split(",")
+    return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
+
+
+def _make_ducked_bgm(
+    bgm_file: str,
+    audio_duration: float,
+    subtitle_path: str,
+    bgm_volume: float,
+    duck_to: float = 0.15,
+    fade_secs: float = 0.25,
+):
+    """
+    Return a looped BGM AudioClip with volume ducked during narration periods.
+
+    duck_to: volume fraction applied while narration is active (0.15 = 15% of
+             bgm_volume — clearly audible but not competing with speech).
+    fade_secs: linear ramp duration at each duck boundary to avoid clicks.
+    Narration periods are read from the SRT subtitle file.
+    """
+    from moviepy.audio.AudioClip import AudioClip as _AudioClip
+    from app.services.subtitle import file_to_subtitles
+
+    _SR = 44100
+    n = int(math.ceil(audio_duration * _SR)) + 1
+
+    duck_vol = bgm_volume * duck_to
+    envelope = np.full(n, bgm_volume, dtype=np.float64)
+
+    if subtitle_path and os.path.exists(subtitle_path):
+        fade_n = max(1, int(fade_secs * _SR))
+        for _, time_str, _ in file_to_subtitles(subtitle_path):
+            parts = time_str.split(" --> ")
+            if len(parts) != 2:
+                continue
+            t_start = _srt_time_to_seconds(parts[0].strip())
+            t_end = _srt_time_to_seconds(parts[1].strip())
+            s = max(0, int(t_start * _SR))
+            e = min(n, int(t_end * _SR))
+            if e <= s:
+                continue
+            envelope[s:e] = duck_vol
+            half = (e - s) // 2
+            fl = min(fade_n, half)
+            if fl > 0:
+                envelope[s:s + fl] = np.linspace(bgm_volume, duck_vol, fl)
+                envelope[e - fl:e] = np.linspace(duck_vol, bgm_volume, fl)
+
+    bgm_raw = AudioFileClip(bgm_file).with_effects([afx.AudioLoop(duration=audio_duration)])
+
+    def make_frame(t):
+        frame = bgm_raw.get_frame(t)
+        return frame * float(envelope[min(int(t * _SR), n - 1)])
+
+    return _AudioClip(make_frame=make_frame, duration=audio_duration, fps=_SR)
+
+
+def concat_video_clips_with_crossfade(
+    clip_files: List[str],
+    clip_durations: List[float],
+    output_file: str,
+    threads: int,
+    output_dir: str,
+    crossfade_duration: float = 0.5,
+):
+    """
+    Concatenate clips using ffmpeg's xfade filter for smooth dissolves between cuts.
+    Falls back to regular concat if xfade fails (e.g. ffmpeg built without xfade).
+    crossfade_duration is clamped to at most half of the shortest clip.
+    """
+    if len(clip_files) == 1:
+        shutil.copy(clip_files[0], output_file)
+        return
+
+    min_dur = min(clip_durations) if clip_durations else crossfade_duration * 2
+    cf = min(crossfade_duration, min_dur / 2.0)
+    if cf <= 0:
+        concat_video_clips_with_ffmpeg(clip_files, output_file, threads, output_dir)
+        return
+
+    ffmpeg_bin = utils.get_ffmpeg_binary()
+    codec = _get_effective_video_codec()
+
+    inputs = []
+    for f in clip_files:
+        inputs += ["-i", f]
+
+    # Build a chained xfade filter: [0:v][1:v]xfade=...:offset=O1[v1];[v1][2:v]xfade=...:offset=O2[v2];...
+    n = len(clip_files)
+    filter_parts = []
+    offset = 0.0
+    prev_label = "[0:v]"
+    for i in range(1, n):
+        offset += clip_durations[i - 1] - cf
+        offset = max(0.0, offset)
+        label_out = f"[v{i}]" if i < n - 1 else "[vout]"
+        filter_parts.append(
+            f"{prev_label}[{i}:v]xfade=transition=fade"
+            f":duration={cf:.4f}:offset={offset:.4f}{label_out}"
+        )
+        prev_label = label_out
+
+    cmd = [
+        ffmpeg_bin, "-y",
+        *inputs,
+        "-filter_complex", ";".join(filter_parts),
+        "-map", "[vout]",
+        "-c:v", codec,
+        "-threads", str(threads or 2),
+        "-pix_fmt", "yuv420p",
+        output_file,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip()
+        logger.warning(f"xfade concat failed ({err[:200]}), falling back to regular concat")
+        concat_video_clips_with_ffmpeg(clip_files, output_file, threads, output_dir)
+
+
 def concat_video_clips_with_ffmpeg(
     clip_files: List[str], output_file: str, threads: int, output_dir: str
 ):
@@ -775,12 +897,22 @@ def combine_videos(
 
     clip_files = [clip.file_path for clip in processed_clips]
     logger.info(f"concatenating {len(clip_files)} clips with ffmpeg")
-    concat_video_clips_with_ffmpeg(
-        clip_files=clip_files,
-        output_file=combined_video_path,
-        threads=threads,
-        output_dir=output_dir,
-    )
+    if transition_value == VideoTransitionMode.crossfade.value:
+        clip_durations_list = [clip.duration for clip in processed_clips]
+        concat_video_clips_with_crossfade(
+            clip_files=clip_files,
+            clip_durations=clip_durations_list,
+            output_file=combined_video_path,
+            threads=threads,
+            output_dir=output_dir,
+        )
+    else:
+        concat_video_clips_with_ffmpeg(
+            clip_files=clip_files,
+            output_file=combined_video_path,
+            threads=threads,
+            output_dir=output_dir,
+        )
     
     # clean temp files
     delete_files(clip_files)
@@ -1051,13 +1183,25 @@ def generate_video(
     bgm_file = get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file)
     if bgm_file:
         try:
-            bgm_clip = AudioFileClip(bgm_file).with_effects(
-                [
-                    afx.MultiplyVolume(params.bgm_volume),
-                    afx.AudioFadeOut(3),
-                    afx.AudioLoop(duration=video_clip.duration),
-                ]
-            )
+            duck_ratio = float(config.app.get("bgm_duck_ratio", 0.15))
+            has_subtitles = bool(subtitle_path and os.path.exists(subtitle_path))
+            if has_subtitles and duck_ratio < 1.0:
+                logger.info(f"applying BGM ducking: {duck_ratio:.0%} during narration")
+                bgm_clip = _make_ducked_bgm(
+                    bgm_file=bgm_file,
+                    audio_duration=video_clip.duration,
+                    subtitle_path=subtitle_path,
+                    bgm_volume=params.bgm_volume,
+                    duck_to=duck_ratio,
+                )
+            else:
+                bgm_clip = AudioFileClip(bgm_file).with_effects(
+                    [
+                        afx.MultiplyVolume(params.bgm_volume),
+                        afx.AudioFadeOut(3),
+                        afx.AudioLoop(duration=video_clip.duration),
+                    ]
+                )
             audio_clip = CompositeAudioClip([audio_clip, bgm_clip])
         except Exception as e:
             logger.error(f"failed to add bgm: {str(e)}")

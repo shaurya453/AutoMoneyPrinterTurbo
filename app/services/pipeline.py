@@ -27,6 +27,7 @@ from app.models.schema import (
     VideoConcatMode,
     VideoAspect,
     VideoParams,
+    VideoTransitionMode,
 )
 from app.services import material, subtitle, video, voice
 from app.services import state as sm
@@ -93,6 +94,12 @@ def _uniform_timestamps(
     ]
 
 
+# Half of the dissolve duration added to each clip so the crossfade overlap
+# does not eat into the sentence's actual visual content.
+_CROSSFADE_DUR = 0.5
+_TRIM_BUFFER = 0.2 + _CROSSFADE_DUR / 2   # 0.45 s total padding per clip
+
+
 # ---------------------------------------------------------------------------
 # Clip fetch + trim
 # ---------------------------------------------------------------------------
@@ -154,7 +161,7 @@ def _fetch_clip(
             return None
         result = video.render_ken_burns_clip(
             image_path=image_path,
-            duration=sent_duration + 0.2,
+            duration=sent_duration + _TRIM_BUFFER,
             width=width,
             height=height,
             pan_direction=sentence.get("pan_direction"),
@@ -196,8 +203,7 @@ def _fetch_clip(
         logger.warning(f"clip {clip_idx}: download failed")
         return None
 
-    # Add a 0.2 s buffer so frame-rounding does not cut the clip short
-    ok = _trim_clip(downloaded, sent_duration + 0.2, out_path)
+    ok = _trim_clip(downloaded, sent_duration + _TRIM_BUFFER, out_path)
     if not ok:
         logger.warning(f"clip {clip_idx}: trim failed, using raw download")
         return downloaded
@@ -331,7 +337,7 @@ def start(job_path: str) -> Optional[dict]:
         audio_file=audio_file,
         video_aspect=video_aspect,
         video_concat_mode=VideoConcatMode.sequential,
-        video_transition_mode=None,
+        video_transition_mode=VideoTransitionMode.crossfade,
         # Clips are already pre-trimmed; use a large cap to avoid re-trimming.
         max_clip_duration=999,
         threads=2,
@@ -384,6 +390,7 @@ def start(job_path: str) -> Optional[dict]:
         bgm_volume=float(job.get("bgm_volume", 0.15)),
         subtitle_enabled=bool(job.get("subtitle_enabled", True)),
         subtitle_position=job.get("subtitle_position", "bottom"),
+        rounded_subtitle_background=True,
         font_name=job.get("font_name", "Charm-Bold.ttf"),
         text_fore_color=job.get("text_fore_color", "#FFFFFF"),
         font_size=int(job.get("font_size", 55)),
