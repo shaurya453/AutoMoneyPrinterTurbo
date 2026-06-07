@@ -342,7 +342,8 @@ def _make_ducked_bgm(
         vols = envelope[indices]
         return frame * (vols[:, np.newaxis] if frame.ndim == 2 else vols)
 
-    return _AudioClip(make_frame=make_frame, duration=audio_duration, fps=_SR)
+    # MoviePy 2.x renamed make_frame= to frame_function= in AudioClip
+    return _AudioClip(frame_function=make_frame, duration=audio_duration, fps=_SR)
 
 
 def concat_video_clips_with_crossfade(
@@ -360,6 +361,17 @@ def concat_video_clips_with_crossfade(
     """
     if len(clip_files) == 1:
         shutil.copy(clip_files[0], output_file)
+        return
+
+    # xfade builds one -i per clip and one filter per transition; impractical above ~40 clips
+    # and hits Windows CreateProcess command-line length limits for large clip counts.
+    _XFADE_CLIP_LIMIT = 40
+    if len(clip_files) > _XFADE_CLIP_LIMIT:
+        logger.info(
+            f"clip count {len(clip_files)} > {_XFADE_CLIP_LIMIT}, "
+            "skipping xfade and using list-file concat"
+        )
+        concat_video_clips_with_ffmpeg(clip_files, output_file, threads, output_dir)
         return
 
     min_dur = min(clip_durations) if clip_durations else crossfade_duration * 2
@@ -400,10 +412,16 @@ def concat_video_clips_with_crossfade(
         "-pix_fmt", "yuv420p",
         output_file,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if result.returncode != 0:
-        err = (result.stderr or result.stdout or "").strip()
-        logger.warning(f"xfade concat failed ({err[:200]}), falling back to regular concat")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        failed = result.returncode != 0
+        err_msg = (result.stderr or result.stdout or "").strip()
+    except OSError as exc:
+        failed = True
+        err_msg = str(exc)
+
+    if failed:
+        logger.warning(f"xfade concat failed ({err_msg[:200]}), falling back to regular concat")
         concat_video_clips_with_ffmpeg(clip_files, output_file, threads, output_dir)
 
 
@@ -552,7 +570,9 @@ def apply_ken_burns(
         frame = _PILImage.fromarray(cropped).resize((width, height), _PILImage.LANCZOS)
         return np.array(frame)
 
-    return _VideoClip(make_frame=make_frame, duration=duration, fps=fps)
+    # MoviePy 2.x: positional make_frame (not make_frame=), fps set via .with_fps()
+    clip = _VideoClip(make_frame, duration=duration)
+    return clip.with_fps(fps)
 
 
 def render_ken_burns_clip(
