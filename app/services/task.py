@@ -8,7 +8,7 @@ from loguru import logger
 from app.config import config
 from app.models import const
 from app.models.schema import VideoConcatMode, VideoParams
-from app.services import llm, material, subtitle, video, voice, upload_post
+from app.services import material, subtitle, video, voice
 from app.services import state as sm
 from app.utils import utils
 
@@ -17,21 +17,10 @@ def generate_script(task_id, params):
     logger.info("\n\n## generating video script")
     video_script = params.video_script.strip()
     if not video_script:
-        video_script = llm.generate_script(
-            video_subject=params.video_subject,
-            language=params.video_language,
-            paragraph_number=params.paragraph_number,
-            video_script_prompt=params.video_script_prompt,
-            custom_system_prompt=params.custom_system_prompt,
-        )
-    else:
-        logger.debug(f"video script: \n{video_script}")
-
-    if not video_script:
         sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
-        logger.error("failed to generate video script.")
+        logger.error("video_script is required in params; the agent must provide it.")
         return None
-
+    logger.debug(f"video script: \n{video_script}")
     return video_script
 
 
@@ -39,24 +28,20 @@ def generate_terms(task_id, params, video_script):
     logger.info("\n\n## generating video terms")
     video_terms = params.video_terms
     if not video_terms:
-        video_terms = llm.generate_terms(
-            video_subject=params.video_subject, video_script=video_script, amount=5
-        )
+        sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+        logger.error("video_terms is required in params; the agent must provide it.")
+        return None
+    if isinstance(video_terms, str):
+        video_terms = [term.strip() for term in re.split(r"[,，]", video_terms)]
+    elif isinstance(video_terms, list):
+        video_terms = [term.strip() for term in video_terms]
     else:
-        if isinstance(video_terms, str):
-            video_terms = [term.strip() for term in re.split(r"[,，]", video_terms)]
-        elif isinstance(video_terms, list):
-            video_terms = [term.strip() for term in video_terms]
-        else:
-            raise ValueError("video_terms must be a string or a list of strings.")
-
-        logger.debug(f"video terms: {utils.to_json(video_terms)}")
-
+        raise ValueError("video_terms must be a string or a list of strings.")
+    logger.debug(f"video terms: {utils.to_json(video_terms)}")
     if not video_terms:
         sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
-        logger.error("failed to generate video terms.")
+        logger.error("failed to parse video terms.")
         return None
-
     return video_terms
 
 
@@ -355,21 +340,6 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         f"task {task_id} finished, generated {len(final_video_paths)} videos."
     )
 
-    # 7. Cross-post to TikTok/Instagram (if enabled)
-    cross_post_results = []
-    if upload_post.upload_post_service.is_configured() and upload_post.upload_post_service.auto_upload:
-        logger.info("\n\n## cross-posting videos to TikTok/Instagram")
-        for video_path in final_video_paths:
-            result = upload_post.cross_post_video(
-                video_path=video_path,
-                title=params.video_subject or "Check out this video! #shorts #viral"
-            )
-            cross_post_results.append(result)
-            if result.get('success'):
-                logger.info(f"✅ Cross-posted: {video_path}")
-            else:
-                logger.warning(f"⚠️ Failed to cross-post: {video_path} - {result.get('error', 'Unknown error')}")
-
     kwargs = {
         "videos": final_video_paths,
         "combined_videos": combined_video_paths,
@@ -379,7 +349,6 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         "audio_duration": audio_duration,
         "subtitle_path": subtitle_path,
         "materials": downloaded_videos,
-        "cross_post_results": cross_post_results if cross_post_results else None,
     }
     sm.state.update_task(
         task_id, state=const.TASK_STATE_COMPLETE, progress=100, **kwargs
