@@ -99,6 +99,10 @@ def _uniform_timestamps(
 _CROSSFADE_DUR = 0.5
 _TRIM_BUFFER = 0.2 + _CROSSFADE_DUR / 2   # 0.45 s total padding per clip
 
+# Source clips longer than this are skipped so we don't download/use huge files.
+# Even if trimming fails the worst-case clip length is bounded.
+_MAX_SOURCE_CLIP_DURATION = 15  # seconds
+
 
 # ---------------------------------------------------------------------------
 # Clip fetch + trim
@@ -137,10 +141,14 @@ def _fetch_clip(
     video_aspect: VideoAspect,
     clip_idx: int,
     clips_dir: str,
+    used_urls: set,
 ) -> Optional[str]:
     """
     Download and prepare a clip (stock video or Ken Burns image) for one sentence.
     Returns the path to the ready-to-assemble MP4, or None if nothing found.
+
+    used_urls is mutated in-place: the chosen clip URL is added so subsequent
+    sentences won't reuse the same source footage.
     """
     search_terms = sentence.get("search_terms", [])
     if not search_terms:
@@ -187,16 +195,26 @@ def _fetch_clip(
             minimum_duration=min_duration,
             video_aspect=video_aspect,
         )
-        candidates.extend(items)
+        # Cap source duration so we don't download huge clips and so trim
+        # failures can't inject many seconds of unintended footage.
+        candidates.extend(
+            c for c in items if c.duration <= _MAX_SOURCE_CLIP_DURATION
+        )
         if candidates:
-            break  # first term that yields results is enough
+            break  # first term that yields usable results is enough
 
     if not candidates:
         logger.warning(f"clip {clip_idx}: no video results for terms {search_terms}")
         return None
 
+    # Pick the first candidate whose URL hasn't been used in this run.
+    chosen = next((c for c in candidates if c.url not in used_urls), candidates[0])
+    if chosen.url in used_urls:
+        logger.warning(f"clip {clip_idx}: all candidates already used — reusing {chosen.url}")
+    used_urls.add(chosen.url)
+
     downloaded = material.save_video(
-        video_url=candidates[0].url,
+        video_url=chosen.url,
         save_dir=utils.storage_dir("cache_videos"),
     )
     if not downloaded:
@@ -205,8 +223,8 @@ def _fetch_clip(
 
     ok = _trim_clip(downloaded, sent_duration + _TRIM_BUFFER, out_path)
     if not ok:
-        logger.warning(f"clip {clip_idx}: trim failed, using raw download")
-        return downloaded
+        logger.warning(f"clip {clip_idx}: trim failed — skipping clip")
+        return None
 
     return out_path
 
@@ -316,6 +334,7 @@ def start(job_path: str) -> Optional[dict]:
     os.makedirs(clips_dir, exist_ok=True)
 
     ordered_clips: List[str] = []
+    used_urls: set = set()  # tracks clip URLs used this run to prevent reuse
     total_sentences = len(timings)
     for idx, (sent, t_start, t_end) in enumerate(timings):
         sent_duration = max(t_end - t_start, 1.0)
@@ -329,6 +348,7 @@ def start(job_path: str) -> Optional[dict]:
             video_aspect=video_aspect,
             clip_idx=idx,
             clips_dir=clips_dir,
+            used_urls=used_urls,
         )
         if clip_path:
             ordered_clips.append(clip_path)
