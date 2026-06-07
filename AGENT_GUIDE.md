@@ -8,80 +8,103 @@ Read this file before every run.
 ## How the Pipeline Works
 
 ```
-script.txt  ──►  sentence_prep.py  ──►  job.json  ──►  [YOU REVIEW/EDIT]  ──►  cli.py  ──►  final.mp4
+script.txt  ──►  sentence_prep.py  ──►  job.json  ──►  [YOU ENRICH]  ──►  cli.py  ──►  final.mp4
 ```
 
-1. **`sentence_prep.py`** splits the script into sentences, extracts search terms, and writes a job JSON template.
-2. **You review and edit** the job JSON — override search terms, assign media types, set BGM.
+1. **`sentence_prep.py`** splits the script into sentences and writes a job JSON with stub search terms.
+2. **You read every sentence** and rewrite `search_terms`, `media_type`, and `pan_direction` for each one.
 3. **`cli.py`** runs the full pipeline: TTS → timestamp alignment → clip fetch → assembly → subtitles → final video.
 
 ---
 
 ## Step 1 — Generate the Job JSON
 
-**Recommended — LLM mode** (Claude understands context and sets media_type automatically):
-
-```bash
-python sentence_prep.py --script script.txt --out job.json --llm claude
-```
-
-Requires `ANTHROPIC_API_KEY` in the environment. Uses `claude-haiku-4-5-20251001` by default.
-Override the model with `--llm-model claude-sonnet-4-6` for harder scripts.
-
-OpenAI is also supported (`--llm openai`, requires `OPENAI_API_KEY`).
-
-**Fallback — NLTK mode** (no API key needed, coarser output):
-
 ```bash
 python sentence_prep.py --script script.txt --out job.json
 ```
 
-**All flags:**
+**Optional flags:**
 
-| Flag | Default | Description |
+| Flag | Default | Options |
 |---|---|---|
-| `--llm` | *(none)* | `claude` or `openai` — LLM enrichment (recommended) |
-| `--llm-model` | provider default | Override the LLM model name |
 | `--voice` | `en-US-AriaNeural` | Any edge_tts voice name |
 | `--rate` | `1.0` | `0.5` – `2.0` |
 | `--aspect` | `16:9` | `16:9`, `9:16`, `1:1` |
 | `--source` | `pexels` | `pexels`, `pixabay` |
-| `--terms` | `2` | `1`, `2`, `3` (NLTK mode only) |
+| `--terms` | `2` | `1`, `2`, `3` |
 
 ---
 
-## Step 2 — Review and Edit the Job JSON
+## Step 2 — Enrich Every Sentence (your main job)
 
-In **LLM mode** the search terms, media types, and pan directions are already filled in intelligently.
-Skim the output and fix any sentences where the model got the visual wrong.
+`sentence_prep.py` produces stub search terms using keyword extraction. **Do not trust them.**
+Read every sentence in `job.json` and set three fields yourself:
 
-In **NLTK mode** this is your primary responsibility — terms are crude and must be improved.
+### `search_terms`
 
-### Full Job JSON structure
+Think: *what would a stock footage camera actually show for this sentence?*
+
+- **Named product / brand / model** → use the exact name: `["iPhone 15 Pro", "Apple product launch"]`
+- **Named person** → use their name: `["Elon Musk interview", "tech CEO portrait"]`
+- **Named place** → use the place: `["Amazon rainforest aerial", "tropical deforestation"]`
+- **Action / process** → describe what the camera sees: `["surgeon operating room", "medical procedure"]`
+- **Abstract concept** → find a concrete visual metaphor: don't use `"hope"`, use `"sunrise over city"`
+- Always give **2 terms**: a specific first term, a broader fallback second term
+- Max **3 words per term**
+
+### `media_type`
+
+Set `"image"` when a **still photo** captures it better than stock video:
+
+| Use `"image"` for | Use `"video"` for |
+|---|---|
+| Specific products (iPhone, car model) | Generic action (people walking, traffic) |
+| Named people (portraits) | Processes (manufacturing, surgery) |
+| Historical events / archive photos | Scenery and environments |
+| Maps, logos, documents, screenshots | Anything with continuous motion |
+| Artworks, charts, diagrams | Generic category b-roll |
+
+### `pan_direction` (images only)
+
+Controls the Ken Burns camera move. Set it whenever `media_type` is `"image"`:
+
+| Value | When to use |
+|---|---|
+| `"right"` | Subject is on the left side of the frame — pan toward it |
+| `"left"` | Subject is on the right side |
+| `"up"` | Tall subject: building, full-body portrait, banner |
+| `"down"` | Reveal from top: overhead shot, document, menu |
+| *(omit)* | Centred or symmetrical subject — centre zoom only |
+
+Image search order: **Pexels Photos → Pixabay Images → Unsplash → Wikimedia Commons**
+Wikimedia needs no key and is best for historical/encyclopaedic subjects.
+
+---
+
+## Step 2 — Full Job JSON structure (reference)
 
 ```jsonc
 {
-  "task_id": "auto-generated-uuid",        // leave as-is or set your own
+  "task_id": "auto-generated-uuid",        // leave as-is
   "video_script": "Full script text...",   // do not edit
 
-  // --- Per-sentence entries (one per sentence) ---
   "sentences": [
     {
       "text": "The sentence as it appears in the script.",
-      "search_terms": ["term1", "term2"],  // EDIT THESE — see rules below
-      "media_type": "video",              // "video" or "image"
-      "pan_direction": "right"            // image-only: "left"|"right"|"up"|"down" (omit for centre zoom)
+      "search_terms": ["term1", "term2"],  // YOU write these
+      "media_type": "video",              // YOU decide: "video" or "image"
+      "pan_direction": "right"            // YOU set on image sentences
     }
   ],
 
   // --- Voice ---
-  "voice_name": "en-US-AndrewNeural",
+  "voice_name": "en-US-AriaNeural",
   "voice_rate": 1.0,
 
   // --- Video layout ---
   "video_aspect": "16:9",          // "16:9" | "9:16" | "1:1"
   "video_clip_duration": 5,        // not used by pipeline (kept for schema compat)
-  "video_source": "pexels",        // stock video provider: "pexels" | "pixabay"
+  "video_source": "pexels",        // "pexels" | "pixabay"
 
   // --- Subtitles ---
   "subtitle_enabled": true,
@@ -93,76 +116,36 @@ In **NLTK mode** this is your primary responsibility — terms are crude and mus
   "stroke_width": 1.5,
 
   // --- Background music ---
-  "bgm_search_term": "",           // set a search query to fetch BGM from Jamendo online
-  "bgm_file": "random",            // fallback if bgm_search_term is empty: "random" | "none" | filename
+  "bgm_search_term": "",           // search query for Jamendo online fetch
+  "bgm_file": "random",            // fallback: "random" | "none" | filename
   "bgm_volume": 0.15               // 0.0 – 1.0
 }
 ```
 
 ---
 
-## Step 2a — Search Term Rules
-
-Search terms are sent directly to Pexels or Pixabay. Quality here directly determines visual quality.
-
-**Do:**
-- Use **concrete, visual nouns**: `"crowded city street"`, `"surgical procedure"`, `"1970s protest march"`
-- Use **proper nouns** for named subjects: `"Amazon rainforest"`, `"Wall Street trading floor"`
-- Use **2 terms per sentence** — the pipeline tries them in order and stops at the first that returns results
-- Make the second term a **broader fallback**: `["Pinochet stadium", "political prisoners Chile"]`
-
-**Don't:**
-- Leave abstract emotional terms: `"fear"`, `"hope"`, `"the truth"` — replace them with concrete visuals
-- Repeat the sentence text verbatim
-- Use more than 3 words per term
-
----
-
-## Step 2b — Media Type Rules
-
-Set `"media_type": "image"` when the sentence requires a **specific still** that stock footage cannot provide:
-
-- Historical photos, maps, portraits of real people, documents, artworks
-- Diagrams, charts, logos, screenshots
-- Any subject where motion would be distracting or inaccurate
-
-Images are automatically animated with a **Ken Burns effect** (slow zoom + pan). Set `"pan_direction"` to guide the eye:
-
-| Value | Use when |
-|---|---|
-| `"right"` | Subject is on the left, pan toward it |
-| `"left"` | Subject is on the right |
-| `"up"` | Revealing top of frame (e.g. tall building, full portrait) |
-| `"down"` | Revealing bottom of frame |
-| *(omit)* | Centre zoom only — good for symmetrical subjects |
-
-Image search order: **Pexels Photos → Pixabay Images → Unsplash → Wikimedia Commons**
-Wikimedia needs no key and is best for historical/encyclopaedic subjects.
-
----
-
-## Step 2c — Background Music
+## Step 2 — Background Music
 
 **To fetch music online (recommended):**
 ```jsonc
 "bgm_search_term": "cinematic documentary score",
-"bgm_file": "random"   // used as fallback only
+"bgm_file": "random"
 ```
-The pipeline searches Jamendo (free music, requires `jamendo_client_id` in `config.toml`) and downloads a matching track. Falls back to a random local file if the search fails.
+Searches Jamendo (requires `jamendo_client_id` in `config.toml`). Falls back to a random local file.
 
-**To use a random local file:**
+**Random local file:**
 ```jsonc
 "bgm_search_term": "",
 "bgm_file": "random"
 ```
 
-**To disable BGM:**
+**No BGM:**
 ```jsonc
 "bgm_search_term": "",
 "bgm_file": "none"
 ```
 
-BGM is automatically **ducked to 15% volume** during narration and rises back between sentences.
+BGM is automatically **ducked to 15%** during narration and rises back between sentences.
 
 ---
 
@@ -209,8 +192,8 @@ TTS (edge_tts)
 
 ## Common Mistakes to Avoid
 
-- **Abstract search terms** — always visualise what the camera would show
-- **Setting `media_type: "image"` for action scenes** — use video for anything with movement
+- **Trusting the stub search terms** — rewrite all of them, they are a scaffold not a answer
+- **Using abstract terms** — always picture what a camera lens would physically show
+- **Leaving `media_type: "video"` for a specific product or person** — use `"image"` so the exact subject is searched for
+- **Forgetting `pan_direction` on portrait images** — default centre zoom looks static on tall subjects
 - **Leaving `bgm_search_term` blank on emotional content** — music significantly improves impact
-- **Not setting `pan_direction` on portrait images** — default centre zoom looks static on tall subjects
-- **Skipping the job review step** — auto-extracted terms are adequate but not optimal; your edits are the difference between a generic and a polished video
