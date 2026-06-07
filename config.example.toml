@@ -102,6 +102,11 @@ material_directory = ""
 # Used only when subtitle_provider = "whisper"
 # ---------------------------------------------------------------------------
 
+# Controls the faster-whisper model used in TWO places:
+#   1. Always — sentence timestamp alignment in pipeline.py
+#      (maps each sentence to its exact start/end time in the audio)
+#   2. When subtitle_provider = "whisper" — .srt subtitle generation
+#      (default is "edge" above, which skips this step)
 [whisper]
 # CPU-only VPS settings — "base" model keeps RAM usage low.
 # Upgrade to "medium" or "large-v3" on machines with more RAM/CPU budget.
