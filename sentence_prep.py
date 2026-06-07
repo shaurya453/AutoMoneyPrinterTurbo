@@ -126,6 +126,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--script", required=True, help="Path to plain-text script file")
     p.add_argument("--out", required=True, help="Output path for job JSON")
+    p.add_argument("--title", default=None, help="Video title — used as the output folder name")
     p.add_argument(
         "--voice", default="en-US-AriaNeural",
         help="edge_tts voice name (default: en-US-AriaNeural)",
@@ -192,6 +193,7 @@ def main():
 
     job = {
         "task_id": task_id,
+        "video_title": args.title or "",
         "video_script": raw_text.strip(),
         "sentences": sentence_entries,
         "voice_name": args.voice,

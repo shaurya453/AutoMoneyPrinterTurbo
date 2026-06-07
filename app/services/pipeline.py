@@ -16,6 +16,7 @@ Job JSON is produced by sentence_prep.py.
 import json
 import math
 import os
+import re
 import subprocess
 from typing import List, Optional, Tuple
 
@@ -256,6 +257,39 @@ def _resolve_bgm(job: dict) -> Tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Work-directory resolution
+# ---------------------------------------------------------------------------
+
+def _slugify(title: str) -> str:
+    """Return a filesystem-safe version of title, preserving readability."""
+    # Strip characters illegal on Windows and Unix filesystems
+    slug = re.sub(r'[\\/:*?"<>|]', "", title)
+    # Collapse runs of whitespace/dots to a single space
+    slug = re.sub(r"[\s.]+", " ", slug).strip()
+    return slug or "untitled"
+
+
+def _make_work_dir(title: str) -> str:
+    """
+    Return a unique path under storage/tasks/ named after the video title.
+    If the folder already exists, append (2), (3), … until a free name is found.
+    """
+    slug = _slugify(title)
+    base = utils.task_dir()  # ensures storage/tasks/ exists
+    candidate = os.path.join(base, slug)
+    if not os.path.exists(candidate):
+        os.makedirs(candidate)
+        return candidate
+    counter = 2
+    while True:
+        candidate = os.path.join(base, f"{slug} ({counter})")
+        if not os.path.exists(candidate):
+            os.makedirs(candidate)
+            return candidate
+        counter += 1
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -278,9 +312,13 @@ def start(job_path: str) -> Optional[dict]:
         logger.error("job.sentences is empty — run sentence_prep.py first")
         return None
 
-    work_dir = utils.task_dir(task_id)
+    video_title: str = job.get("video_title", "").strip()
+    if video_title:
+        work_dir = _make_work_dir(video_title)
+    else:
+        work_dir = utils.task_dir(task_id)
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=5)
-    logger.info(f"pipeline start | task={task_id} | sentences={len(sentences)}")
+    logger.info(f"pipeline start | task={task_id} | folder={os.path.basename(work_dir)} | sentences={len(sentences)}")
 
     # ------------------------------------------------------------------ #
     # 1. TTS                                                               #

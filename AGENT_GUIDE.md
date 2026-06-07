@@ -25,8 +25,9 @@ python sentence_prep.py --script script.txt --out job.json
 
 **Optional flags:**
 
-| Flag | Default | Options |
+| Flag | Default | Description |
 |---|---|---|
+| `--title` | *(none)* | Video title — used as the output folder name under `storage/tasks/`. Re-running with the same title creates `Title (2)`, `Title (3)`, etc. |
 | `--voice` | `en-US-AriaNeural` | Any edge_tts voice name |
 | `--rate` | `1.0` | `0.5` – `2.0` |
 | `--aspect` | `16:9` | `16:9`, `9:16`, `1:1` |
