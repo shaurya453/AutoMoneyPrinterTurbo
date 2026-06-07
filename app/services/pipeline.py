@@ -132,14 +132,40 @@ def _fetch_clip(
     clips_dir: str,
 ) -> Optional[str]:
     """
-    Search, download, and trim a stock clip for one sentence.
-    Returns the path to the trimmed clip, or None if nothing found.
+    Download and prepare a clip (stock video or Ken Burns image) for one sentence.
+    Returns the path to the ready-to-assemble MP4, or None if nothing found.
     """
     search_terms = sentence.get("search_terms", [])
     if not search_terms:
         logger.warning(f"clip {clip_idx}: no search terms provided")
         return None
 
+    width, height = VideoAspect(video_aspect).to_resolution()
+    out_path = os.path.join(clips_dir, f"clip-{clip_idx:04d}.mp4")
+
+    # ---- image sentences: Ken Burns effect ----
+    if sentence.get("media_type") == "image":
+        image_path = material.download_image(
+            search_terms=search_terms,
+            save_dir=utils.storage_dir("cache_images"),
+        )
+        if not image_path:
+            logger.warning(f"clip {clip_idx}: no image found for terms {search_terms}")
+            return None
+        result = video.render_ken_burns_clip(
+            image_path=image_path,
+            duration=sent_duration + 0.2,
+            width=width,
+            height=height,
+            pan_direction=sentence.get("pan_direction"),
+            output_path=out_path,
+            threads=2,
+        )
+        if not result:
+            logger.warning(f"clip {clip_idx}: Ken Burns render failed")
+        return result or None
+
+    # ---- video sentences: download + trim ----
     search_fn = (
         material.search_videos_pixabay
         if source == "pixabay"
@@ -159,7 +185,7 @@ def _fetch_clip(
             break  # first term that yields results is enough
 
     if not candidates:
-        logger.warning(f"clip {clip_idx}: no results for terms {search_terms}")
+        logger.warning(f"clip {clip_idx}: no video results for terms {search_terms}")
         return None
 
     downloaded = material.save_video(
@@ -171,13 +197,12 @@ def _fetch_clip(
         return None
 
     # Add a 0.2 s buffer so frame-rounding does not cut the clip short
-    trimmed_path = os.path.join(clips_dir, f"clip-{clip_idx:04d}.mp4")
-    ok = _trim_clip(downloaded, sent_duration + 0.2, trimmed_path)
+    ok = _trim_clip(downloaded, sent_duration + 0.2, out_path)
     if not ok:
         logger.warning(f"clip {clip_idx}: trim failed, using raw download")
         return downloaded
 
-    return trimmed_path
+    return out_path
 
 
 # ---------------------------------------------------------------------------

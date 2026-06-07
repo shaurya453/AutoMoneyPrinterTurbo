@@ -293,6 +293,206 @@ def download_videos(
     return video_paths
 
 
+# ---------------------------------------------------------------------------
+# Image search + download
+# ---------------------------------------------------------------------------
+
+def search_images_pexels(search_term: str, n: int = 5) -> List[str]:
+    """Return up to n image URLs from Pexels Photos API."""
+    try:
+        api_key = get_api_key("pexels_api_keys")
+    except ValueError:
+        logger.warning("pexels_api_keys not configured, skipping Pexels image search")
+        return []
+    headers = {
+        "Authorization": api_key,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    }
+    params = {"query": search_term, "per_page": n, "orientation": "landscape"}
+    url = f"https://api.pexels.com/v1/search?{urlencode(params)}"
+    try:
+        r = requests.get(
+            url, headers=headers, proxies=config.proxy,
+            verify=_get_tls_verify(), timeout=(30, 60),
+        )
+        photos = r.json().get("photos", [])
+        return [
+            p["src"].get("large2x") or p["src"]["original"]
+            for p in photos
+            if p.get("src")
+        ]
+    except Exception as e:
+        logger.error(f"Pexels image search failed: {e}")
+        return []
+
+
+def search_images_pixabay(search_term: str, n: int = 5) -> List[str]:
+    """Return up to n image URLs from Pixabay Images API."""
+    try:
+        api_key = get_api_key("pixabay_api_keys")
+    except ValueError:
+        logger.warning("pixabay_api_keys not configured, skipping Pixabay image search")
+        return []
+    params = {
+        "q": search_term,
+        "image_type": "photo",
+        "per_page": n,
+        "key": api_key,
+    }
+    url = f"https://pixabay.com/api/?{urlencode(params)}"
+    try:
+        r = requests.get(
+            url, proxies=config.proxy, verify=_get_tls_verify(), timeout=(30, 60)
+        )
+        hits = r.json().get("hits", [])
+        return [
+            h.get("largeImageURL") or h.get("webformatURL")
+            for h in hits
+            if h.get("largeImageURL") or h.get("webformatURL")
+        ]
+    except Exception as e:
+        logger.error(f"Pixabay image search failed: {e}")
+        return []
+
+
+def search_images_unsplash(search_term: str, n: int = 5) -> List[str]:
+    """Return up to n image URLs from Unsplash API."""
+    try:
+        api_key = get_api_key("unsplash_api_keys")
+    except ValueError:
+        logger.warning("unsplash_api_keys not configured, skipping Unsplash image search")
+        return []
+    headers = {"Authorization": f"Client-ID {api_key}"}
+    params = {"query": search_term, "per_page": n, "orientation": "landscape"}
+    url = f"https://api.unsplash.com/search/photos?{urlencode(params)}"
+    try:
+        r = requests.get(
+            url, headers=headers, proxies=config.proxy,
+            verify=_get_tls_verify(), timeout=(30, 60),
+        )
+        results = r.json().get("results", [])
+        return [
+            p["urls"].get("full") or p["urls"].get("regular")
+            for p in results
+            if p.get("urls")
+        ]
+    except Exception as e:
+        logger.error(f"Unsplash image search failed: {e}")
+        return []
+
+
+def search_images_wikimedia(search_term: str, n: int = 5) -> List[str]:
+    """Return up to n image URLs from Wikimedia Commons (no API key required)."""
+    params = {
+        "action": "query",
+        "generator": "search",
+        "gsrnamespace": "6",    # File: namespace
+        "gsrsearch": search_term,
+        "gsrlimit": str(n),
+        "prop": "imageinfo",
+        "iiprop": "url",
+        "iiurlwidth": "1920",
+        "format": "json",
+    }
+    url = f"https://commons.wikimedia.org/w/api.php?{urlencode(params)}"
+    headers = {"User-Agent": "MoneyPrinterTurbo/1.0 (documentary-pipeline)"}
+    try:
+        r = requests.get(
+            url, headers=headers, proxies=config.proxy,
+            verify=_get_tls_verify(), timeout=(30, 60),
+        )
+        pages = r.json().get("query", {}).get("pages", {})
+        urls = []
+        for page in pages.values():
+            info = page.get("imageinfo", [])
+            if info:
+                thumb = info[0].get("thumburl") or info[0].get("url")
+                if thumb:
+                    urls.append(thumb)
+        return urls
+    except Exception as e:
+        logger.error(f"Wikimedia image search failed: {e}")
+        return []
+
+
+def save_image(image_url: str, save_dir: str = "") -> str:
+    """Download an image URL and return its local path. Returns '' on failure."""
+    if not save_dir:
+        save_dir = utils.storage_dir("cache_images")
+    os.makedirs(save_dir, exist_ok=True)
+
+    url_clean = image_url.split("?")[0]
+    url_hash = utils.md5(url_clean)
+    ext = os.path.splitext(url_clean)[-1].lower()
+    if ext not in (".jpg", ".jpeg", ".png", ".webp"):
+        ext = ".jpg"
+    image_path = os.path.join(save_dir, f"img-{url_hash}{ext}")
+
+    if os.path.exists(image_path) and os.path.getsize(image_path) > 0:
+        logger.info(f"image already cached: {image_path}")
+        return image_path
+
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    try:
+        r = requests.get(
+            image_url, headers=headers, proxies=config.proxy,
+            verify=_get_tls_verify(), timeout=(30, 120),
+        )
+        r.raise_for_status()
+        with open(image_path, "wb") as fh:
+            fh.write(r.content)
+        if os.path.exists(image_path) and os.path.getsize(image_path) > 0:
+            return image_path
+    except Exception as e:
+        logger.error(f"image download failed: {image_url} => {e}")
+    return ""
+
+
+_IMAGE_PROVIDERS = {
+    "pexels": search_images_pexels,
+    "pixabay": search_images_pixabay,
+    "unsplash": search_images_unsplash,
+    "wikimedia": search_images_wikimedia,
+}
+
+_DEFAULT_IMAGE_SOURCE_ORDER = ["pexels", "pixabay", "unsplash", "wikimedia"]
+
+
+def download_image(
+    search_terms: List[str],
+    source_order: List[str] = None,
+    save_dir: str = "",
+) -> str:
+    """
+    Search for a still image using multiple providers in priority order and
+    download the first result found.  Returns a local file path or '' if all
+    providers and terms are exhausted.
+
+    source_order: provider names to try in order.  Defaults to
+        ["pexels", "pixabay", "unsplash", "wikimedia"].
+    """
+    if source_order is None:
+        source_order = _DEFAULT_IMAGE_SOURCE_ORDER
+
+    for term in search_terms:
+        for provider in source_order:
+            fn = _IMAGE_PROVIDERS.get(provider)
+            if fn is None:
+                logger.warning(f"unknown image provider: {provider}")
+                continue
+            urls = fn(term, n=3)
+            for url in urls:
+                if not url:
+                    continue
+                local = save_image(url, save_dir)
+                if local:
+                    logger.info(f"image obtained via {provider} for '{term}': {local}")
+                    return local
+
+    logger.warning(f"no image found for terms {search_terms} from {source_order}")
+    return ""
+
+
 if __name__ == "__main__":
     download_videos(
         "test123", ["Money Exchange Medium"], audio_duration=100, source="pixabay"

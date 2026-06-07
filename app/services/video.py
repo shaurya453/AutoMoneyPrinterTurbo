@@ -362,6 +362,99 @@ def _open_image_clip_with_fallback(image_path: str):
         return ImageClip(sanitized_path), sanitized_path
 
 
+def apply_ken_burns(
+    image_path: str,
+    duration: float,
+    width: int,
+    height: int,
+    pan_direction: str = None,
+    zoom_factor: float = 1.15,
+):
+    """
+    Create a Ken Burns VideoClip from a still image: slow zoom-in with optional pan.
+
+    The image is pre-scaled to zoom_factor × the target dimensions, giving room
+    for the crop window to move.  At t=0 the crop is centred and wide; by t=duration
+    it has shrunk by zoom_factor (zoomed in).  pan_direction shifts the crop window
+    across the image as time progresses.
+
+    pan_direction: "left" | "right" | "up" | "down" | None (centre zoom only)
+    Returns a VideoClip of size (width, height) and the given duration.
+    """
+    from moviepy.video.VideoClip import VideoClip as _VideoClip
+    from PIL import Image as _PILImage
+
+    # Pre-scale image so it is at least zoom_factor × the target in both axes
+    with _PILImage.open(image_path) as img:
+        img = img.convert("RGB")
+        scale = max(width * zoom_factor / img.width, height * zoom_factor / img.height)
+        large_w = max(int(img.width * scale), width + 2)
+        large_h = max(int(img.height * scale), height + 2)
+        img_large = img.resize((large_w, large_h), _PILImage.LANCZOS)
+        img_arr = np.array(img_large)   # (large_h, large_w, 3)
+
+    def make_frame(t: float) -> np.ndarray:
+        progress = t / max(duration, 1e-6)
+        zoom = 1.0 + (zoom_factor - 1.0) * progress
+        crop_w = max(1, min(int(large_w / zoom), large_w))
+        crop_h = max(1, min(int(large_h / zoom), large_h))
+        max_x = large_w - crop_w
+        max_y = large_h - crop_h
+
+        if pan_direction == "right":
+            x0 = int(max_x * progress)
+            y0 = max_y // 2
+        elif pan_direction == "left":
+            x0 = int(max_x * (1.0 - progress))
+            y0 = max_y // 2
+        elif pan_direction == "up":
+            x0 = max_x // 2
+            y0 = int(max_y * progress)
+        elif pan_direction == "down":
+            x0 = max_x // 2
+            y0 = int(max_y * (1.0 - progress))
+        else:
+            x0 = max_x // 2
+            y0 = max_y // 2
+
+        x0 = max(0, min(x0, max_x))
+        y0 = max(0, min(y0, max_y))
+        cropped = img_arr[y0:y0 + crop_h, x0:x0 + crop_w]
+        frame = _PILImage.fromarray(cropped).resize((width, height), _PILImage.LANCZOS)
+        return np.array(frame)
+
+    return _VideoClip(make_frame=make_frame, duration=duration)
+
+
+def render_ken_burns_clip(
+    image_path: str,
+    duration: float,
+    width: int,
+    height: int,
+    pan_direction: str,
+    output_path: str,
+    threads: int = 2,
+) -> str:
+    """
+    Render a Ken Burns clip from image_path to an MP4 at output_path.
+    Returns output_path on success, '' on failure.
+    """
+    clip = apply_ken_burns(image_path, duration, width, height, pan_direction)
+    try:
+        _write_videofile_with_codec_fallback(
+            clip,
+            output_file=output_path,
+            codec=_get_configured_video_codec(),
+            audio=False,
+            fps=fps,
+            threads=threads,
+            logger=None,
+        )
+    finally:
+        close_clip(clip)
+    return output_path if os.path.exists(output_path) else ""
+
+
 def _open_video_clip_quietly(video_path: str, audio: bool = False) -> VideoFileClip:
     """
     安静地打开视频文件，避免 MoviePy 2.1.x 把 ffmpeg 探测信息直接打印到 stdout。
