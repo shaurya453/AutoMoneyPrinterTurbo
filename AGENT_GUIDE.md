@@ -19,25 +19,43 @@ script.txt  ──►  sentence_prep.py  ──►  job.json  ──►  [YOU RE
 
 ## Step 1 — Generate the Job JSON
 
+**Recommended — LLM mode** (Claude understands context and sets media_type automatically):
+
+```bash
+python sentence_prep.py --script script.txt --out job.json --llm claude
+```
+
+Requires `ANTHROPIC_API_KEY` in the environment. Uses `claude-haiku-4-5-20251001` by default.
+Override the model with `--llm-model claude-sonnet-4-6` for harder scripts.
+
+OpenAI is also supported (`--llm openai`, requires `OPENAI_API_KEY`).
+
+**Fallback — NLTK mode** (no API key needed, coarser output):
+
 ```bash
 python sentence_prep.py --script script.txt --out job.json
 ```
 
-**Optional flags:**
+**All flags:**
 
-| Flag | Default | Options |
+| Flag | Default | Description |
 |---|---|---|
+| `--llm` | *(none)* | `claude` or `openai` — LLM enrichment (recommended) |
+| `--llm-model` | provider default | Override the LLM model name |
 | `--voice` | `en-US-AriaNeural` | Any edge_tts voice name |
 | `--rate` | `1.0` | `0.5` – `2.0` |
 | `--aspect` | `16:9` | `16:9`, `9:16`, `1:1` |
 | `--source` | `pexels` | `pexels`, `pixabay` |
-| `--terms` | `2` | `1`, `2`, `3` |
+| `--terms` | `2` | `1`, `2`, `3` (NLTK mode only) |
 
 ---
 
 ## Step 2 — Review and Edit the Job JSON
 
-This is your primary responsibility. The auto-extracted search terms are a starting point — you must improve them.
+In **LLM mode** the search terms, media types, and pan directions are already filled in intelligently.
+Skim the output and fix any sentences where the model got the visual wrong.
+
+In **NLTK mode** this is your primary responsibility — terms are crude and must be improved.
 
 ### Full Job JSON structure
 
