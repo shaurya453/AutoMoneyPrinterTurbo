@@ -99,10 +99,6 @@ def _uniform_timestamps(
 _CROSSFADE_DUR = 0.5
 _TRIM_BUFFER = 0.2 + _CROSSFADE_DUR / 2   # 0.45 s total padding per clip
 
-# Source clips longer than this are skipped so we don't download/use huge files.
-# Even if trimming fails the worst-case clip length is bounded.
-_MAX_SOURCE_CLIP_DURATION = 15  # seconds
-
 
 # ---------------------------------------------------------------------------
 # Clip fetch + trim
@@ -195,11 +191,7 @@ def _fetch_clip(
             minimum_duration=min_duration,
             video_aspect=video_aspect,
         )
-        # Cap source duration so we don't download huge clips and so trim
-        # failures can't inject many seconds of unintended footage.
-        candidates.extend(
-            c for c in items if c.duration <= _MAX_SOURCE_CLIP_DURATION
-        )
+        candidates.extend(items)
         if candidates:
             break  # first term that yields usable results is enough
 
