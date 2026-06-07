@@ -228,6 +228,9 @@ def main():
         "stroke_color": "#000000",
         "stroke_width": 1.5,
         "subtitle_position": "bottom",
+        # bgm_search_term: set a search query to fetch BGM from Jamendo online.
+        # Leave "" to fall back to bgm_file behaviour (random local or none).
+        "bgm_search_term": "",
         "bgm_file": "random",
         "bgm_volume": 0.15,
         "video_source": args.source,

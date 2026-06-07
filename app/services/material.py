@@ -493,6 +493,90 @@ def download_image(
     return ""
 
 
+# ---------------------------------------------------------------------------
+# BGM search + download  (online sources — no local folder required)
+# ---------------------------------------------------------------------------
+
+def search_bgm_jamendo(search_term: str, n: int = 3) -> List[str]:
+    """
+    Search Jamendo for free background music.
+    Requires jamendo_client_id in config.toml [app] section.
+    Get a free client ID at https://devportal.jamendo.com/
+    Returns a list of MP3 download URLs.
+    """
+    client_id = config.app.get("jamendo_client_id", "")
+    if not client_id:
+        logger.debug("jamendo_client_id not configured, skipping Jamendo BGM search")
+        return []
+    params = {
+        "client_id": client_id,
+        "format": "json",
+        "limit": n,
+        "search": search_term,
+        "audiodownload_allowed": "true",
+        "audioformat": "mp32",
+        "order": "relevance",
+    }
+    url = f"https://api.jamendo.com/v3.0/tracks/?{urlencode(params)}"
+    try:
+        r = requests.get(
+            url, proxies=config.proxy, verify=_get_tls_verify(), timeout=(30, 60)
+        )
+        tracks = r.json().get("results", [])
+        return [t["audiodownload"] for t in tracks if t.get("audiodownload")]
+    except Exception as e:
+        logger.error(f"Jamendo BGM search failed: {e}")
+        return []
+
+
+def save_bgm(bgm_url: str, save_dir: str = "") -> str:
+    """Download a BGM audio file and cache it locally. Returns local path or '' on failure."""
+    if not save_dir:
+        save_dir = utils.storage_dir("cache_bgm")
+    os.makedirs(save_dir, exist_ok=True)
+
+    url_hash = utils.md5(bgm_url.split("?")[0])
+    bgm_path = os.path.join(save_dir, f"bgm-{url_hash}.mp3")
+
+    if os.path.exists(bgm_path) and os.path.getsize(bgm_path) > 0:
+        logger.info(f"BGM already cached: {bgm_path}")
+        return bgm_path
+
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    try:
+        r = requests.get(
+            bgm_url, headers=headers, proxies=config.proxy,
+            verify=_get_tls_verify(), timeout=(60, 240),
+        )
+        r.raise_for_status()
+        with open(bgm_path, "wb") as fh:
+            fh.write(r.content)
+        if os.path.exists(bgm_path) and os.path.getsize(bgm_path) > 0:
+            return bgm_path
+    except Exception as e:
+        logger.error(f"BGM download failed: {bgm_url} => {e}")
+    return ""
+
+
+def download_bgm(search_term: str, save_dir: str = "") -> str:
+    """
+    Search online music providers for a background music track and download it.
+    Currently supported: Jamendo (jamendo_client_id required in config).
+    Returns local MP3 path on success, '' if nothing found.
+    """
+    for search_fn in [search_bgm_jamendo]:
+        urls = search_fn(search_term, n=3)
+        for url in urls:
+            if not url:
+                continue
+            local = save_bgm(url, save_dir)
+            if local:
+                logger.info(f"BGM obtained online for '{search_term}': {local}")
+                return local
+    logger.warning(f"no BGM found online for '{search_term}', will use local fallback")
+    return ""
+
+
 if __name__ == "__main__":
     download_videos(
         "test123", ["Money Exchange Medium"], audio_duration=100, source="pixabay"

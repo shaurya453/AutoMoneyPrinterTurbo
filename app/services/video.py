@@ -1,6 +1,7 @@
 import glob
 import itertools
 import io
+import math
 import os
 import random
 import gc
@@ -333,7 +334,13 @@ def _make_ducked_bgm(
 
     def make_frame(t):
         frame = bgm_raw.get_frame(t)
-        return frame * float(envelope[min(int(t * _SR), n - 1)])
+        if np.ndim(t) == 0:  # scalar
+            idx = min(int(t * _SR), n - 1)
+            return frame * float(envelope[idx])
+        # array of time values — MoviePy batches audio rendering this way
+        indices = np.clip((np.asarray(t) * _SR).astype(int), 0, n - 1)
+        vols = envelope[indices]
+        return frame * (vols[:, np.newaxis] if frame.ndim == 2 else vols)
 
     return _AudioClip(make_frame=make_frame, duration=audio_duration, fps=_SR)
 
@@ -545,7 +552,7 @@ def apply_ken_burns(
         frame = _PILImage.fromarray(cropped).resize((width, height), _PILImage.LANCZOS)
         return np.array(frame)
 
-    return _VideoClip(make_frame=make_frame, duration=duration)
+    return _VideoClip(make_frame=make_frame, duration=duration, fps=fps)
 
 
 def render_ken_burns_clip(
@@ -681,16 +688,18 @@ def get_bgm_file(bgm_type: str = "random", bgm_file: str = ""):
         return ""
 
     if bgm_file:
-        song_dir = utils.song_dir()
-        try:
-            resolved_bgm_file = _resolve_bgm_file_path(song_dir, bgm_file)
-        except ValueError as exc:
-            # API 请求里的 bgm_file 来自用户输入，不能直接把任意绝对路径交给
-            # MoviePy 打开。这里强制限制到 resource/songs 目录，阻止读取
-            # /etc/passwd、配置文件、密钥等非背景音乐文件。
-            logger.warning(
-                f"reject unsafe bgm file: {bgm_file}, song_dir: {song_dir}, error: {str(exc)}"
-            )
+        # Allowed source directories: local song library + pipeline-downloaded cache
+        allowed_dirs = [utils.song_dir(), utils.storage_dir("cache_bgm")]
+        resolved_bgm_file = None
+        for d in allowed_dirs:
+            try:
+                resolved_bgm_file = file_security.resolve_path_within_directory(d, bgm_file)
+                break
+            except ValueError:
+                continue
+
+        if resolved_bgm_file is None:
+            logger.warning(f"reject unsafe bgm file (not in any allowed dir): {bgm_file}")
             return ""
 
         if not resolved_bgm_file.lower().endswith(_BGM_EXTENSIONS):

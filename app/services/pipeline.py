@@ -215,14 +215,34 @@ def _fetch_clip(
 # BGM helpers
 # ---------------------------------------------------------------------------
 
-def _bgm_params(job: dict) -> Tuple[str, str]:
-    """Return (bgm_type, bgm_file) suitable for VideoParams from job dict."""
+def _resolve_bgm(job: dict) -> Tuple[str, str]:
+    """
+    Resolve BGM source for this job and return (bgm_type, bgm_file) for VideoParams.
+
+    Priority:
+      1. bgm_search_term  — search Jamendo online and download; falls back to random local
+      2. bgm_file = "random" — pick a random file from resource/songs/
+      3. bgm_file = "none" / "" — no BGM
+      4. bgm_file = "/path/or/name" — explicit local file
+    """
+    search_term = job.get("bgm_search_term", "").strip()
+    if search_term:
+        logger.info(f"searching for BGM online: '{search_term}'")
+        downloaded = material.download_bgm(
+            search_term=search_term,
+            save_dir=utils.storage_dir("cache_bgm"),
+        )
+        if downloaded:
+            return "downloaded", downloaded
+        logger.warning("online BGM search failed — falling back to random local file")
+        return "random", ""
+
     raw = job.get("bgm_file", "random")
     if not raw or raw.lower() in ("", "none"):
         return "", ""
     if raw == "random":
         return "random", ""
-    return "", raw  # explicit file path
+    return "", raw  # explicit local path or filename
 
 
 # ---------------------------------------------------------------------------
@@ -377,7 +397,7 @@ def start(job_path: str) -> Optional[dict]:
     # ------------------------------------------------------------------ #
     # 6. Final video                                                       #
     # ------------------------------------------------------------------ #
-    bgm_type, bgm_file = _bgm_params(job)
+    bgm_type, bgm_file = _resolve_bgm(job)
     params = VideoParams(
         video_subject=video_script[:100],
         video_script=video_script,
