@@ -155,5 +155,5 @@ This pipeline is built to be driven by an AI agent. Read [`AGENT_GUIDE.md`](AGEN
 | Video assembly | [MoviePy 2](https://github.com/Zulko/moviepy) + FFmpeg |
 | Stock video | Pexels, Pixabay |
 | Stock images | Pexels Photos, Pixabay Images, Unsplash, Wikimedia Commons |
-| BGM | Jamendo (online) + local `resource/songs/` |
+| BGM | Pixabay Music (online) or user-supplied MP3s in `resource/songs/` |
 | Subtitles | Pillow (burned-in), Inter SemiBold |
