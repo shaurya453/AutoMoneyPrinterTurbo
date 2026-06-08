@@ -231,7 +231,7 @@ def _resolve_bgm(job: dict) -> Tuple[str, str]:
     Resolve BGM source for this job and return (bgm_type, bgm_file) for VideoParams.
 
     Priority:
-      1. bgm_search_term  — search Jamendo online and download; falls back to random local
+      1. bgm_search_term  — search Pixabay online and download; falls back to random local
       2. bgm_file = "random" — pick a random file from resource/songs/
       3. bgm_file = "none" / "" — no BGM
       4. bgm_file = "/path/or/name" — explicit local file

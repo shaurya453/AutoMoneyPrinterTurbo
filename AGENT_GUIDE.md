@@ -137,7 +137,7 @@ Wikimedia needs no key and is best for historical/encyclopaedic subjects.
 "bgm_search_term": "cinematic documentary score",
 "bgm_file": "random"
 ```
-Searches Jamendo (requires `jamendo_client_id` in `config.toml`). Falls back to a random local file.
+Searches Pixabay Music using your existing `pixabay_api_keys`. Falls back to a random local file.
 
 **Random local file:**
 ```jsonc

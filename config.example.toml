@@ -40,11 +40,10 @@ unsplash_api_keys = []
 # Background music — online fetch
 # ---------------------------------------------------------------------------
 
-# Jamendo free music API client ID.
-# Register free at https://devportal.jamendo.com/ to get a client_id.
-# When bgm_search_term is set in a job JSON, the pipeline searches Jamendo
-# and downloads a track instead of picking a file from resource/songs/.
-jamendo_client_id = ""
+# Online BGM search uses your existing pixabay_api_keys above.
+# When bgm_search_term is set in a job JSON, the pipeline searches Pixabay
+# Music and downloads a track instead of picking a file from resource/songs/.
+# No extra key or registration required.
 
 # ---------------------------------------------------------------------------
 # Subtitle generation

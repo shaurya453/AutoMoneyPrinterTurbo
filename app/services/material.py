@@ -497,35 +497,30 @@ def download_image(
 # BGM search + download  (online sources — no local folder required)
 # ---------------------------------------------------------------------------
 
-def search_bgm_jamendo(search_term: str, n: int = 3) -> List[str]:
+def search_bgm_pixabay(search_term: str, n: int = 3) -> List[str]:
     """
-    Search Jamendo for free background music.
-    Requires jamendo_client_id in config.toml [app] section.
-    Get a free client ID at https://devportal.jamendo.com/
+    Search Pixabay for free background music.
+    Uses the same pixabay_api_keys already configured in config.toml.
     Returns a list of MP3 download URLs.
     """
-    client_id = config.app.get("jamendo_client_id", "")
-    if not client_id:
-        logger.debug("jamendo_client_id not configured, skipping Jamendo BGM search")
+    api_key = get_api_key("pixabay_api_keys")
+    if not api_key:
+        logger.debug("pixabay_api_keys not configured, skipping Pixabay BGM search")
         return []
     params = {
-        "client_id": client_id,
-        "format": "json",
-        "limit": n,
-        "search": search_term,
-        "audiodownload_allowed": "true",
-        "audioformat": "mp32",
-        "order": "relevance",
+        "key": api_key,
+        "q": search_term,
+        "per_page": n,
     }
-    url = f"https://api.jamendo.com/v3.0/tracks/?{urlencode(params)}"
+    url = f"https://pixabay.com/api/music/?{urlencode(params)}"
     try:
         r = requests.get(
             url, proxies=config.proxy, verify=_get_tls_verify(), timeout=(30, 60)
         )
-        tracks = r.json().get("results", [])
-        return [t["audiodownload"] for t in tracks if t.get("audiodownload")]
+        hits = r.json().get("hits", [])
+        return [h["audio"] for h in hits if h.get("audio")]
     except Exception as e:
-        logger.error(f"Jamendo BGM search failed: {e}")
+        logger.error(f"Pixabay BGM search failed: {e}")
         return []
 
 
@@ -561,10 +556,10 @@ def save_bgm(bgm_url: str, save_dir: str = "") -> str:
 def download_bgm(search_term: str, save_dir: str = "") -> str:
     """
     Search online music providers for a background music track and download it.
-    Currently supported: Jamendo (jamendo_client_id required in config).
+    Currently supported: Pixabay (uses existing pixabay_api_keys from config).
     Returns local MP3 path on success, '' if nothing found.
     """
-    for search_fn in [search_bgm_jamendo]:
+    for search_fn in [search_bgm_pixabay]:
         urls = search_fn(search_term, n=3)
         for url in urls:
             if not url:

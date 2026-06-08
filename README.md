@@ -43,8 +43,6 @@ cp config.example.toml config.toml
 | `pexels_api_keys` | [pexels.com/api](https://www.pexels.com/api/) | Yes (or Pixabay) |
 | `pixabay_api_keys` | [pixabay.com/api/docs](https://pixabay.com/api/docs/) | Yes (or Pexels) |
 | `unsplash_api_keys` | [unsplash.com/developers](https://unsplash.com/developers) | Optional — image fallback |
-| `jamendo_client_id` | [devportal.jamendo.com](https://devportal.jamendo.com/) | Optional — online BGM fetch |
-
 Wikimedia Commons is also used as a final image fallback and needs no key.
 
 > `config.toml` is gitignored and must never be committed — it contains your live API keys.
@@ -118,7 +116,7 @@ Re-running with the same title creates `My Video (2)`, `My Video (3)`, etc.
 
 ## Background music
 
-The pipeline ships with ~30 royalty-free BGM tracks in `resource/songs/`. You can also fetch music from Jamendo by setting `bgm_search_term` in the job JSON:
+The pipeline ships with ~30 royalty-free BGM tracks in `resource/songs/`. You can also fetch music from Pixabay (no extra key — uses your existing `pixabay_api_keys`) by setting `bgm_search_term` in the job JSON:
 
 ```json
 "bgm_search_term": "cinematic documentary score",
