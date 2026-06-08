@@ -164,18 +164,21 @@ def _fetch_clip(
         if not image_path:
             logger.warning(f"clip {clip_idx}: no image found for terms {search_terms}")
             return None
-        result = video.render_ken_burns_clip(
-            image_path=image_path,
-            duration=sent_duration + _TRIM_BUFFER,
-            width=width,
-            height=height,
-            pan_direction=sentence.get("pan_direction"),
-            output_path=out_path,
-            threads=2,
-        )
-        if not result:
-            logger.warning(f"clip {clip_idx}: Ken Burns render failed")
-        return result or None
+        duration = sent_duration + _TRIM_BUFFER
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-loop", "1", "-i", image_path,
+            "-t", f"{duration:.3f}",
+            "-vf", f"scale={width}:{height}",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-r", "30", out_path,
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+        except Exception:
+            logger.warning(f"clip {clip_idx}: image render failed via ffmpeg")
+            return None
+        return out_path if os.path.exists(out_path) else None
 
     # ---- video sentences: download + trim ----
     search_fn = (
@@ -276,17 +279,20 @@ def _make_work_dir(title: str) -> str:
     """
     slug = _slugify(title)
     base = utils.task_dir()  # ensures storage/tasks/ exists
-    candidate = os.path.join(base, slug)
-    if not os.path.exists(candidate):
-        os.makedirs(candidate)
-        return candidate
-    counter = 2
+    # Prefer reusing the most recent folder that already contains a narration
+    # audio file, so reruns don't duplicate work or redownload assets.
+    reuse: Optional[str] = None
+    counter = 1
     while True:
-        candidate = os.path.join(base, f"{slug} ({counter})")
-        if not os.path.exists(candidate):
-            os.makedirs(candidate)
-            return candidate
-        counter += 1
+        candidate = os.path.join(base, slug if counter == 1 else f"{slug} ({counter})")
+        if os.path.exists(candidate):
+            if os.path.exists(os.path.join(candidate, "audio.mp3")):
+                reuse = candidate
+            counter += 1
+            continue
+        # first gap ⇒ create here
+        os.makedirs(candidate)
+        return reuse or candidate
 
 
 # ---------------------------------------------------------------------------
@@ -332,19 +338,24 @@ def start(job_path: str) -> Optional[dict]:
     voice_name = voice.parse_voice_name(job.get("voice_name", "en-US-AriaNeural"))
     voice_rate = float(job.get("voice_rate", 1.0))
 
-    logger.info(f"TTS: voice={voice_name}, rate={voice_rate}")
-    sub_maker = voice.tts(
-        text=video_script,
-        voice_name=voice_name,
-        voice_rate=voice_rate,
-        voice_file=audio_file,
-    )
-    if sub_maker is None:
-        logger.error("TTS failed — check voice name and network connectivity")
-        sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
-        return None
-
-    audio_duration = math.ceil(voice.get_audio_duration(sub_maker))
+    # Allow reuse of an existing narration file to avoid re-running TTS when retrying.
+    sub_maker = None
+    if os.path.exists(audio_file):
+        logger.info(f"reusing existing audio → {audio_file}")
+        audio_duration = math.ceil(voice.get_audio_duration(audio_file))
+    else:
+        logger.info(f"TTS: voice={voice_name}, rate={voice_rate}")
+        sub_maker = voice.tts(
+            text=video_script,
+            voice_name=voice_name,
+            voice_rate=voice_rate,
+            voice_file=audio_file,
+        )
+        if sub_maker is None:
+            logger.error("TTS failed — check voice name and network connectivity")
+            sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+            return None
+        audio_duration = math.ceil(voice.get_audio_duration(sub_maker))
     logger.info(f"audio duration: {audio_duration}s")
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=15)
 
@@ -352,11 +363,15 @@ def start(job_path: str) -> Optional[dict]:
     # 2. Sentence timestamps via faster-whisper                           #
     # ------------------------------------------------------------------ #
     logger.info("aligning sentences with faster-whisper")
-    try:
-        timings = _get_sentence_timestamps(audio_file, sentences)
-    except Exception as exc:
-        logger.warning(f"whisper failed ({exc}), falling back to uniform distribution")
+    if os.environ.get("SKIP_WHISPER") == "1":
+        logger.info("SKIP_WHISPER=1 → using uniform distribution for timings")
         timings = _uniform_timestamps(sentences, audio_duration)
+    else:
+        try:
+            timings = _get_sentence_timestamps(audio_file, sentences)
+        except Exception as exc:
+            logger.warning(f"whisper failed ({exc}), falling back to uniform distribution")
+            timings = _uniform_timestamps(sentences, audio_duration)
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=25)
 
@@ -371,23 +386,36 @@ def start(job_path: str) -> Optional[dict]:
     ordered_clips: List[str] = []
     used_urls: set = set()  # tracks clip URLs used this run to prevent reuse
     total_sentences = len(timings)
+    # Each individual downloaded clip targets this duration.  Multiple clips
+    # are downloaded per sentence when the sentence's TTS audio is longer than
+    # one clip, so that total footage always covers the full audio — no looping.
+    _CLIP_TARGET = 4.0
+    clip_counter = 0  # unique index for clip filenames across all sentences
     for idx, (sent, t_start, t_end) in enumerate(timings):
-        sent_duration = max(3.0, min(5.0, t_end - t_start))
+        sent_audio_dur = max(0.0, t_end - t_start)
+        num_clips = max(1, round(sent_audio_dur / _CLIP_TARGET))
         preview = sent["text"][:60] + ("…" if len(sent["text"]) > 60 else "")
-        logger.info(f"[{idx+1}/{total_sentences}] {sent_duration:.2f}s — {preview}")
-
-        clip_path = _fetch_clip(
-            sentence=sent,
-            sent_duration=sent_duration,
-            source=video_source,
-            video_aspect=video_aspect,
-            clip_idx=idx,
-            clips_dir=clips_dir,
-            used_urls=used_urls,
+        logger.info(
+            f"[{idx+1}/{total_sentences}] {sent_audio_dur:.2f}s audio → {num_clips} clip(s) — {preview}"
         )
-        if clip_path:
-            ordered_clips.append(clip_path)
-        else:
+
+        got_any = False
+        for _ci in range(num_clips):
+            clip_path = _fetch_clip(
+                sentence=sent,
+                sent_duration=_CLIP_TARGET,
+                source=video_source,
+                video_aspect=video_aspect,
+                clip_idx=clip_counter,
+                clips_dir=clips_dir,
+                used_urls=used_urls,
+            )
+            clip_counter += 1
+            if clip_path:
+                ordered_clips.append(clip_path)
+                got_any = True
+
+        if not got_any:
             logger.warning(f"sentence {idx+1}: skipping — no clip available")
 
         # Update progress proportionally across 25–55%
@@ -495,6 +523,9 @@ def start(job_path: str) -> Optional[dict]:
         subtitle_path = os.path.join(work_dir, "subtitle.srt")
         provider = config.app.get("subtitle_provider", "edge").strip().lower()
         logger.info(f"generating subtitle via {provider}")
+        if provider == "edge" and sub_maker is None:
+            logger.info("no edge sub_maker available — using whisper for subtitles")
+            provider = "whisper"
 
         if provider == "edge":
             voice.create_subtitle(
