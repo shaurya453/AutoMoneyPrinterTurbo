@@ -1,28 +1,13 @@
 import json
-import locale
 import os
 import re
 import shutil
-from functools import lru_cache
 from pathlib import Path
-import threading
-from typing import Any
 from uuid import uuid4
 
 from loguru import logger
 
 from app.models import const
-
-
-def get_response(status: int, data: Any = None, message: str = ""):
-    obj = {
-        "status": status,
-    }
-    if data:
-        obj["data"] = data
-    if message:
-        obj["message"] = message
-    return obj
 
 
 def to_json(obj):
@@ -113,15 +98,6 @@ def song_dir(sub_dir: str = ""):
     return d
 
 
-def public_dir(sub_dir: str = ""):
-    d = resource_dir("public")
-    if sub_dir:
-        d = os.path.join(d, sub_dir)
-    if not os.path.exists(d):
-        os.makedirs(d)
-    return d
-
-
 def get_ffmpeg_binary() -> str:
     """
     解析当前进程应该使用的 FFmpeg 可执行文件。
@@ -156,18 +132,6 @@ def get_ffmpeg_binary() -> str:
         logger.warning(f"failed to resolve bundled ffmpeg binary: {str(exc)}")
 
     return "ffmpeg"
-
-
-def run_in_background(func, *args, **kwargs):
-    def run():
-        try:
-            func(*args, **kwargs)
-        except Exception as e:
-            logger.error(f"run_in_background error: {e}", exc_info=True)
-
-    thread = threading.Thread(target=run, daemon=False)
-    thread.start()
-    return thread
 
 
 def time_convert_seconds_to_hmsm(seconds) -> str:
@@ -280,31 +244,6 @@ def md5(text):
     import hashlib
 
     return hashlib.md5(text.encode("utf-8")).hexdigest()
-
-
-def get_system_locale():
-    try:
-        loc = locale.getdefaultlocale()
-        # zh_CN, zh_TW return zh
-        # en_US, en_GB return en
-        language_code = loc[0].split("_")[0]
-        return language_code
-    except Exception:
-        return "en"
-
-
-@lru_cache(maxsize=None)
-def load_locales(i18n_dir):
-    # WebUI 每次交互都会触发 Streamlit 重新执行脚本，语言文件运行期不会变化，
-    # 因此缓存解析结果，避免反复读取和解析所有 i18n JSON 文件。
-    _locales = {}
-    for root, dirs, files in os.walk(i18n_dir):
-        for file in files:
-            if file.endswith(".json"):
-                lang = file.split(".")[0]
-                with open(os.path.join(root, file), "r", encoding="utf-8") as f:
-                    _locales[lang] = json.loads(f.read())
-    return _locales
 
 
 def parse_extension(filename):
