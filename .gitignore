@@ -27,6 +27,13 @@ node_modules
 venv/
 .venv
 
+# Per-job working files (scripts, job JSONs) — agent writes here
+/jobs/
+# Stray job files the agent may have created in the project root
+/job_*.json
+/script_*.txt
+/curate_job.py
+
 # Debug and test files
 CLAUDE.md
 debug/

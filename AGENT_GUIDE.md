@@ -19,8 +19,13 @@ script.txt  ──►  sentence_prep.py  ──►  job.json  ──►  [YOU EN
 
 ## Step 1 — Generate the Job JSON
 
+Place all per-job files inside `jobs/<title>/` — **never in the project root**.
+The `jobs/` directory is gitignored so these files won't pollute the repo.
+
 ```bash
-python sentence_prep.py --script script.txt --out job.json
+mkdir -p "jobs/My Video"
+# write the script to jobs/My Video/script.txt first, then:
+python sentence_prep.py --script "jobs/My Video/script.txt" --out "jobs/My Video/job.json" --title "My Video"
 ```
 
 **Optional flags:**
@@ -153,11 +158,11 @@ BGM is automatically **ducked to 15%** during narration and rises back between s
 ## Step 3 — Run the Pipeline
 
 ```bash
-python cli.py --job job.json
+python cli.py --job "jobs/My Video/job.json"
 ```
 
 ```bash
-python cli.py --job job.json --log-level DEBUG   # verbose output
+python cli.py --job "jobs/My Video/job.json" --log-level DEBUG   # verbose output
 ```
 
 **Output** is written to `storage/tasks/<task_id>/`:
