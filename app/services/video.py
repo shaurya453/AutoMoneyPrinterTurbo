@@ -1110,6 +1110,13 @@ def _build_word_highlight_clips(
             return max(margin, min(custom_y, video_height - clip_h - margin))
         return (video_height - clip_h) / 2  # center
 
+    def _norm(s):
+        return "".join(c for c in s.lower() if c.isalnum())
+
+    # Tracks how many times we've highlighted each (srt_entry, word) pair so far,
+    # allowing us to target the correct occurrence when the same word appears twice.
+    occurrence_counter: dict = {}
+
     highlights = []
     for word_entry in words:
         w_text = word_entry.get("word", "").strip()
@@ -1138,50 +1145,55 @@ def _build_word_highlight_clips(
         clip_h = int(txt_height + vertical_padding + (interline * line_count))
         base_y = _subtitle_base_y(clip_h)
 
-        # Normalise word for fuzzy matching (strip punctuation, lowercase).
-        def _norm(s):
-            return "".join(c for c in s.lower() if c.isalnum())
-
         w_norm = _norm(w_text)
 
-        # Walk through lines to find the word and measure its x position.
+        # Determine which occurrence of this word within this SRT entry we should target.
+        occ_key = (host[0], host[1], w_norm)
+        target_occurrence = occurrence_counter.get(occ_key, 0)
+        occurrence_counter[occ_key] = target_occurrence + 1
+
+        # Walk through lines to find the Nth occurrence of this word.
         placed = False
+        seen_count = 0
         for line_idx, line in enumerate(lines):
+            if placed:
+                break
             line_words = line.split()
             char_offset = 0
             for lw in line_words:
                 if _norm(lw) == w_norm:
-                    # Measure pixel offsets within this line.
-                    try:
-                        before_w = font.getbbox(line[:char_offset].rstrip())[2] if char_offset > 0 else 0
-                        word_w = max(1, font.getbbox(lw)[2] - font.getbbox(lw)[0])
-                        line_w = max(1, font.getbbox(line)[2] - font.getbbox(line)[0])
-                    except Exception:
+                    if seen_count == target_occurrence:
+                        # This is the correct occurrence — measure and create the highlight.
+                        try:
+                            before_w = font.getbbox(line[:char_offset].rstrip())[2] if char_offset > 0 else 0
+                            word_w = max(1, font.getbbox(lw)[2] - font.getbbox(lw)[0])
+                            line_w = max(1, font.getbbox(line)[2] - font.getbbox(line)[0])
+                        except Exception:
+                            break
+
+                        # Center-aligned: clip starts at (video_width - max_width) / 2.
+                        clip_x = (video_width - max_width) // 2
+                        line_start_in_clip = (max_width - line_w) // 2
+                        word_x = clip_x + line_start_in_clip + before_w - pad
+                        word_y = base_y + vertical_padding // 2 + line_idx * (params.font_size + interline) - pad
+
+                        try:
+                            box = ColorClip(
+                                size=(word_w + 2 * pad, params.font_size + 2 * pad),
+                                color=(255, 220, 0),
+                            )
+                            box = box.with_opacity(0.55)
+                            box = box.with_start(w_start).with_end(w_end)
+                            box = box.with_position((int(word_x), int(word_y)))
+                            highlights.append(box)
+                        except Exception as exc:
+                            logger.warning(f"failed to create highlight clip for '{w_text}': {exc}")
+
+                        placed = True
                         break
-
-                    # Center-aligned: clip starts at (video_width - max_width) / 2.
-                    clip_x = (video_width - max_width) // 2
-                    line_start_in_clip = (max_width - line_w) // 2
-                    word_x = clip_x + line_start_in_clip + before_w - pad
-                    word_y = base_y + vertical_padding // 2 + line_idx * (params.font_size + interline) - pad
-
-                    try:
-                        box = ColorClip(
-                            size=(word_w + 2 * pad, params.font_size + 2 * pad),
-                            color=(255, 220, 0),
-                        )
-                        box = box.with_opacity(0.55)
-                        box = box.with_start(w_start).with_end(w_end)
-                        box = box.with_position((int(word_x), int(word_y)))
-                        highlights.append(box)
-                    except Exception as exc:
-                        logger.warning(f"failed to create highlight clip for '{w_text}': {exc}")
-
-                    placed = True
-                    break
+                    else:
+                        seen_count += 1
                 char_offset += len(lw) + 1  # +1 for space
-            if placed:
-                break
 
     logger.info(f"built {len(highlights)} word highlight clips")
     return highlights

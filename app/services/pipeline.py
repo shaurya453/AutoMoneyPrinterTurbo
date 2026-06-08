@@ -419,18 +419,38 @@ def start(job_path: str) -> Optional[dict]:
     )
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=65)
 
-    # Extend the combined clip by 3 s so the last frame holds after the VO ends.
+    # Probe the actual combined clip duration (crossfade overlaps make it shorter
+    # than the sum of individual clip durations, so we can't trust audio_duration here).
+    try:
+        _probe = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=nk=1:nw=1",
+                combined_path,
+            ],
+            capture_output=True, text=True, check=True,
+        )
+        combined_duration = float(_probe.stdout.strip())
+    except Exception:
+        combined_duration = 0.0
+
+    # Extend so the clip covers the full VO then holds 3 s of footage before fade.
+    # If the combined clip is already shorter than the audio, pad to audio_duration first.
+    outro_tail = 3.0
+    needed_extra = max(outro_tail, audio_duration - combined_duration + outro_tail)
     extended_path = os.path.join(temp_dir, "extended.mp4")
     try:
         subprocess.run(
             [
                 "ffmpeg", "-y", "-loglevel", "error",
                 "-i", combined_path,
-                "-vf", "tpad=stop_mode=clone:stop_duration=3",
+                "-vf", f"tpad=stop_mode=clone:stop_duration={needed_extra:.3f}",
                 "-an", extended_path,
             ],
             check=True,
         )
+        logger.info(f"extended clip: {combined_duration:.2f}s → {combined_duration + needed_extra:.2f}s (audio={audio_duration}s)")
     except Exception as exc:
         logger.warning(f"tpad extension failed ({exc}), using original combined clip")
         extended_path = combined_path
