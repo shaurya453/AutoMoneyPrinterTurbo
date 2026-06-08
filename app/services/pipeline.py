@@ -419,8 +419,8 @@ def start(job_path: str) -> Optional[dict]:
     )
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=65)
 
-    # Probe the actual combined clip duration (crossfade overlaps make it shorter
-    # than the sum of individual clip durations, so we can't trust audio_duration here).
+    # Probe the actual combined clip duration — crossfade overlaps reduce it below the
+    # raw sum of clip durations, so combine_videos may still fall a few seconds short.
     try:
         _probe = subprocess.run(
             [
@@ -435,25 +435,58 @@ def start(job_path: str) -> Optional[dict]:
     except Exception:
         combined_duration = 0.0
 
-    # Extend so the clip covers the full VO then holds 3 s of footage before fade.
-    # If the combined clip is already shorter than the audio, pad to audio_duration first.
+    # Build an outro from the last sentence's clip (looped) so the ending has real
+    # moving footage instead of a frozen frame.  The outro covers any remaining gap
+    # to fill the full VO, plus a 3 s tail that will fade to black in generate_video.
     outro_tail = 3.0
     needed_extra = max(outro_tail, audio_duration - combined_duration + outro_tail)
     extended_path = os.path.join(temp_dir, "extended.mp4")
+    outro_path = os.path.join(temp_dir, "outro.mp4")
     try:
+        last_clip = ordered_clips[-1]
+        # Re-encode last clip looped to the required length at 30 fps (matches combined).
         subprocess.run(
             [
                 "ffmpeg", "-y", "-loglevel", "error",
-                "-i", combined_path,
-                "-vf", f"tpad=stop_mode=clone:stop_duration={needed_extra:.3f}",
-                "-an", extended_path,
+                "-stream_loop", "-1", "-i", last_clip,
+                "-t", f"{needed_extra:.3f}",
+                "-c:v", "libx264", "-preset", "ultrafast",
+                "-pix_fmt", "yuv420p", "-r", "30",
+                "-an", outro_path,
             ],
             check=True,
         )
-        logger.info(f"extended clip: {combined_duration:.2f}s → {combined_duration + needed_extra:.2f}s (audio={audio_duration}s)")
+        # Concatenate combined + outro via a list-file concat (both are h264/yuv420p/30fps).
+        concat_list = os.path.join(temp_dir, "ext_concat.txt")
+        with open(concat_list, "w") as _cf:
+            _cf.write(f"file '{os.path.abspath(combined_path)}'\n")
+            _cf.write(f"file '{os.path.abspath(outro_path)}'\n")
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-f", "concat", "-safe", "0", "-i", concat_list,
+                "-c", "copy", "-an", extended_path,
+            ],
+            check=True,
+        )
+        logger.info(
+            f"outro: last clip looped {needed_extra:.2f}s → "
+            f"extended={combined_duration + needed_extra:.2f}s (audio={audio_duration}s)"
+        )
     except Exception as exc:
-        logger.warning(f"tpad extension failed ({exc}), using original combined clip")
-        extended_path = combined_path
+        logger.warning(f"outro extension failed ({exc}), falling back to tpad freeze")
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-loglevel", "error",
+                    "-i", combined_path,
+                    "-vf", f"tpad=stop_mode=clone:stop_duration={needed_extra:.3f}",
+                    "-an", extended_path,
+                ],
+                check=True,
+            )
+        except Exception:
+            extended_path = combined_path
 
     # ------------------------------------------------------------------ #
     # 5. Subtitle                                                          #

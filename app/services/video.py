@@ -770,6 +770,11 @@ def combine_videos(
     aspect = VideoAspect(video_aspect)
     video_width, video_height = aspect.to_resolution()
 
+    # When crossfade is used each transition overlaps adjacent clips by cf seconds,
+    # so the effective output duration is shorter than the raw sum of clip durations.
+    # We track the raw sum for book-keeping but use effective_duration for stop decisions.
+    cf_overlap = 0.5 if transition_value == VideoTransitionMode.crossfade.value else 0.0
+
     processed_clips = []
     subclipped_items = []
     video_duration = 0
@@ -812,16 +817,18 @@ def combine_videos(
     
     # Add downloaded clips over and over until the duration of the audio (max_duration) has been reached
     for i, subclipped_item in enumerate(subclipped_items):
-        if video_duration >= audio_duration:
+        n = len(processed_clips)
+        effective_duration = video_duration - max(0, n - 1) * cf_overlap
+        if effective_duration >= audio_duration:
             break
-        
+
         logger.debug(
             f"processing clip {i+1}: {subclipped_item.width}x{subclipped_item.height}, "
             f"source: {os.path.basename(subclipped_item.source_file_path)}, "
-            f"current duration: {video_duration:.2f}s, "
-            f"remaining: {audio_duration - video_duration:.2f}s"
+            f"effective duration: {effective_duration:.2f}s, "
+            f"remaining: {audio_duration - effective_duration:.2f}s"
         )
-        
+
         try:
             clip = _open_video_clip_quietly(subclipped_item.file_path).subclipped(
                 subclipped_item.start_time, subclipped_item.end_time
@@ -833,7 +840,7 @@ def combine_videos(
                 clip_ratio = clip.w / clip.h
                 video_ratio = video_width / video_height
                 logger.debug(f"resizing clip, source: {clip_w}x{clip_h}, ratio: {clip_ratio:.2f}, target: {video_width}x{video_height}, ratio: {video_ratio:.2f}")
-                
+
                 if clip_ratio == video_ratio:
                     clip = clip.resized(new_size=(video_width, video_height))
                 else:
@@ -848,7 +855,7 @@ def combine_videos(
                     background = ColorClip(size=(video_width, video_height), color=(0, 0, 0)).with_duration(clip_duration)
                     clip_resized = clip.resized(new_size=(new_width, new_height)).with_position("center")
                     clip = CompositeVideoClip([background, clip_resized])
-                    
+
             shuffle_side = random.choice(["left", "right", "top", "bottom"])
             if transition_value in (None, VideoTransitionMode.none.value):
                 clip = clip
@@ -872,7 +879,7 @@ def combine_videos(
 
             if clip.duration > max_clip_duration:
                 clip = clip.subclipped(0, max_clip_duration)
-                
+
             # wirte clip to temp file
             clip_file = f"{output_dir}/temp-clip-{i+1}.mp4"
             _write_videofile_with_codec_fallback(
@@ -897,20 +904,26 @@ def combine_videos(
                 )
             )
             video_duration += clip_duration_saved
-            
+
         except Exception as e:
             logger.error(f"failed to process clip: {str(e)}")
-    
-    # loop processed clips until the video duration matches or exceeds the audio duration.
-    if video_duration < audio_duration:
-        logger.warning(f"video duration ({video_duration:.2f}s) is shorter than audio duration ({audio_duration:.2f}s), looping clips to match audio length.")
+
+    # loop processed clips until the effective output duration matches or exceeds the audio duration.
+    n = len(processed_clips)
+    effective_duration = video_duration - max(0, n - 1) * cf_overlap
+    if effective_duration < audio_duration:
+        logger.warning(f"effective duration ({effective_duration:.2f}s) is shorter than audio duration ({audio_duration:.2f}s), looping clips to match audio length.")
         base_clips = processed_clips.copy()
         for clip in itertools.cycle(base_clips):
-            if video_duration >= audio_duration:
+            n = len(processed_clips)
+            effective_duration = video_duration - max(0, n - 1) * cf_overlap
+            if effective_duration >= audio_duration:
                 break
             processed_clips.append(clip)
             video_duration += clip.duration
-        logger.info(f"video duration: {video_duration:.2f}s, audio duration: {audio_duration:.2f}s, looped {len(processed_clips)-len(base_clips)} clips")
+        n = len(processed_clips)
+        effective_duration = video_duration - max(0, n - 1) * cf_overlap
+        logger.info(f"effective duration: {effective_duration:.2f}s, audio duration: {audio_duration:.2f}s, looped {n - len(base_clips)} clips")
      
     # merge video clips progressively, avoid loading all videos at once to avoid memory overflow
     logger.info("starting clip merging process")
