@@ -187,16 +187,24 @@ def save_video(video_url: str, save_dir: str = "") -> str:
     }
 
     # if video does not exist, download it
-    with open(video_path, "wb") as f:
-        f.write(
-            requests.get(
-                video_url,
-                headers=headers,
-                proxies=config.proxy,
-                verify=_get_tls_verify(),
-                timeout=(60, 240),
-            ).content
-        )
+    try:
+        with open(video_path, "wb") as f:
+            f.write(
+                requests.get(
+                    video_url,
+                    headers=headers,
+                    proxies=config.proxy,
+                    verify=_get_tls_verify(),
+                    timeout=(60, 240),
+                ).content
+            )
+    except Exception as e:
+        logger.warning(f"failed to download video {video_url}: {e}")
+        try:
+            os.remove(video_path)
+        except Exception:
+            pass
+        return None
 
     if os.path.exists(video_path) and os.path.getsize(video_path) > 0:
         clip = None
@@ -457,6 +465,32 @@ _IMAGE_PROVIDERS = {
 
 _DEFAULT_IMAGE_SOURCE_ORDER = ["pexels", "pixabay", "unsplash", "wikimedia"]
 
+# Pre-seeded local cache to avoid repeated network searches for common terms.
+_PRESEEDED_IMAGES = {
+    "cereal aisle": "storage/cache_images/img-ec3756f5135e44565f416d52fe11fb59.jpeg",
+    "cereal box": "storage/cache_images/img-96a332f1d6fb5c5f4d36e3ccb37f298a.jpeg",
+    "snack cakes": "storage/cache_images/img-5047a25956ad49fd6882ee83ada6ac3a.jpeg",
+    "bakery shelf": "storage/cache_images/img-d956900c35ef9187919838f853bc4aba.jpeg",
+    "canned pasta": "storage/cache_images/img-eaec349b44544b1d654a4f69d9ff89e9.jpeg",
+    "food can": "storage/cache_images/img-614db0e887245fee2a1919d56d4cea8a.jpeg",
+    "canned soup": "storage/cache_images/img-490944996c1ffcf08fe905f9993fd257.jpeg",
+    "soup shelf": "storage/cache_images/img-bfc08931e66126adfb1e8cb9b935d8d9.jpeg",
+    "cookie bag": "storage/cache_images/img-6171da5daf8a5e814a5544addcb3618f.jpeg",
+    "store cookies": "storage/cache_images/img-8f47fc1a6875ef717ec0010d3bff9205.jpeg",
+    "frozen meals": "storage/cache_images/img-ba5614dccd87092494cd878975337a8b.jpeg",
+    "freezer aisle": "storage/cache_images/img-a84e361ceb964617fbaa914390c74e55.jpeg",
+    "ice cream taco": "storage/cache_images/img-171d5a5146f48f63b911f37d836fe6e8.jpeg",
+    "dessert freezer": "storage/cache_images/img-6eff69abef6a211b515418e8a6441201.jpeg",
+    "butter sticks": "storage/cache_images/img-30b84a141276d67825aa48a1ee80fa22.jpeg",
+    "dairy fridge": "storage/cache_images/img-69acdeddf8682536e04050aebe8c6f94.png",
+    "dairy farm": "storage/cache_images/img-1b4ff5147a521a459ec54b2f300e8c3f.jpeg",
+    "milk processing": "storage/cache_images/img-5128e04a84160a8a8ec349d43de65fcb.jpeg",
+    "corporate meeting": "storage/cache_images/img-b90fea9a33bcfed5443eaf4bafec26bf.jpeg",
+    "financial report": "storage/cache_images/img-d22583de68d8ab5202e466ec8c3252fe.jpeg",
+    "grocery aisle": "storage/cache_images/img-09d7d1fe31bbb7ef917fe1f441b2fa83.jpeg",
+    "empty shelves": "storage/cache_images/img-c0e20fa858235fb3cfc9a6b2f6b45dfe.jpeg",
+}
+
 
 def download_image(
     search_terms: List[str],
@@ -475,6 +509,10 @@ def download_image(
         source_order = _DEFAULT_IMAGE_SOURCE_ORDER
 
     for term in search_terms:
+        preset = _PRESEEDED_IMAGES.get(term.lower())
+        if preset and os.path.exists(preset):
+            logger.info(f"using preseeded image for '{term}': {preset}")
+            return preset
         for provider in source_order:
             fn = _IMAGE_PROVIDERS.get(provider)
             if fn is None:

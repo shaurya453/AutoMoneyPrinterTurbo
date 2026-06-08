@@ -165,20 +165,18 @@ def _fetch_clip(
             logger.warning(f"clip {clip_idx}: no image found for terms {search_terms}")
             return None
         duration = sent_duration + _TRIM_BUFFER
-        cmd = [
-            "ffmpeg", "-y", "-loglevel", "error",
-            "-loop", "1", "-i", image_path,
-            "-t", f"{duration:.3f}",
-            "-vf", f"scale={width}:{height}",
-            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-            "-r", "30", out_path,
-        ]
-        try:
-            subprocess.run(cmd, check=True, capture_output=True)
-        except Exception:
-            logger.warning(f"clip {clip_idx}: image render failed via ffmpeg")
+        result = video.render_ken_burns_clip(
+            image_path=image_path,
+            duration=duration,
+            width=width,
+            height=height,
+            pan_direction=sentence.get("pan_direction"),
+            output_path=out_path,
+        )
+        if not result:
+            logger.warning(f"clip {clip_idx}: Ken Burns render failed")
             return None
-        return out_path if os.path.exists(out_path) else None
+        return out_path
 
     # ---- video sentences: download + trim ----
     search_fn = (
@@ -445,6 +443,10 @@ def start(job_path: str) -> Optional[dict]:
         max_clip_duration=999,
         threads=2,
     )
+    if not os.path.exists(combined_path):
+        logger.error("combine_videos() produced no output — aborting")
+        sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+        return None
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=65)
 
     # Probe the actual combined clip duration — crossfade overlaps reduce it below the
