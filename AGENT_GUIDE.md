@@ -115,7 +115,7 @@ Wikimedia needs no key and is best for historical/encyclopaedic subjects.
   // --- Subtitles ---
   "subtitle_enabled": true,
   "subtitle_position": "bottom",   // "bottom" | "top" | "center"
-  "font_name": "Charm-Bold.ttf",
+  "font_name": "Inter_18pt-SemiBold.ttf",
   "text_fore_color": "#FFFFFF",
   "font_size": 55,
   "stroke_color": "#000000",

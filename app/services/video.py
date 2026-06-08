@@ -542,11 +542,20 @@ def apply_ken_burns(
         img_large = img.resize((large_w, large_h), _PILImage.LANCZOS)
         img_arr = np.array(img_large)   # (large_h, large_w, 3)
 
+    target_ar = width / height
+
     def make_frame(t: float) -> np.ndarray:
         progress = t / max(duration, 1e-6)
         zoom = 1.0 + (zoom_factor - 1.0) * progress
-        crop_w = max(1, min(int(large_w / zoom), large_w))
-        crop_h = max(1, min(int(large_h / zoom), large_h))
+        # Crop dimensions locked to TARGET aspect ratio so the final resize
+        # to (width, height) is lossless — no stretching of portrait/square images.
+        _cw = min(int(large_w / zoom), large_w)
+        _ch = int(_cw / target_ar)
+        if _ch > large_h:
+            _ch = large_h
+            _cw = int(_ch * target_ar)
+        crop_w = max(1, min(_cw, large_w))
+        crop_h = max(1, min(_ch, large_h))
         max_x = large_w - crop_w
         max_y = large_h - crop_h
 
