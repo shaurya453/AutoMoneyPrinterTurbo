@@ -151,6 +151,8 @@ Searches Pixabay Music using your existing `pixabay_api_keys`. Falls back to a r
 "bgm_file": "none"
 ```
 
+You can also place your own MP3s in `resource/songs/` and use `"bgm_file": "random"` to pick one at runtime.
+
 BGM is automatically **ducked to 15%** during narration and rises back between sentences.
 
 ---

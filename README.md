@@ -116,7 +116,7 @@ Re-running with the same title creates `My Video (2)`, `My Video (3)`, etc.
 
 ## Background music
 
-The pipeline ships with ~30 royalty-free BGM tracks in `resource/songs/`. You can also fetch music from Pixabay (no extra key — uses your existing `pixabay_api_keys`) by setting `bgm_search_term` in the job JSON:
+Online BGM is fetched from Pixabay (no extra key — uses your existing `pixabay_api_keys`) when `bgm_search_term` is set in the job JSON. You can also drop your own MP3s into `resource/songs/` and use `"bgm_file": "random"` to pick one at runtime:
 
 ```json
 "bgm_search_term": "cinematic documentary score",
