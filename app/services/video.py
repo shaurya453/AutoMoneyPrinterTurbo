@@ -22,6 +22,7 @@ from moviepy import (
     TextClip,
     VideoFileClip,
     afx,
+    vfx,
 )
 from moviepy.video.tools.subtitles import SubtitlesClip
 from PIL import Image, ImageDraw, ImageFont
@@ -1162,7 +1163,7 @@ def _build_word_highlight_clips(
                     clip_x = (video_width - max_width) // 2
                     line_start_in_clip = (max_width - line_w) // 2
                     word_x = clip_x + line_start_in_clip + before_w - pad
-                    word_y = base_y + line_idx * (params.font_size + interline) - pad
+                    word_y = base_y + vertical_padding // 2 + line_idx * (params.font_size + interline) - pad
 
                     try:
                         box = ColorClip(
@@ -1355,6 +1356,9 @@ def generate_video(
             video_clip = CompositeVideoClip([video_clip, *highlight_clips, *text_clips])
         else:
             video_clip = CompositeVideoClip([video_clip, *text_clips])
+
+    # Fade the video to black over the last 1.5 s (covers the 3 s outro tail).
+    video_clip = video_clip.with_effects([vfx.FadeOut(1.5)])
 
     bgm_file = get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file)
     if bgm_file:

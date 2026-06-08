@@ -372,7 +372,7 @@ def start(job_path: str) -> Optional[dict]:
     used_urls: set = set()  # tracks clip URLs used this run to prevent reuse
     total_sentences = len(timings)
     for idx, (sent, t_start, t_end) in enumerate(timings):
-        sent_duration = max(t_end - t_start, 1.0)
+        sent_duration = max(3.0, min(5.0, t_end - t_start))
         preview = sent["text"][:60] + ("…" if len(sent["text"]) > 60 else "")
         logger.info(f"[{idx+1}/{total_sentences}] {sent_duration:.2f}s — {preview}")
 
@@ -418,6 +418,22 @@ def start(job_path: str) -> Optional[dict]:
         threads=2,
     )
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=65)
+
+    # Extend the combined clip by 3 s so the last frame holds after the VO ends.
+    extended_path = os.path.join(temp_dir, "extended.mp4")
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-i", combined_path,
+                "-vf", "tpad=stop_mode=clone:stop_duration=3",
+                "-an", extended_path,
+            ],
+            check=True,
+        )
+    except Exception as exc:
+        logger.warning(f"tpad extension failed ({exc}), using original combined clip")
+        extended_path = combined_path
 
     # ------------------------------------------------------------------ #
     # 5. Subtitle                                                          #
@@ -486,7 +502,7 @@ def start(job_path: str) -> Optional[dict]:
     output_file = os.path.join(work_dir, "final.mp4")
     logger.info(f"generating final video: {output_file}")
     video.generate_video(
-        video_path=combined_path,
+        video_path=extended_path,
         audio_path=audio_file,
         subtitle_path=subtitle_path,
         output_file=output_file,
