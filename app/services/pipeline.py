@@ -429,7 +429,7 @@ def start(job_path: str) -> Optional[dict]:
                 "-of", "default=nk=1:nw=1",
                 combined_path,
             ],
-            capture_output=True, text=True, check=True,
+            capture_output=True, text=True, check=True, timeout=30,
         )
         combined_duration = float(_probe.stdout.strip())
     except Exception:
@@ -442,21 +442,20 @@ def start(job_path: str) -> Optional[dict]:
     needed_extra = max(outro_tail, audio_duration - combined_duration + outro_tail)
     extended_path = os.path.join(temp_dir, "extended.mp4")
     outro_path = os.path.join(temp_dir, "outro.mp4")
+    _ENC = ["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-r", "30", "-threads", "4"]
     try:
         last_clip = ordered_clips[-1]
-        # Re-encode last clip looped to the required length at 30 fps (matches combined).
+        # Loop the last clip to fill the required tail length.
         subprocess.run(
             [
                 "ffmpeg", "-y", "-loglevel", "error",
                 "-stream_loop", "-1", "-i", last_clip,
                 "-t", f"{needed_extra:.3f}",
-                "-c:v", "libx264", "-preset", "ultrafast",
-                "-pix_fmt", "yuv420p", "-r", "30",
-                "-an", outro_path,
+                *_ENC, "-an", outro_path,
             ],
-            check=True,
+            check=True, capture_output=True, timeout=120,
         )
-        # Concatenate combined + outro via a list-file concat (both are h264/yuv420p/30fps).
+        # Re-encode-concat so there are no timebase/codec-parameter mismatches.
         concat_list = os.path.join(temp_dir, "ext_concat.txt")
         with open(concat_list, "w") as _cf:
             _cf.write(f"file '{os.path.abspath(combined_path)}'\n")
@@ -465,9 +464,9 @@ def start(job_path: str) -> Optional[dict]:
             [
                 "ffmpeg", "-y", "-loglevel", "error",
                 "-f", "concat", "-safe", "0", "-i", concat_list,
-                "-c", "copy", "-an", extended_path,
+                *_ENC, "-an", extended_path,
             ],
-            check=True,
+            check=True, capture_output=True, timeout=300,
         )
         logger.info(
             f"outro: last clip looped {needed_extra:.2f}s → "
@@ -481,9 +480,9 @@ def start(job_path: str) -> Optional[dict]:
                     "ffmpeg", "-y", "-loglevel", "error",
                     "-i", combined_path,
                     "-vf", f"tpad=stop_mode=clone:stop_duration={needed_extra:.3f}",
-                    "-an", extended_path,
+                    *_ENC, "-an", extended_path,
                 ],
-                check=True,
+                check=True, capture_output=True, timeout=300,
             )
         except Exception:
             extended_path = combined_path
@@ -576,8 +575,11 @@ def start(job_path: str) -> Optional[dict]:
         "clips": ordered_clips,
         "audio_duration": audio_duration,
     }
+
+    # Avoid passing duplicate task_id to update_task
+    payload = {k: v for k, v in result.items() if k != "task_id"}
     sm.state.update_task(
-        task_id, state=const.TASK_STATE_COMPLETE, progress=100, **result
+        task_id, state=const.TASK_STATE_COMPLETE, progress=100, **payload
     )
     logger.success(f"pipeline complete → {output_file}")
     return result

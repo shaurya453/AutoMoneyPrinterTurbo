@@ -1423,7 +1423,7 @@ def generate_video(
         audio_fps=output_audio_fps,
         audio_bitrate=audio_bitrate,
         temp_audiofile_path=output_dir,
-        threads=params.n_threads or 2,
+        threads=params.n_threads or 4,
         logger=None,
         fps=fps,
     )
