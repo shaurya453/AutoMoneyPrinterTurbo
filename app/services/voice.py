@@ -680,6 +680,34 @@ def create_subtitle(sub_maker: SubMaker, text: str, subtitle_file: str):
         logger.error(f"failed, error: {str(e)}")
 
 
+def create_word_timings(sub_maker: SubMaker) -> list:
+    """Return [{word, start, end}] in seconds from SubMaker cues or legacy offsets."""
+    if hasattr(sub_maker, "cues") and sub_maker.cues:
+        result = []
+        for cue in sub_maker.cues:
+            w = unescape(cue.content).strip()
+            if w:
+                result.append({
+                    "word": w,
+                    "start": cue.start.total_seconds(),
+                    "end": cue.end.total_seconds(),
+                })
+        return result
+
+    legacy_offsets = getattr(sub_maker, "offset", [])
+    legacy_subs = getattr(sub_maker, "subs", [])
+    result = []
+    for (start_100ns, end_100ns), sub in zip(legacy_offsets, legacy_subs):
+        w = unescape(sub).strip()
+        if w:
+            result.append({
+                "word": w,
+                "start": start_100ns / 10_000_000,
+                "end": end_100ns / 10_000_000,
+            })
+    return result
+
+
 def _get_audio_duration_from_submaker(sub_maker: SubMaker):
     if hasattr(sub_maker, "cues") and sub_maker.cues:
         return sub_maker.cues[-1].end.total_seconds()

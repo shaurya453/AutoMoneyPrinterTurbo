@@ -442,6 +442,14 @@ def start(job_path: str) -> Optional[dict]:
             subtitle.create(audio_file=audio_file, subtitle_file=subtitle_path)
             subtitle.correct(subtitle_file=subtitle_path, video_script=video_script)
 
+        if job.get("subtitle_highlight") and provider == "edge" and os.path.exists(subtitle_path):
+            import json as _json
+            word_timings = voice.create_word_timings(sub_maker)
+            words_file = subtitle_path.replace(".srt", ".words.json")
+            with open(words_file, "w", encoding="utf-8") as _f:
+                _json.dump(word_timings, _f)
+            logger.info(f"word timings saved: {words_file}")
+
         lines = subtitle.file_to_subtitles(subtitle_path)
         if not lines:
             logger.warning("subtitle file is empty or invalid — subtitles disabled")
@@ -472,6 +480,7 @@ def start(job_path: str) -> Optional[dict]:
         font_size=int(job.get("font_size", 55)),
         stroke_color=job.get("stroke_color", "#000000"),
         stroke_width=float(job.get("stroke_width", 1.5)),
+        subtitle_highlight=bool(job.get("subtitle_highlight", False)),
     )
 
     output_file = os.path.join(work_dir, "final.mp4")

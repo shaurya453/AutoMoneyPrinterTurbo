@@ -201,6 +201,7 @@ def main():
         "video_aspect": args.aspect,
         "video_clip_duration": 5,
         "subtitle_enabled": True,
+        "subtitle_highlight": False,
         "font_name": "Inter_18pt-SemiBold.ttf",
         "text_fore_color": "#FFFFFF",
         "font_size": 55,

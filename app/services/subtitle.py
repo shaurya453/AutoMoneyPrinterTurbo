@@ -65,6 +65,7 @@ def create(audio_file, subtitle_file: str = ""):
 
     start = timer()
     subtitles = []
+    all_word_timings = []
 
     def recognized(seg_text, seg_start, seg_end):
         seg_text = seg_text.strip()
@@ -89,6 +90,12 @@ def create(audio_file, subtitle_file: str = ""):
         if segment.words:
             is_segmented = False
             for word in segment.words:
+                w_text = word.word.strip()
+                if w_text:
+                    all_word_timings.append(
+                        {"word": w_text, "start": word.start, "end": word.end}
+                    )
+
                 if not is_segmented:
                     seg_start = word.start
                     is_segmented = True
@@ -140,6 +147,12 @@ def create(audio_file, subtitle_file: str = ""):
     with open(subtitle_file, "w", encoding="utf-8") as f:
         f.write(sub)
     logger.info(f"subtitle file created: {subtitle_file}")
+
+    if all_word_timings:
+        words_file = subtitle_file.replace(".srt", ".words.json")
+        with open(words_file, "w", encoding="utf-8") as f:
+            json.dump(all_word_timings, f)
+        logger.info(f"word timings saved: {words_file}")
 
 
 def file_to_subtitles(filename):

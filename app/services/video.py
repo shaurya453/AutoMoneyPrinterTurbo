@@ -1,6 +1,7 @@
 import glob
 import itertools
 import io
+import json
 import math
 import os
 import random
@@ -1047,6 +1048,144 @@ def _rounded_subtitle_background_clip(
     return ImageClip(np.array(img), transparent=True)
 
 
+def _build_word_highlight_clips(
+    subtitle_path: str,
+    params: VideoParams,
+    video_width: int,
+    video_height: int,
+    font_path: str,
+) -> list:
+    """Return a list of yellow ColorClip highlight boxes, one per spoken word."""
+    from app.services import subtitle as _subtitle_svc
+
+    words_path = subtitle_path.replace(".srt", ".words.json")
+    if not os.path.exists(words_path):
+        logger.warning(f"word timings file not found, skipping highlights: {words_path}")
+        return []
+
+    try:
+        with open(words_path, encoding="utf-8") as f:
+            words = json.load(f)
+    except Exception as exc:
+        logger.warning(f"failed to load word timings: {exc}")
+        return []
+
+    srt_entries = _subtitle_svc.file_to_subtitles(subtitle_path)
+    if not srt_entries:
+        return []
+
+    # Convert SRT entries to ((start_sec, end_sec), text) tuples.
+    parsed = []
+    for entry in srt_entries:
+        # file_to_subtitles returns (index, "HH:MM:SS,mmm --> HH:MM:SS,mmm", text)
+        _, time_str, text = entry
+        parts = time_str.split(" --> ")
+        def _ts(s):
+            h, m, rest = s.strip().split(":")
+            sec, ms = rest.split(",")
+            return int(h) * 3600 + int(m) * 60 + int(sec) + int(ms) / 1000
+        parsed.append((_ts(parts[0]), _ts(parts[1]), text.strip()))
+
+    try:
+        font = ImageFont.truetype(font_path, params.font_size)
+    except Exception as exc:
+        logger.warning(f"failed to load font for highlights: {exc}")
+        return []
+
+    max_width = int(video_width * 0.9)
+    interline = int(params.font_size * 0.25)
+    vertical_padding = int(params.font_size * 0.35)
+    pad = max(2, int(params.font_size * 0.15))
+
+    # Pre-compute subtitle base Y for each SRT entry (mirrors create_text_clip positioning).
+    def _subtitle_base_y(clip_h):
+        if params.subtitle_position == "bottom":
+            return video_height * 0.95 - clip_h
+        if params.subtitle_position == "top":
+            return video_height * 0.05
+        if params.subtitle_position == "custom":
+            margin = 10
+            custom_y = (video_height - clip_h) * (params.custom_position / 100)
+            return max(margin, min(custom_y, video_height - clip_h - margin))
+        return (video_height - clip_h) / 2  # center
+
+    highlights = []
+    for word_entry in words:
+        w_text = word_entry.get("word", "").strip()
+        w_start = float(word_entry.get("start", 0))
+        w_end = float(word_entry.get("end", w_start + 0.1))
+        if not w_text or w_start >= w_end:
+            continue
+
+        # Find which SRT entry this word belongs to.
+        host = None
+        for s_start, s_end, s_text in parsed:
+            if s_start <= w_start < s_end or (s_start <= w_start and w_end <= s_end + 0.05):
+                host = (s_start, s_end, s_text)
+                break
+        if host is None:
+            continue
+
+        phrase = host[2]
+        try:
+            wrapped_txt, txt_height = wrap_text(phrase, max_width=max_width, font=font_path, fontsize=params.font_size)
+        except Exception:
+            continue
+
+        lines = wrapped_txt.split("\n")
+        line_count = len(lines)
+        clip_h = int(txt_height + vertical_padding + (interline * line_count))
+        base_y = _subtitle_base_y(clip_h)
+
+        # Normalise word for fuzzy matching (strip punctuation, lowercase).
+        def _norm(s):
+            return "".join(c for c in s.lower() if c.isalnum())
+
+        w_norm = _norm(w_text)
+
+        # Walk through lines to find the word and measure its x position.
+        placed = False
+        for line_idx, line in enumerate(lines):
+            line_words = line.split()
+            char_offset = 0
+            for lw in line_words:
+                if _norm(lw) == w_norm:
+                    # Measure pixel offsets within this line.
+                    try:
+                        before_w = font.getbbox(line[:char_offset].rstrip())[2] if char_offset > 0 else 0
+                        word_w = max(1, font.getbbox(lw)[2] - font.getbbox(lw)[0])
+                        line_w = max(1, font.getbbox(line)[2] - font.getbbox(line)[0])
+                    except Exception:
+                        break
+
+                    # Center-aligned: clip starts at (video_width - max_width) / 2.
+                    clip_x = (video_width - max_width) // 2
+                    line_start_in_clip = (max_width - line_w) // 2
+                    word_x = clip_x + line_start_in_clip + before_w - pad
+                    word_y = base_y + line_idx * (params.font_size + interline) - pad
+
+                    try:
+                        box = ColorClip(
+                            size=(word_w + 2 * pad, params.font_size + 2 * pad),
+                            color=(255, 220, 0),
+                        )
+                        box = box.with_opacity(0.55)
+                        box = box.with_start(w_start).with_end(w_end)
+                        box = box.with_position((int(word_x), int(word_y)))
+                        highlights.append(box)
+                    except Exception as exc:
+                        logger.warning(f"failed to create highlight clip for '{w_text}': {exc}")
+
+                    placed = True
+                    break
+                char_offset += len(lw) + 1  # +1 for space
+            if placed:
+                break
+
+    logger.info(f"built {len(highlights)} word highlight clips")
+    return highlights
+
+
 def generate_video(
     video_path: str,
     audio_path: str,
@@ -1207,7 +1346,15 @@ def generate_video(
         for item in sub.subtitles:
             clip = create_text_clip(subtitle_item=item)
             text_clips.append(clip)
-        video_clip = CompositeVideoClip([video_clip, *text_clips])
+
+        if params.subtitle_highlight and font_path:
+            highlight_clips = _build_word_highlight_clips(
+                subtitle_path, params, video_width, video_height, font_path
+            )
+            # Highlights go before text so text renders on top of the boxes.
+            video_clip = CompositeVideoClip([video_clip, *highlight_clips, *text_clips])
+        else:
+            video_clip = CompositeVideoClip([video_clip, *text_clips])
 
     bgm_file = get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file)
     if bgm_file:
