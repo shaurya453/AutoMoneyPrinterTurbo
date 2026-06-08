@@ -317,6 +317,11 @@ def start(job_path: str) -> Optional[dict]:
         work_dir = _make_work_dir(video_title)
     else:
         work_dir = utils.task_dir(task_id)
+
+    # Intermediate files go here; final outputs stay in work_dir.
+    temp_dir = os.path.join(work_dir, "temp")
+    os.makedirs(temp_dir, exist_ok=True)
+
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=5)
     logger.info(f"pipeline start | task={task_id} | folder={os.path.basename(work_dir)} | sentences={len(sentences)}")
 
@@ -360,7 +365,7 @@ def start(job_path: str) -> Optional[dict]:
     # ------------------------------------------------------------------ #
     video_aspect = VideoAspect(job.get("video_aspect", "16:9"))
     video_source: str = job.get("video_source", "pexels")
-    clips_dir = os.path.join(work_dir, "clips")
+    clips_dir = os.path.join(temp_dir, "clips")
     os.makedirs(clips_dir, exist_ok=True)
 
     ordered_clips: List[str] = []
@@ -399,7 +404,7 @@ def start(job_path: str) -> Optional[dict]:
     # ------------------------------------------------------------------ #
     # 4. Combine clips                                                     #
     # ------------------------------------------------------------------ #
-    combined_path = os.path.join(work_dir, "combined.mp4")
+    combined_path = os.path.join(temp_dir, "combined.mp4")
     logger.info("combining clips sequentially")
     video.combine_videos(
         combined_video_path=combined_path,
