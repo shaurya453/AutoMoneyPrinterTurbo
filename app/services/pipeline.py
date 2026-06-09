@@ -97,7 +97,7 @@ def _uniform_timestamps(
 
 # Half of the dissolve duration added to each clip so the crossfade overlap
 # does not eat into the sentence's actual visual content.
-_CROSSFADE_DUR = 0.5
+_CROSSFADE_DUR = 0.2
 _TRIM_BUFFER = 0.2 + _CROSSFADE_DUR / 2   # 0.45 s total padding per clip
 
 
@@ -395,7 +395,7 @@ def start(job_path: str) -> Optional[dict]:
         is_image = sent.get("media_type") == "image"
         if is_image:
             num_clips = 1
-            clip_duration = sent_audio_dur if sent_audio_dur > 0 else _CLIP_TARGET
+            clip_duration = max(sent_audio_dur, _CLIP_TARGET) if sent_audio_dur > 0 else _CLIP_TARGET
         else:
             num_clips = max(1, round(sent_audio_dur / _CLIP_TARGET))
             clip_duration = _CLIP_TARGET
@@ -499,51 +499,52 @@ def start(job_path: str) -> Optional[dict]:
         except Exception as exc:
             logger.warning(f"trim overshoot failed ({exc}); proceeding with overshooted combined")
 
-    # Build an outro from the last sentence's clip (looped) so the ending has real
-    # moving footage instead of a frozen frame.  The outro covers any remaining gap
-    # to fill the full VO, plus a 3 s tail that will fade to black in generate_video.
-    outro_tail = 3.0
+    # Extend the combined video with a freeze of the last frame so the ending
+    # has a clean hold before the FadeOut in generate_video.  The outro covers
+    # any remaining gap to fill the full VO, plus a 2 s tail that will fade to
+    # black in generate_video (FadeOut 1.5 s).
+    outro_tail = 2.0
     needed_extra = max(outro_tail, audio_duration - combined_duration + outro_tail)
     extended_path = os.path.join(temp_dir, "extended.mp4")
     outro_path = os.path.join(temp_dir, "outro.mp4")
     _ENC = ["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-r", "30", "-threads", "4"]
+    # PRIMARY: freeze last frame via tpad — no loop restart, no stutter.
     try:
-        last_clip = ordered_clips[-1]
-        # Loop the last clip to fill the required tail length.
         subprocess.run(
             [
                 "ffmpeg", "-y", "-loglevel", "error",
-                "-stream_loop", "-1", "-i", last_clip,
-                "-t", f"{needed_extra:.3f}",
-                *_ENC, "-an", outro_path,
-            ],
-            check=True, capture_output=True, timeout=120,
-        )
-        # Re-encode-concat so there are no timebase/codec-parameter mismatches.
-        concat_list = os.path.join(temp_dir, "ext_concat.txt")
-        with open(concat_list, "w") as _cf:
-            _cf.write(f"file '{os.path.abspath(combined_path)}'\n")
-            _cf.write(f"file '{os.path.abspath(outro_path)}'\n")
-        subprocess.run(
-            [
-                "ffmpeg", "-y", "-loglevel", "error",
-                "-f", "concat", "-safe", "0", "-i", concat_list,
+                "-i", combined_path,
+                "-vf", f"tpad=stop_mode=clone:stop_duration={needed_extra:.3f}",
                 *_ENC, "-an", extended_path,
             ],
             check=True, capture_output=True, timeout=300,
         )
         logger.info(
-            f"outro: last clip looped {needed_extra:.2f}s → "
+            f"outro: freeze-frame {needed_extra:.2f}s → "
             f"extended={combined_duration + needed_extra:.2f}s (audio={audio_duration}s)"
         )
     except Exception as exc:
-        logger.warning(f"outro extension failed ({exc}), falling back to tpad freeze")
+        logger.warning(f"outro tpad failed ({exc}), falling back to last-clip loop")
+        # FALLBACK: loop the last clip.
         try:
+            last_clip = ordered_clips[-1]
             subprocess.run(
                 [
                     "ffmpeg", "-y", "-loglevel", "error",
-                    "-i", combined_path,
-                    "-vf", f"tpad=stop_mode=clone:stop_duration={needed_extra:.3f}",
+                    "-stream_loop", "-1", "-i", last_clip,
+                    "-t", f"{needed_extra:.3f}",
+                    *_ENC, "-an", outro_path,
+                ],
+                check=True, capture_output=True, timeout=120,
+            )
+            concat_list = os.path.join(temp_dir, "ext_concat.txt")
+            with open(concat_list, "w") as _cf:
+                _cf.write(f"file '{os.path.abspath(combined_path)}'\n")
+                _cf.write(f"file '{os.path.abspath(outro_path)}'\n")
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-loglevel", "error",
+                    "-f", "concat", "-safe", "0", "-i", concat_list,
                     *_ENC, "-an", extended_path,
                 ],
                 check=True, capture_output=True, timeout=300,
@@ -612,7 +613,7 @@ def start(job_path: str) -> Optional[dict]:
         rounded_subtitle_background=False,
         font_name=job.get("font_name", "Inter_18pt-SemiBold.ttf"),
         text_fore_color=job.get("text_fore_color", "#FFFFFF"),
-        font_size=int(job.get("font_size", 55)),
+        font_size=int(job.get("font_size", 30)),
         stroke_color=job.get("stroke_color", "#000000"),
         stroke_width=float(job.get("stroke_width", 1.5)),
         subtitle_highlight=bool(job.get("subtitle_highlight", False)),

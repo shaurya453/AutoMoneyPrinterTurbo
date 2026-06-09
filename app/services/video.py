@@ -354,7 +354,7 @@ def concat_video_clips_with_crossfade(
     output_file: str,
     threads: int,
     output_dir: str,
-    crossfade_duration: float = 0.5,
+    crossfade_duration: float = 0.2,
 ):
     """
     Concatenate clips using ffmpeg's xfade filter for smooth dissolves between cuts.
@@ -782,7 +782,7 @@ def combine_videos(
     # When crossfade is used each transition overlaps adjacent clips by cf seconds,
     # so the effective output duration is shorter than the raw sum of clip durations.
     # We track the raw sum for book-keeping but use effective_duration for stop decisions.
-    cf_overlap = 0.5 if transition_value == VideoTransitionMode.crossfade.value else 0.0
+    cf_overlap = 0.2 if transition_value == VideoTransitionMode.crossfade.value else 0.0
 
     processed_clips = []
     subclipped_items = []
@@ -1391,7 +1391,7 @@ def generate_video(
         else:
             video_clip = CompositeVideoClip([video_clip, *text_clips])
 
-    # Fade the video to black over the last 1.5 s (covers the 3 s outro tail).
+    # Fade the video to black over the last 1.5 s (covers the 2 s outro tail).
     video_clip = video_clip.with_effects([vfx.FadeOut(1.5)])
 
     bgm_file = get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file)

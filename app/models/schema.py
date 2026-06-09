@@ -86,7 +86,7 @@ class VideoParams(BaseModel):
     text_background_color: Union[bool, str] = False
     rounded_subtitle_background: bool = False
 
-    font_size: int = 60
+    font_size: int = 30
     stroke_color: Optional[str] = "#000000"
     stroke_width: float = 1.5
     subtitle_highlight: bool = False
