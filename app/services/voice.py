@@ -22,8 +22,8 @@ from app.config import config
 from app.utils import utils
 
 _DEFAULT_EDGE_TTS_TIMEOUT_SECONDS = 120.0
-_DEFAULT_KOKORO_LANG = en-us
-_KOKORO_PREFIX = kokoro:
+_DEFAULT_KOKORO_LANG = "en-us"
+_KOKORO_PREFIX = "kokoro:"
 _TTS_CHUNK_MAX_CHARS = 2500
 NO_VOICE_NAME = "no-voice"
 _NO_VOICE_ALIASES = {NO_VOICE_NAME, "none"}
@@ -140,10 +140,10 @@ def tts(
     voice_file: str,
     voice_volume: float = 1.0,
 ) -> Union[SubMaker, None]:
-    engine = str(config.app.get(tts_engine, edge)).lower()
+    engine = str(config.app.get("tts_engine", "edge")).lower()
 
     if voice_name.lower().startswith(_KOKORO_PREFIX):
-        engine = kokoro
+        engine = "kokoro"
         voice_name = voice_name[len(_KOKORO_PREFIX) :]
 
     if is_no_voice(voice_name):
@@ -156,7 +156,7 @@ def tts(
             text=text,
             audio_duration_seconds=duration_seconds,
         )
-    if engine == kokoro:
+    if engine == "kokoro":
         return kokoro_tts(text, voice_name, voice_rate, voice_file)
     if len(text) > _TTS_CHUNK_MAX_CHARS:
         return _azure_tts_chunked(text, voice_name, voice_rate, voice_file)
@@ -521,10 +521,14 @@ def kokoro_tts(
         "kokoro_model_path",
         os.path.join(config.root_dir, "resource/kokoro/kokoro-v1.0.onnx"),
     )
+    if not os.path.isabs(model_path):
+        model_path = os.path.join(config.root_dir, model_path)
     voices_path = config.app.get(
         "kokoro_voices_path",
         os.path.join(config.root_dir, "resource/kokoro/voices-v1.0.bin"),
     )
+    if not os.path.isabs(voices_path):
+        voices_path = os.path.join(config.root_dir, voices_path)
     model_dir = os.path.dirname(model_path)
     if not os.path.exists(model_path) or not os.path.exists(voices_path):
         logger.error("kokoro model or voices file missing")

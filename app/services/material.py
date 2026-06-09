@@ -204,7 +204,7 @@ def save_video(video_url: str, save_dir: str = "") -> str:
             os.remove(video_path)
         except Exception:
             pass
-        return None
+        return ""
 
     if os.path.exists(video_path) and os.path.getsize(video_path) > 0:
         clip = None

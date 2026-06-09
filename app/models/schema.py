@@ -36,12 +36,12 @@ class VideoAspect(str, Enum):
 
     def to_resolution(self):
         if self.value == "16:9":
-            return 1920, 1080
+            return 1280, 720
         elif self.value == "9:16":
-            return 1080, 1920
+            return 720, 1280
         elif self.value == "1:1":
-            return 1080, 1080
-        return 1080, 1920
+            return 720, 720
+        return 720, 1280
 
 
 class _Config:
