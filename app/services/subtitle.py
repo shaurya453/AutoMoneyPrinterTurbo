@@ -139,7 +139,7 @@ def create(audio_file, subtitle_file: str = ""):
             lines.append(
                 utils.text_to_srt(
                     idx, text,
-                    max(0.0, subtitle.get("start_time") - 0.3),
+                    subtitle.get("start_time"),
                     subtitle.get("end_time"),
                 )
             )

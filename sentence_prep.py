@@ -204,7 +204,7 @@ def main():
         "subtitle_highlight": False,
         "font_name": "Inter_18pt-SemiBold.ttf",
         "text_fore_color": "#FFFFFF",
-        "font_size": 55,
+        "font_size": 30,
         "stroke_color": "#000000",
         "stroke_width": 1.5,
         "subtitle_position": "bottom",

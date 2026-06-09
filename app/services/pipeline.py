@@ -294,6 +294,26 @@ def _make_work_dir(title: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Subtitle writer
+# ---------------------------------------------------------------------------
+
+def _timings_to_srt(timings: list, subtitle_path: str) -> None:
+    """Write sentence-level Whisper-aligned timestamps directly as an SRT file."""
+    lines = []
+    idx = 1
+    for sent, start, end in timings:
+        text = sent.get("text", "").strip()
+        if not text:
+            continue
+        lines.append(utils.text_to_srt(idx, text, start, end))
+        idx += 1
+    content = "\n".join(lines)
+    if content:
+        with open(subtitle_path, "w", encoding="utf-8") as f:
+            f.write(content + "\n")
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -558,36 +578,9 @@ def start(job_path: str) -> Optional[dict]:
     subtitle_path = ""
     if job.get("subtitle_enabled", True):
         subtitle_path = os.path.join(work_dir, "subtitle.srt")
-        provider = config.app.get("subtitle_provider", "edge").strip().lower()
-        logger.info(f"generating subtitle via {provider}")
-        if provider == "edge" and sub_maker is None:
-            logger.info("no edge sub_maker available — using whisper for subtitles")
-            provider = "whisper"
-
-        if provider == "edge":
-            voice.create_subtitle(
-                text=video_script,
-                sub_maker=sub_maker,
-                subtitle_file=subtitle_path,
-            )
-            if not os.path.exists(subtitle_path):
-                logger.warning("edge subtitle empty, falling back to whisper")
-                provider = "whisper"
-
-        if provider == "whisper":
-            subtitle.create(audio_file=audio_file, subtitle_file=subtitle_path)
-            subtitle.correct(subtitle_file=subtitle_path, video_script=video_script)
-
-        if job.get("subtitle_highlight") and provider == "edge" and os.path.exists(subtitle_path):
-            import json as _json
-            word_timings = voice.create_word_timings(sub_maker)
-            words_file = subtitle_path.replace(".srt", ".words.json")
-            with open(words_file, "w", encoding="utf-8") as _f:
-                _json.dump(word_timings, _f)
-            logger.info(f"word timings saved: {words_file}")
-
-        lines = subtitle.file_to_subtitles(subtitle_path)
-        if not lines:
+        logger.info("generating subtitles from Whisper sentence timestamps")
+        _timings_to_srt(timings, subtitle_path)
+        if not subtitle.file_to_subtitles(subtitle_path):
             logger.warning("subtitle file is empty or invalid — subtitles disabled")
             subtitle_path = ""
 
