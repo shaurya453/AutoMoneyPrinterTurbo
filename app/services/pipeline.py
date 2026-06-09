@@ -384,24 +384,31 @@ def start(job_path: str) -> Optional[dict]:
     ordered_clips: List[str] = []
     used_urls: set = set()  # tracks clip URLs used this run to prevent reuse
     total_sentences = len(timings)
-    # Each individual downloaded clip targets this duration.  Multiple clips
-    # are downloaded per sentence when the sentence's TTS audio is longer than
-    # one clip, so that total footage always covers the full audio — no looping.
+    # Video sentences: download multiple ~4-second clips to cover the sentence
+    # duration without repeating footage.
+    # Image sentences: one Ken Burns clip for the full sentence duration —
+    # multiple clips would show the same cached image repeatedly.
     _CLIP_TARGET = 4.0
     clip_counter = 0  # unique index for clip filenames across all sentences
     for idx, (sent, t_start, t_end) in enumerate(timings):
         sent_audio_dur = max(0.0, t_end - t_start)
-        num_clips = max(1, round(sent_audio_dur / _CLIP_TARGET))
+        is_image = sent.get("media_type") == "image"
+        if is_image:
+            num_clips = 1
+            clip_duration = sent_audio_dur if sent_audio_dur > 0 else _CLIP_TARGET
+        else:
+            num_clips = max(1, round(sent_audio_dur / _CLIP_TARGET))
+            clip_duration = _CLIP_TARGET
         preview = sent["text"][:60] + ("…" if len(sent["text"]) > 60 else "")
         logger.info(
-            f"[{idx+1}/{total_sentences}] {sent_audio_dur:.2f}s audio → {num_clips} clip(s) — {preview}"
+            f"[{idx+1}/{total_sentences}] {sent_audio_dur:.2f}s audio → {num_clips} clip(s) {'(image)' if is_image else ''} — {preview}"
         )
 
         got_any = False
         for _ci in range(num_clips):
             clip_path = _fetch_clip(
                 sentence=sent,
-                sent_duration=_CLIP_TARGET,
+                sent_duration=clip_duration,
                 source=video_source,
                 video_aspect=video_aspect,
                 clip_idx=clip_counter,
@@ -464,6 +471,33 @@ def start(job_path: str) -> Optional[dict]:
         combined_duration = float(_probe.stdout.strip())
     except Exception:
         combined_duration = 0.0
+
+    # combine_videos() may overshoot audio_duration when clip count exceeds the
+    # xfade limit (40 clips) and falls back to plain concat — the assumed crossfade
+    # overlap never materialises so combined ends up longer than expected.
+    # Trim it back to audio_duration before the outro step so the final video
+    # does not play silent footage after the narration ends.
+    if combined_duration > audio_duration + 0.5:
+        logger.info(
+            f"combined ({combined_duration:.2f}s) overshoots audio ({audio_duration:.2f}s); trimming"
+        )
+        _ENC_TRIM = ["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-r", "30", "-threads", "4"]
+        trimmed_path = os.path.join(temp_dir, "combined_trimmed.mp4")
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-loglevel", "error",
+                    "-i", combined_path,
+                    "-t", f"{audio_duration:.3f}",
+                    *_ENC_TRIM, "-an", trimmed_path,
+                ],
+                check=True, capture_output=True, timeout=300,
+            )
+            if os.path.exists(trimmed_path):
+                os.replace(trimmed_path, combined_path)
+                combined_duration = audio_duration
+        except Exception as exc:
+            logger.warning(f"trim overshoot failed ({exc}); proceeding with overshooted combined")
 
     # Build an outro from the last sentence's clip (looped) so the ending has real
     # moving footage instead of a frozen frame.  The outro covers any remaining gap
