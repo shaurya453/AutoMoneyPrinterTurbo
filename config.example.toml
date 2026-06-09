@@ -74,6 +74,14 @@ tls_verify = true
 # Increase on slow VPS networks; set to 0 to disable.
 edge_tts_timeout = 30
 
+# TTS engine: "edge" or "kokoro"
+tts_engine = "edge"
+# Paths relative to repo root by default
+kokoro_venv = "kokoro-venv"
+kokoro_model_path = "resource/kokoro/kokoro-v1.0.onnx"
+kokoro_voices_path = "resource/kokoro/voices-v1.0.bin"
+kokoro_lang = "en-us"
+
 # ---------------------------------------------------------------------------
 # Local storage
 # ---------------------------------------------------------------------------

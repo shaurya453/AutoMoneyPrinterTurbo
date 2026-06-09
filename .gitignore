@@ -23,6 +23,8 @@ node_modules
 # 模型目录
 /models/
 ./models/*
+resource/kokoro/*.onnx
+resource/kokoro/*.bin
 
 venv/
 .venv
