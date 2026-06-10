@@ -1,7 +1,7 @@
 import os
 import threading
 from typing import List
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import requests
 from loguru import logger
@@ -337,11 +337,30 @@ def search_images_unsplash(search_term: str, n: int = 5) -> List[str]:
         return []
 
 
+# Stock-photo libraries whose public preview images are almost always
+# heavily watermarked. DDG draws from the open web and can surface these.
+_WATERMARKED_IMAGE_DOMAINS = {
+    "shutterstock.com", "istockphoto.com", "gettyimages.com", "alamy.com",
+    "depositphotos.com", "123rf.com", "dreamstime.com", "stock.adobe.com",
+    "bigstockphoto.com", "canstockphoto.com", "vectorstock.com",
+    "fotolia.com", "stocksy.com",
+}
+
+
+def _is_watermarked_source(url: str) -> bool:
+    try:
+        host = urlparse(url).netloc.lower().split(":")[0]
+    except Exception:
+        return False
+    return any(host == d or host.endswith("." + d) for d in _WATERMARKED_IMAGE_DOMAINS)
+
+
 def search_images_ddg(search_term: str, n: int = 5) -> List[str]:
     """Return up to n image URLs from DuckDuckGo image search (free, no API key).
 
     Filters out images that are too small or have an extreme aspect ratio --
-    those crop poorly into the target video frame's Ken Burns window.
+    those crop poorly into the target video frame's Ken Burns window. Also
+    filters out known watermarked stock-photo domains.
     """
     try:
         from ddgs import DDGS
@@ -361,6 +380,8 @@ def search_images_ddg(search_term: str, n: int = 5) -> List[str]:
     for r in results:
         url = r.get("image")
         if not url:
+            continue
+        if _is_watermarked_source(url):
             continue
         try:
             width, height = int(r.get("width") or 0), int(r.get("height") or 0)
@@ -513,6 +534,7 @@ def download_image(
     search_terms: List[str],
     source_order: List[str] = None,
     save_dir: str = "",
+    used_urls: set = None,
 ) -> str:
     """
     Search for a still image using multiple providers in priority order and
@@ -521,32 +543,59 @@ def download_image(
 
     source_order: provider names to try in order.  Defaults to
         ["pexels", "pixabay", "unsplash", "wikimedia"].
+
+    used_urls: if provided, mutated in-place with the chosen image's source
+        identifier (remote URL or preseeded local path) so subsequent calls
+        across the run won't reuse the same image. A first pass avoids
+        anything already in used_urls; only if that pass finds nothing is a
+        second pass run allowing reuse.
     """
     if source_order is None:
         source_order = _DEFAULT_IMAGE_SOURCE_ORDER
 
-    for term in search_terms:
-        preset = _PRESEEDED_IMAGES.get(term.lower())
-        if preset and os.path.exists(preset):
-            logger.info(f"using preseeded image for '{term}': {preset}")
-            return preset
-        for provider in source_order:
-            fn = _IMAGE_PROVIDERS.get(provider)
-            if fn is None:
-                logger.warning(f"unknown image provider: {provider}")
-                continue
-            # DDG draws from the broad open web, so individual hosts are more
-            # likely to block hotlinking (e.g. Akamai-protected CDNs) -- request
-            # more candidates so a working one is likely among them.
-            n = 8 if provider == "duckduckgo" else 3
-            urls = fn(term, n=n)
-            for url in urls:
-                if not url:
+    def _try(allow_reuse: bool) -> str:
+        for term in search_terms:
+            preset = _PRESEEDED_IMAGES.get(term.lower())
+            if preset and os.path.exists(preset):
+                if used_urls is None or allow_reuse or preset not in used_urls:
+                    if used_urls is not None:
+                        if preset in used_urls:
+                            logger.warning(f"reusing preseeded image for '{term}': {preset}")
+                        used_urls.add(preset)
+                    logger.info(f"using preseeded image for '{term}': {preset}")
+                    return preset
+            for provider in source_order:
+                fn = _IMAGE_PROVIDERS.get(provider)
+                if fn is None:
+                    logger.warning(f"unknown image provider: {provider}")
                     continue
-                local = save_image(url, save_dir)
-                if local:
-                    logger.info(f"image obtained via {provider} for '{term}': {local}")
-                    return local
+                # DDG draws from the broad open web, so individual hosts are more
+                # likely to block hotlinking (e.g. Akamai-protected CDNs) -- request
+                # more candidates so a working one is likely among them.
+                n = 8 if provider == "duckduckgo" else 3
+                for url in fn(term, n=n):
+                    if not url:
+                        continue
+                    if used_urls is not None and not allow_reuse and url in used_urls:
+                        continue
+                    local = save_image(url, save_dir)
+                    if local:
+                        if used_urls is not None:
+                            if url in used_urls:
+                                logger.warning(f"image {url} already used — reusing for '{term}'")
+                            used_urls.add(url)
+                        logger.info(f"image obtained via {provider} for '{term}': {local}")
+                        return local
+        return ""
+
+    result = _try(allow_reuse=False)
+    if result:
+        return result
+    if used_urls is not None:
+        # First pass found nothing new -- re-run allowing reuse before giving up.
+        result = _try(allow_reuse=True)
+        if result:
+            return result
 
     logger.warning(f"no image found for terms {search_terms} from {source_order}")
     return ""

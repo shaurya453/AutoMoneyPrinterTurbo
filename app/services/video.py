@@ -73,6 +73,10 @@ fps = 30
 # crossfade overlap. pipeline.py uses the same value to decide whether to add
 # crossfade trim-buffer padding to fetched clips.
 XFADE_CLIP_LIMIT = 40
+# ffmpeg concat/xfade subprocess timeout. These run a single local encode pass
+# over already-downloaded clips (no network I/O), but a hung hardware encoder
+# or a malformed input stream could otherwise block the pipeline forever.
+_FFMPEG_CONCAT_TIMEOUT_SECONDS = 1800
 _BGM_EXTENSIONS = (".mp3",)
 _DEFAULT_VIDEO_CODEC = "libx264"
 _SUPPORTED_VIDEO_CODECS = (
@@ -433,9 +437,15 @@ def concat_video_clips_with_crossfade(
         output_file,
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, check=False,
+            timeout=_FFMPEG_CONCAT_TIMEOUT_SECONDS,
+        )
         failed = result.returncode != 0
         err_msg = (result.stderr or result.stdout or "").strip()
+    except subprocess.TimeoutExpired:
+        failed = True
+        err_msg = f"xfade concat timed out after {_FFMPEG_CONCAT_TIMEOUT_SECONDS}s"
     except OSError as exc:
         failed = True
         err_msg = str(exc)
@@ -477,12 +487,16 @@ def concat_video_clips_with_ffmpeg(
         command = build_command(codec)
         # 使用 ffmpeg 只做一次串联与编码，避免 MoviePy 逐段合并时反复重编码，
         # 从而降低画质劣化与颜色偏移风险。
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=_FFMPEG_CONCAT_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"ffmpeg concat timed out after {_FFMPEG_CONCAT_TIMEOUT_SECONDS}s")
         if result.returncode != 0:
             error_message = (result.stderr or result.stdout or "").strip()
             raise RuntimeError(error_message or "ffmpeg concat failed")
@@ -634,6 +648,10 @@ def render_ken_burns_clip(
             threads=threads,
             logger=None,
         )
+    except Exception as exc:
+        # A single bad image must not crash the whole multi-sentence pipeline —
+        # let the caller fall back to a stock-video clip for this sentence.
+        logger.warning(f"Ken Burns render failed for {image_path}: {str(exc)}")
     finally:
         close_clip(clip)
     return output_path if os.path.exists(output_path) else ""

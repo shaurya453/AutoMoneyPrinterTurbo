@@ -112,12 +112,17 @@ def generate_silent_audio(duration_seconds: float, output_file: str) -> bool:
     logger.info(
         f"generating silent audio for no-voice mode, duration: {duration_seconds:.2f}s"
     )
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        logger.error("generating silent audio timed out after 60s")
+        return False
     if result.returncode != 0:
         logger.error(
             "failed to generate silent audio: "

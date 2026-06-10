@@ -55,8 +55,8 @@ Read every sentence in `job.json` and set three fields yourself:
 | Elon Musk | `"Elon Musk portrait"` | `"tech CEO interview"` |
 | iPhone 15 Pro | `"iPhone 15 Pro"` | `"Apple smartphone"` |
 | Amazon rainforest | `"Amazon rainforest aerial"` | `"tropical rainforest canopy"` |
-| Paris | `"Paris Eiffel Tower"` | `"European city landmark"` |
-| Goldman Sachs | `"Goldman Sachs building"` | `"Wall Street bank office"` |
+| Paris (as a backdrop/scene) | `"Paris Eiffel Tower"` | `"European city aerial"` |
+| Goldman Sachs (as a backdrop/scene) | `"Goldman Sachs building"` | `"Wall Street bank office"` |
 
 The pipeline tries term 0 first. Term 1 only runs if term 0 finds no unused footage. **Never write a vague term 0** — a good fallback in slot 1 does not excuse a weak slot 0.
 
@@ -64,23 +64,51 @@ Additional rules:
 - **Action / process** → describe what the camera sees: `["surgeon operating room", "medical procedure"]`
 - **Abstract concept** → find a concrete visual metaphor: don't use `"hope"`, use `"sunrise over city"`
 - Max **3 words per term**
-- For named products, brands, people, and places: always set `media_type` to `"image"` — stock photo libraries (especially Wikimedia Commons) have real product shots and portraits that video libraries lack
+- **Static subjects** (products/SKUs, portraits, logos, screenshots, documents, charts, historical archive photos): always set `media_type` to `"image"` — stock photo libraries (especially Wikimedia Commons and DuckDuckGo) have real product shots and portraits that video libraries lack
+- **Scenes, locations, and environments** (stores, restaurants, offices, landmarks used as a backdrop): set `media_type` to `"video"` — see below
 
 ### `media_type`
 
-Set `"image"` when a **still photo** captures it better than stock video:
+`media_type` is a **preference**, not a hard requirement: if the chosen type
+finds nothing for `search_terms`, the pipeline automatically retries with the
+other type using the same terms. So picking `"video"` for a scene is
+low-risk — worst case it falls back to an image.
+
+Set `"image"` for **static subjects** — things that are inherently a single
+flat object/photo, where stock video of them barely exists or just shows
+someone holding/using them:
 
 | Use `"image"` for | Use `"video"` for |
 |---|---|
-| Named products and brands (any specific SKU/model) | Generic action (people walking, traffic) |
-| Named people (portraits, headshots) | Processes (manufacturing, surgery) |
-| Named companies (HQ building, logo) | Scenery and environments |
-| Named cities / landmarks | Anything with continuous motion |
-| Historical events / archive photos | Generic category b-roll |
-| Maps, logos, documents, screenshots | |
-| Artworks, charts, diagrams | |
+| Named products and brands (any specific SKU/model) | Scenes, locations, environments (stores, restaurants, offices) |
+| Named people (portraits, headshots) | Landmarks/buildings used as a backdrop |
+| Logos, screenshots, documents | Generic action (people walking, traffic) |
+| Maps, artworks, charts, diagrams | Processes (manufacturing, surgery) |
+| Historical events / archive photos | Anything with continuous motion |
 
-**Default to `"image"` whenever a specific named entity is mentioned** — it is better to show a real photo of the exact thing than a generic video that happens to be in the same category.
+**Why scenes should be video, even with a specific name**: a sentence like
+"I walked into a Kroger" is describing a *place the narrator is in*, not
+displaying a product. A real Kroger storefront photo from the open web is
+very likely a heavily watermarked stock image — but a generic "supermarket
+interior" stock *video* reads naturally as b-roll for the scene. For
+locations/scenes, prefer `"video"` with `search_terms[0]` = the specific
+named place + context (e.g. `"Kroger storefront"`) and `search_terms[1]` =
+a generic category video (e.g. `"supermarket interior"`).
+
+Examples:
+
+| Sentence | `media_type` | `search_terms` |
+|---|---|---|
+| "I walked into a Kroger" | `"video"` | `["Kroger storefront", "supermarket interior"]` |
+| "We grabbed lunch at a Chipotle" | `"video"` | `["Chipotle restaurant", "fast casual restaurant"]` |
+| "Their headquarters sits in downtown Seattle" | `"video"` | `["Amazon HQ Seattle", "downtown office buildings"]` |
+| "The Eiffel Tower rose in 1889" (historical subject) | `"image"` | `["Eiffel Tower 1889 construction", "Eiffel Tower archive photo"]` |
+| "I bought a box of Kellogg's Chocos" | `"image"` | `["Kellogg's Chocos", "chocolate cereal box"]` |
+| "Tim Cook took the stage" | `"image"` | `["Tim Cook portrait", "tech CEO keynote"]` |
+
+**Default to `"image"` only for genuinely static subjects** — products,
+portraits, logos, documents, archive photos. For places the narration is
+*set in* or *passing through*, default to `"video"`.
 
 Images are never cropped: each image renders as a centered inset (slowly
 zooming from ~75% to ~82.5% of its "fit" size) over a blurred, darkened
@@ -90,7 +118,7 @@ product/portrait photos always show their full content and compose well in a
 ratio or framing.
 
 Image search order: **DuckDuckGo → Wikimedia Commons → Pexels Photos → Pixabay Images → Unsplash**
-DuckDuckGo is checked first — it's a free, keyless broad open-web image search (similar to the old Google/Bing image search), giving the best chance of finding a real photo of the exact named product, brand, person, or place that `search_terms[0]` should describe. Wikimedia is the curated fallback for encyclopaedic subjects. The stock-photo providers (Pexels/Pixabay/Unsplash) are the category fallback when neither finds the exact term.
+DuckDuckGo is checked first — it's a free, keyless broad open-web image search (similar to the old Google/Bing image search), giving the best chance of finding a real photo of the exact named product, brand, person, or place that `search_terms[0]` should describe. Known watermarked stock-photo domains (Shutterstock, iStock, Getty, Alamy, etc.) are filtered out of DuckDuckGo results automatically. Wikimedia is the curated fallback for encyclopaedic subjects. The stock-photo providers (Pexels/Pixabay/Unsplash) are the category fallback when neither finds the exact term.
 
 ---
 
@@ -172,6 +200,12 @@ After enriching all sentences, re-read the **entire** sentences list as a qualit
 
 Fix anything that looks weak. The review pass exists because the writing mode and the footage-quality audit mode catch different problems — the same sentence often looks fine when you write it but obviously vague when you read it cold.
 
+The pipeline automatically dedupes clips and images against everything already
+used earlier in the same run (`used_urls`), so reusing the same `search_terms[0]`
+for a recurring entity is safe and still encouraged for consistency — the
+pipeline will pick a different result for the repeat occurrence rather than
+showing the identical clip/image twice.
+
 ---
 
 ## Step 3 — Done: Print the Path and Stop
@@ -204,9 +238,12 @@ The path to `final.mp4` is printed as JSON to stdout on success.
 TTS (edge_tts)
   └─► audio.mp3
         └─► faster-whisper (base, cpu) → per-sentence timestamps
-              └─► for each sentence:
-                    ├─ media_type=video → Pexels/Pixabay search → download → trim to duration
-                    └─ media_type=image → Pexels/Pixabay/Unsplash/Wikimedia → Ken Burns render
+              └─► for each sentence (media_type = preferred type):
+                    ├─ preferred=video → Pexels/Pixabay search → download → trim to duration
+                    │     └─ nothing found → fall back to image (same search_terms)
+                    └─ preferred=image → DuckDuckGo/Wikimedia/Pexels/Pixabay/Unsplash → Ken Burns render
+                          └─ nothing found → fall back to video (same search_terms)
+                    (both directions dedupe against used_urls from earlier sentences)
                           └─► combine_videos() sequential + xfade crossfade
                                 └─► subtitle.srt (edge_tts timing or whisper fallback)
                                       └─► generate_video() → final.mp4
@@ -219,5 +256,6 @@ TTS (edge_tts)
 
 - **Trusting the stub search terms** — rewrite all of them, they are a scaffold not a answer
 - **Using abstract terms** — always picture what a camera lens would physically show
-- **Leaving `media_type: "video"` for a specific product or person** — use `"image"` so the exact subject is searched for
+- **Leaving `media_type: "video"` for a static subject** (product, portrait, logo, document) — use `"image"` so the exact subject is searched for
+- **Defaulting to `media_type: "image"` for a named scene/location** (store, restaurant, office) — a real photo of a specific storefront is usually a watermarked stock image; use `"video"` with a specific term + generic category fallback (e.g. `["Kroger storefront", "supermarket interior"]`) instead
 - **Leaving `bgm_search_term` blank on emotional content** — music significantly improves impact

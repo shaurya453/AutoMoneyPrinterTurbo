@@ -58,23 +58,41 @@ def _get_sentence_timestamps(
     list of (word, start_sec, end_sec) tuples from Whisper, used to drive
     subtitle word-highlight animation.
     """
+    import concurrent.futures
+
     from faster_whisper import WhisperModel
 
     model_size = config.whisper.get("model_size", "base")
     device = config.whisper.get("device", "cpu")
     compute_type = config.whisper.get("compute_type", "int8")
+    timeout_seconds = float(config.whisper.get("timeout_seconds", 1800))
 
     logger.info(f"loading whisper model: {model_size} on {device}")
     model = WhisperModel(model_size, device=device, compute_type=compute_type)
-    segments, _ = model.transcribe(audio_file, word_timestamps=True)
 
-    all_words: List[Tuple[str, float, float]] = []
-    for seg in segments:
-        if seg.words:
-            for w in seg.words:
-                word = w.word.strip()
-                if word:
-                    all_words.append((word, w.start, w.end))
+    def _transcribe() -> List[Tuple[str, float, float]]:
+        segments, _ = model.transcribe(audio_file, word_timestamps=True)
+        words: List[Tuple[str, float, float]] = []
+        for seg in segments:
+            if seg.words:
+                for w in seg.words:
+                    word = w.word.strip()
+                    if word:
+                        words.append((word, w.start, w.end))
+        return words
+
+    # faster-whisper has no native timeout; run it on a worker thread so a
+    # pathological/huge audio file can't hang the pipeline forever. On
+    # timeout the thread is left to finish in the background (daemon-ish via
+    # shutdown(wait=False)) while we fall back to uniform timestamps.
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(_transcribe)
+    try:
+        all_words = future.result(timeout=timeout_seconds)
+    except concurrent.futures.TimeoutError:
+        executor.shutdown(wait=False)
+        raise TimeoutError(f"whisper transcription exceeded {timeout_seconds:g}s")
+    executor.shutdown(wait=False)
 
     logger.info(f"whisper found {len(all_words)} words across {len(sentences)} sentences")
 
@@ -156,6 +174,9 @@ _TRIM_BUFFER = 0.2 + _CROSSFADE_DUR / 2   # 0.3 s total padding per clip
 # Clip fetch + trim
 # ---------------------------------------------------------------------------
 
+_TRIM_TIMEOUT_SECONDS = 120
+
+
 def _trim_clip(src_path: str, duration: float, out_path: str) -> bool:
     """Trim a video to `duration` seconds via ffmpeg. Returns True on success."""
     # Try fast stream-copy first
@@ -166,8 +187,14 @@ def _trim_clip(src_path: str, duration: float, out_path: str) -> bool:
         "-c", "copy",
         out_path,
     ]
-    if subprocess.run(cmd, capture_output=True).returncode == 0 and os.path.exists(out_path):
-        return True
+    try:
+        if (
+            subprocess.run(cmd, capture_output=True, timeout=_TRIM_TIMEOUT_SECONDS).returncode == 0
+            and os.path.exists(out_path)
+        ):
+            return True
+    except subprocess.TimeoutExpired:
+        logger.warning(f"ffmpeg stream-copy trim timed out after {_TRIM_TIMEOUT_SECONDS}s: {src_path}")
     # Re-encode fallback
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
@@ -176,13 +203,17 @@ def _trim_clip(src_path: str, duration: float, out_path: str) -> bool:
         "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
         out_path,
     ]
-    return (
-        subprocess.run(cmd, capture_output=True).returncode == 0
-        and os.path.exists(out_path)
-    )
+    try:
+        return (
+            subprocess.run(cmd, capture_output=True, timeout=_TRIM_TIMEOUT_SECONDS).returncode == 0
+            and os.path.exists(out_path)
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning(f"ffmpeg re-encode trim timed out after {_TRIM_TIMEOUT_SECONDS}s: {src_path}")
+        return False
 
 
-def _fetch_clip(
+def _fetch_video_clip(
     sentence: dict,
     sent_duration: float,
     trim_buffer: float,
@@ -192,44 +223,15 @@ def _fetch_clip(
     clips_dir: str,
     used_urls: set,
 ) -> Optional[str]:
-    """
-    Download and prepare a clip (stock video or Ken Burns image) for one sentence.
-    Returns the path to the ready-to-assemble MP4, or None if nothing found.
+    """Download + trim a stock-video clip. None if no candidates found at all.
 
-    used_urls is mutated in-place: the chosen clip URL is added so subsequent
-    sentences won't reuse the same source footage.
+    used_urls is mutated in-place on success.
     """
     search_terms = sentence.get("search_terms", [])
     if not search_terms:
-        logger.warning(f"clip {clip_idx}: no search terms provided")
         return None
 
-    width, height = VideoAspect(video_aspect).to_resolution()
     out_path = os.path.join(clips_dir, f"clip-{clip_idx:04d}.mp4")
-
-    # ---- image sentences: Ken Burns effect ----
-    if sentence.get("media_type") == "image":
-        image_path = material.download_image(
-            search_terms=search_terms,
-            save_dir=utils.storage_dir("cache_images"),
-        )
-        if not image_path:
-            logger.warning(f"clip {clip_idx}: no image found for terms {search_terms}")
-            return None
-        duration = sent_duration + trim_buffer
-        result = video.render_ken_burns_clip(
-            image_path=image_path,
-            duration=duration,
-            width=width,
-            height=height,
-            output_path=out_path,
-        )
-        if not result:
-            logger.warning(f"clip {clip_idx}: Ken Burns render failed")
-            return None
-        return out_path
-
-    # ---- video sentences: download + trim ----
     search_fn = (
         material.search_videos_pixabay
         if source == "pixabay"
@@ -252,13 +254,12 @@ def _fetch_clip(
             break
 
     if not candidates:
-        logger.warning(f"clip {clip_idx}: no video results for terms {search_terms}")
         return None
 
     # Pick the first candidate whose URL hasn't been used in this run.
     chosen = next((c for c in candidates if c.url not in used_urls), candidates[0])
     if chosen.url in used_urls:
-        logger.warning(f"clip {clip_idx}: all candidates already used — reusing {chosen.url}")
+        logger.warning(f"clip {clip_idx}: all video candidates already used — reusing {chosen.url}")
     used_urls.add(chosen.url)
 
     downloaded = material.save_video(
@@ -266,15 +267,103 @@ def _fetch_clip(
         save_dir=utils.storage_dir("cache_videos"),
     )
     if not downloaded:
-        logger.warning(f"clip {clip_idx}: download failed")
+        logger.warning(f"clip {clip_idx}: video download failed")
         return None
 
     ok = _trim_clip(downloaded, sent_duration + trim_buffer, out_path)
     if not ok:
-        logger.warning(f"clip {clip_idx}: trim failed — skipping clip")
+        logger.warning(f"clip {clip_idx}: trim failed")
         return None
 
     return out_path
+
+
+def _fetch_image_clip(
+    sentence: dict,
+    sent_duration: float,
+    trim_buffer: float,
+    video_aspect: VideoAspect,
+    clip_idx: int,
+    clips_dir: str,
+    used_urls: set,
+) -> Optional[str]:
+    """Download an image and render a Ken Burns clip. None if no image found.
+
+    used_urls is mutated in-place on success (see material.download_image).
+    """
+    search_terms = sentence.get("search_terms", [])
+    if not search_terms:
+        return None
+
+    width, height = VideoAspect(video_aspect).to_resolution()
+    out_path = os.path.join(clips_dir, f"clip-{clip_idx:04d}.mp4")
+
+    image_path = material.download_image(
+        search_terms=search_terms,
+        save_dir=utils.storage_dir("cache_images"),
+        used_urls=used_urls,
+    )
+    if not image_path:
+        return None
+
+    result = video.render_ken_burns_clip(
+        image_path=image_path,
+        duration=sent_duration + trim_buffer,
+        width=width,
+        height=height,
+        output_path=out_path,
+    )
+    if not result:
+        logger.warning(f"clip {clip_idx}: Ken Burns render failed")
+        return None
+
+    return out_path
+
+
+def _fetch_clip(
+    sentence: dict,
+    sent_duration: float,
+    trim_buffer: float,
+    source: str,
+    video_aspect: VideoAspect,
+    clip_idx: int,
+    clips_dir: str,
+    used_urls: set,
+) -> Optional[str]:
+    """
+    Fetch a clip (stock video or Ken Burns image) for one sentence, preferring
+    sentence['media_type']. If the preferred type finds nothing, falls back to
+    the other media type using the same search_terms before giving up.
+
+    used_urls is mutated in-place: the chosen clip's source is added so
+    subsequent sentences won't reuse the same footage/image.
+    """
+    search_terms = sentence.get("search_terms", [])
+    if not search_terms:
+        logger.warning(f"clip {clip_idx}: no search terms provided")
+        return None
+
+    is_image = sentence.get("media_type") == "image"
+    args_video = (sentence, sent_duration, trim_buffer, source, video_aspect, clip_idx, clips_dir, used_urls)
+    args_image = (sentence, sent_duration, trim_buffer, video_aspect, clip_idx, clips_dir, used_urls)
+
+    if is_image:
+        result = _fetch_image_clip(*args_image)
+        primary, fallback_name = "image", "video"
+    else:
+        result = _fetch_video_clip(*args_video)
+        primary, fallback_name = "video", "image"
+
+    if result:
+        return result
+
+    logger.warning(f"clip {clip_idx}: no {primary} found for terms {search_terms} — trying {fallback_name} fallback")
+    result = _fetch_video_clip(*args_video) if fallback_name == "video" else _fetch_image_clip(*args_image)
+    if result:
+        return result
+
+    logger.warning(f"clip {clip_idx}: no clip found for terms {search_terms} (tried both video and image)")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -425,27 +514,46 @@ def start(job_path: str) -> Optional[dict]:
     # Image sentences: one Ken Burns clip for the full sentence duration —
     # multiple clips would show the same cached image repeatedly.
     _CLIP_TARGET = 4.0
-    _MIN_CLIP_DUR = 1.2  # avoid sub-second flashes when splitting a video sentence
+    _MIN_VISUAL_DUR = 3.0             # absolute floor for any single clip's duration
+    _MAX_CARRY = 2 * _MIN_VISUAL_DUR  # 6.0s -- caps how much "padding debt" can build up
 
     # ---- Pass 1: plan per-sentence clip durations so each sentence's visible
     # footage sums to exactly its audio duration (prevents progressive
-    # visual/audio drift over long videos). ----
+    # visual/audio drift), while giving every clip a >= _MIN_VISUAL_DUR floor.
+    #
+    # `carry` = accumulated (visual_time_so_far - audio_time_so_far), i.e. the
+    # "debt" owed back to the audio track from padding short sentences up to
+    # the floor. It is always >= 0 by construction. Sentences whose raw audio
+    # duration exceeds their floor automatically repay this debt (their
+    # visual duration is shrunk by up to `carry`, but never below their own
+    # floor) -- this is what keeps `carry` from growing unboundedly in normal
+    # scripts. `_MAX_CARRY` only suppresses further padding once debt is
+    # already high (a long run of ultra-short sentences won't inflate carry
+    # forever); it never blocks repayment, so normal scripts still
+    # self-correct to carry == 0.
+    carry = 0.0
     clip_plans = []
     for sent, t_start, t_end in timings:
         sent_audio_dur = max(0.0, t_end - t_start)
         is_image = sent.get("media_type") == "image"
 
-        if is_image:
-            # One Ken Burns clip spanning the full sentence — no artificial
-            # floor, so the sum stays exactly equal to sent_audio_dur.
-            durations = [sent_audio_dur if sent_audio_dur > 0 else _CLIP_TARGET]
-        elif sent_audio_dur <= 0:
-            durations = [_CLIP_TARGET]
+        if is_image or sent_audio_dur <= 0:
+            num_clips = 1
         else:
             ideal_clips = max(1, round(sent_audio_dur / _CLIP_TARGET))
-            max_clips_by_min_dur = max(1, int(sent_audio_dur // _MIN_CLIP_DUR))
+            max_clips_by_min_dur = max(1, int(sent_audio_dur // _MIN_VISUAL_DUR))
             num_clips = max(1, min(ideal_clips, max_clips_by_min_dur))
-            durations = [sent_audio_dur / num_clips] * num_clips
+
+        raw_target = sent_audio_dur if sent_audio_dur > 0 else _CLIP_TARGET
+        floor = num_clips * _MIN_VISUAL_DUR
+        total = max(floor, raw_target - carry)
+        if carry >= _MAX_CARRY and total > raw_target:
+            # Debt is already high and this sentence would only pad it
+            # further -- stop growing carry; fall back to the un-padded
+            # duration (may be < _MIN_VISUAL_DUR as a last resort).
+            total = raw_target
+        durations = [total / num_clips] * num_clips
+        carry += total - raw_target
 
         clip_plans.append({
             "sent": sent,
@@ -514,17 +622,22 @@ def start(job_path: str) -> Optional[dict]:
     # ------------------------------------------------------------------ #
     combined_path = os.path.join(temp_dir, "combined.mp4")
     logger.info("combining clips sequentially")
-    video.combine_videos(
-        combined_video_path=combined_path,
-        video_paths=ordered_clips,
-        audio_file=audio_file,
-        video_aspect=video_aspect,
-        video_concat_mode=VideoConcatMode.sequential,
-        video_transition_mode=VideoTransitionMode.crossfade,
-        # Clips are already pre-trimmed; use a large cap to avoid re-trimming.
-        max_clip_duration=999,
-        threads=os.cpu_count() or 4,
-    )
+    try:
+        video.combine_videos(
+            combined_video_path=combined_path,
+            video_paths=ordered_clips,
+            audio_file=audio_file,
+            video_aspect=video_aspect,
+            video_concat_mode=VideoConcatMode.sequential,
+            video_transition_mode=VideoTransitionMode.crossfade,
+            # Clips are already pre-trimmed; use a large cap to avoid re-trimming.
+            max_clip_duration=999,
+            threads=os.cpu_count() or 4,
+        )
+    except Exception:
+        logger.exception("combine_videos() raised — aborting")
+        sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+        return None
     if not os.path.exists(combined_path):
         logger.error("combine_videos() produced no output — aborting")
         sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
@@ -677,13 +790,18 @@ def start(job_path: str) -> Optional[dict]:
 
     output_file = os.path.join(work_dir, "final.mp4")
     logger.info(f"generating final video: {output_file}")
-    video.generate_video(
-        video_path=extended_path,
-        audio_path=audio_file,
-        subtitle_path=subtitle_path,
-        output_file=output_file,
-        params=params,
-    )
+    try:
+        video.generate_video(
+            video_path=extended_path,
+            audio_path=audio_file,
+            subtitle_path=subtitle_path,
+            output_file=output_file,
+            params=params,
+        )
+    except Exception:
+        logger.exception("generate_video() raised — aborting")
+        sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+        return None
 
     if not os.path.exists(output_file):
         logger.error("final video not found after generate_video()")

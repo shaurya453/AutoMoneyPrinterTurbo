@@ -121,6 +121,10 @@ model_size = "base"
 device = "cpu"
 compute_type = "int8"
 
+# Max seconds to wait for sentence-timestamp transcription (pipeline.py
+# step 2) before giving up and falling back to uniform timestamps.
+timeout_seconds = 1800
+
 
 # ---------------------------------------------------------------------------
 # [proxy]
