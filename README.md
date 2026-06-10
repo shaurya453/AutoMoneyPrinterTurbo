@@ -43,7 +43,8 @@ cp config.example.toml config.toml
 | `pexels_api_keys` | [pexels.com/api](https://www.pexels.com/api/) | Yes (or Pixabay) |
 | `pixabay_api_keys` | [pixabay.com/api/docs](https://pixabay.com/api/docs/) | Yes (or Pexels) |
 | `unsplash_api_keys` | [unsplash.com/developers](https://unsplash.com/developers) | Optional — image fallback |
-Wikimedia Commons is also used as a final image fallback and needs no key.
+
+Image searches try DuckDuckGo and Wikimedia Commons first (no key needed), then fall back to Pexels Photos, Pixabay Images, and Unsplash in that order.
 
 > `config.toml` is gitignored and must never be committed — it contains your live API keys.
 
@@ -53,19 +54,19 @@ Wikimedia Commons is also used as a final image fallback and needs no key.
 
 ### Step 1 — Write your script
 
-Create a plain-text file with your script. Put all per-job files inside `jobs/<title>/`:
+Create a plain-text file with your script. Put all per-job files inside `storage/tasks/<title>/`:
 
 ```bash
-mkdir -p "jobs/My Video"
-# write your script to jobs/My Video/script.txt
+mkdir -p "storage/tasks/My Video"
+# write your script to storage/tasks/My Video/script.txt
 ```
 
 ### Step 2 — Generate the job JSON
 
 ```bash
 python sentence_prep.py \
-  --script "jobs/My Video/script.txt" \
-  --out    "jobs/My Video/job.json" \
+  --script "storage/tasks/My Video/script.txt" \
+  --out    "storage/tasks/My Video/job.json" \
   --title  "My Video"
 ```
 
@@ -80,7 +81,7 @@ python sentence_prep.py \
 
 ### Step 3 — Enrich the job JSON
 
-Open `jobs/My Video/job.json` and for each sentence set:
+Open `storage/tasks/My Video/job.json` and for each sentence set:
 
 - **`search_terms`** — what a stock camera would physically show (2 terms, max 3 words each)
 - **`media_type`** — `"video"` for motion b-roll, `"image"` for specific products/people/places
@@ -90,7 +91,7 @@ See [`AGENT_GUIDE.md`](AGENT_GUIDE.md) for detailed guidance, especially on when
 ### Step 4 — Run the pipeline
 
 ```bash
-python cli.py --job "jobs/My Video/job.json"
+python cli.py --job "storage/tasks/My Video/job.json"
 ```
 
 Add `--log-level DEBUG` for verbose output. On success, the path to `final.mp4` is printed as JSON.
@@ -128,14 +129,7 @@ BGM is automatically ducked during narration and rises back between sentences.
 
 ## Subtitles
 
-Subtitles default to the **edge_tts** word-timing provider (fast, no extra model). Switch to **Whisper** for higher accuracy on dense or fast speech:
-
-```toml
-# config.toml
-subtitle_provider = "whisper"
-```
-
-The Whisper model (`base` by default) is also used internally for sentence timestamp alignment regardless of the subtitle provider setting.
+Subtitles are generated from the **faster-whisper** sentence-level timestamp alignment (`base` model by default — see `[whisper]` in `config.toml`), which is also what keeps each sentence's footage in sync with the narration.
 
 ---
 
@@ -153,6 +147,6 @@ This pipeline is built to be driven by an AI agent. Read [`AGENT_GUIDE.md`](AGEN
 | Timestamp alignment | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) |
 | Video assembly | [MoviePy 2](https://github.com/Zulko/moviepy) + FFmpeg |
 | Stock video | Pexels, Pixabay |
-| Stock images | Pexels Photos, Pixabay Images, Unsplash, Wikimedia Commons |
+| Stock images | DuckDuckGo, Wikimedia Commons, Pexels Photos, Pixabay Images, Unsplash |
 | BGM | Pixabay Music (online) or user-supplied MP3s in `resource/songs/` |
 | Subtitles | Pillow (burned-in), Inter SemiBold |
