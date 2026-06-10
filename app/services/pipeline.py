@@ -18,6 +18,7 @@ import math
 import os
 import re
 import subprocess
+from difflib import SequenceMatcher
 from typing import List, Optional, Tuple
 
 from loguru import logger
@@ -39,13 +40,23 @@ from app.utils import utils
 # Whisper sentence-timestamp alignment
 # ---------------------------------------------------------------------------
 
+def _norm_token(w: str) -> str:
+    return re.sub(r"[^\w]", "", w).lower()
+
+
 def _get_sentence_timestamps(
     audio_file: str, sentences: list
-) -> List[Tuple[dict, float, float]]:
+) -> Tuple[List[Tuple[dict, float, float]], List[Tuple[str, float, float]]]:
     """
-    Transcribe audio with faster-whisper (word_timestamps=True) and map
-    each sentence to a (start_sec, end_sec) span by counting words.
-    Returns [(sentence_dict, start, end), ...].
+    Transcribe audio with faster-whisper and align each sentence to a
+    (start_sec, end_sec) span using SequenceMatcher token alignment.
+
+    Unlike word-count advancement, SequenceMatcher handles insertions and
+    deletions without accumulating drift across 200+ sentences.
+
+    Returns (sentence_timings, word_timings) where word_timings is the raw
+    list of (word, start_sec, end_sec) tuples from Whisper, used to drive
+    subtitle word-highlight animation.
     """
     from faster_whisper import WhisperModel
 
@@ -67,21 +78,58 @@ def _get_sentence_timestamps(
 
     logger.info(f"whisper found {len(all_words)} words across {len(sentences)} sentences")
 
-    results: List[Tuple[dict, float, float]] = []
-    word_idx = 0
-    for sent in sentences:
-        count = len(sent["text"].split())
-        if word_idx >= len(all_words):
-            last_end = all_words[-1][2] if all_words else 0.0
-            results.append((sent, last_end, last_end + 2.0))
-            continue
-        start = all_words[word_idx][1]
-        end_idx = min(word_idx + count - 1, len(all_words) - 1)
-        end = all_words[end_idx][2]
-        results.append((sent, start, end))
-        word_idx = min(word_idx + count, len(all_words))
+    if not all_words:
+        return _uniform_timestamps(sentences, 0.0), []
 
-    return results
+    # Build expected token sequence: (normalized_token, sentence_idx)
+    expected_tokens: List[tuple] = []
+    for s_idx, sent in enumerate(sentences):
+        for tok in sent["text"].split():
+            n = _norm_token(tok)
+            if n:
+                expected_tokens.append((n, s_idx))
+
+    expected_norm = [t[0] for t in expected_tokens]
+    whisper_norm = [_norm_token(w[0]) for w in all_words]
+
+    # Global sequence alignment — no drift, handles insertions/deletions
+    matcher = SequenceMatcher(None, expected_norm, whisper_norm, autojunk=False)
+
+    exp_to_whisper: List[Optional[int]] = [None] * len(expected_tokens)
+    for a, b, size in matcher.get_matching_blocks():
+        for k in range(size):
+            exp_to_whisper[a + k] = b + k
+
+    # Fill forward: unmatched expected tokens inherit the previous whisper index
+    last_w = 0
+    for i in range(len(exp_to_whisper)):
+        if exp_to_whisper[i] is not None:
+            last_w = exp_to_whisper[i]
+        else:
+            exp_to_whisper[i] = last_w
+
+    # Build per-sentence time spans
+    sentence_spans: dict = {}
+    for exp_idx, (_, s_idx) in enumerate(expected_tokens):
+        w_idx = exp_to_whisper[exp_idx]
+        if w_idx is None or w_idx >= len(all_words):
+            continue
+        _, w_start, w_end = all_words[w_idx]
+        if s_idx not in sentence_spans:
+            sentence_spans[s_idx] = [w_start, w_end]
+        else:
+            sentence_spans[s_idx][1] = w_end
+
+    last_end = all_words[-1][2]
+    results: List[Tuple[dict, float, float]] = []
+    for s_idx, sent in enumerate(sentences):
+        if s_idx in sentence_spans:
+            start, end = sentence_spans[s_idx]
+            results.append((sent, start, end))
+        else:
+            results.append((sent, last_end, last_end + 2.0))
+
+    return results, all_words
 
 
 def _uniform_timestamps(
@@ -96,9 +144,12 @@ def _uniform_timestamps(
 
 
 # Half of the dissolve duration added to each clip so the crossfade overlap
-# does not eat into the sentence's actual visual content.
+# does not eat into the sentence's actual visual content. Only applied when
+# the total clip count is small enough that combine_videos will actually run
+# ffmpeg xfade (see video.XFADE_CLIP_LIMIT) — otherwise this padding would
+# never be consumed and would just inflate the final video's duration.
 _CROSSFADE_DUR = 0.2
-_TRIM_BUFFER = 0.2 + _CROSSFADE_DUR / 2   # 0.45 s total padding per clip
+_TRIM_BUFFER = 0.2 + _CROSSFADE_DUR / 2   # 0.3 s total padding per clip
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +185,7 @@ def _trim_clip(src_path: str, duration: float, out_path: str) -> bool:
 def _fetch_clip(
     sentence: dict,
     sent_duration: float,
+    trim_buffer: float,
     source: str,
     video_aspect: VideoAspect,
     clip_idx: int,
@@ -164,13 +216,12 @@ def _fetch_clip(
         if not image_path:
             logger.warning(f"clip {clip_idx}: no image found for terms {search_terms}")
             return None
-        duration = sent_duration + _TRIM_BUFFER
+        duration = sent_duration + trim_buffer
         result = video.render_ken_burns_clip(
             image_path=image_path,
             duration=duration,
             width=width,
             height=height,
-            pan_direction=sentence.get("pan_direction"),
             output_path=out_path,
         )
         if not result:
@@ -194,8 +245,11 @@ def _fetch_clip(
             video_aspect=video_aspect,
         )
         candidates.extend(items)
-        if candidates:
-            break  # first term that yields usable results is enough
+        # Stop as soon as we have at least one candidate that hasn't been used.
+        # If all results from this term are already used, try the next term before
+        # accepting a reused clip — this keeps footage fresh late in long videos.
+        if any(c.url not in used_urls for c in candidates):
+            break
 
     if not candidates:
         logger.warning(f"clip {clip_idx}: no video results for terms {search_terms}")
@@ -215,7 +269,7 @@ def _fetch_clip(
         logger.warning(f"clip {clip_idx}: download failed")
         return None
 
-    ok = _trim_clip(downloaded, sent_duration + _TRIM_BUFFER, out_path)
+    ok = _trim_clip(downloaded, sent_duration + trim_buffer, out_path)
     if not ok:
         logger.warning(f"clip {clip_idx}: trim failed — skipping clip")
         return None
@@ -255,42 +309,6 @@ def _resolve_bgm(job: dict) -> Tuple[str, str]:
     if raw == "random":
         return "random", ""
     return "", raw  # explicit local path or filename
-
-
-# ---------------------------------------------------------------------------
-# Work-directory resolution
-# ---------------------------------------------------------------------------
-
-def _slugify(title: str) -> str:
-    """Return a filesystem-safe version of title, preserving readability."""
-    # Strip characters illegal on Windows and Unix filesystems
-    slug = re.sub(r'[\\/:*?"<>|]', "", title)
-    # Collapse runs of whitespace/dots to a single space
-    slug = re.sub(r"[\s.]+", " ", slug).strip()
-    return slug or "untitled"
-
-
-def _make_work_dir(title: str) -> str:
-    """
-    Return a unique path under storage/tasks/ named after the video title.
-    If the folder already exists, append (2), (3), … until a free name is found.
-    """
-    slug = _slugify(title)
-    base = utils.task_dir()  # ensures storage/tasks/ exists
-    # Prefer reusing the most recent folder that already contains a narration
-    # audio file, so reruns don't duplicate work or redownload assets.
-    reuse: Optional[str] = None
-    counter = 1
-    while True:
-        candidate = os.path.join(base, slug if counter == 1 else f"{slug} ({counter})")
-        if os.path.exists(candidate):
-            if os.path.exists(os.path.join(candidate, "audio.mp3")):
-                reuse = candidate
-            counter += 1
-            continue
-        # first gap ⇒ create here
-        os.makedirs(candidate)
-        return reuse or candidate
 
 
 # ---------------------------------------------------------------------------
@@ -336,11 +354,8 @@ def start(job_path: str) -> Optional[dict]:
         logger.error("job.sentences is empty — run sentence_prep.py first")
         return None
 
-    video_title: str = job.get("video_title", "").strip()
-    if video_title:
-        work_dir = _make_work_dir(video_title)
-    else:
-        work_dir = utils.task_dir(task_id)
+    work_dir = os.path.dirname(os.path.abspath(job_path))
+    os.makedirs(work_dir, exist_ok=True)
 
     # Intermediate files go here; final outputs stay in work_dir.
     temp_dir = os.path.join(work_dir, "temp")
@@ -381,12 +396,13 @@ def start(job_path: str) -> Optional[dict]:
     # 2. Sentence timestamps via faster-whisper                           #
     # ------------------------------------------------------------------ #
     logger.info("aligning sentences with faster-whisper")
+    word_timings: List[Tuple[str, float, float]] = []
     if os.environ.get("SKIP_WHISPER") == "1":
         logger.info("SKIP_WHISPER=1 → using uniform distribution for timings")
         timings = _uniform_timestamps(sentences, audio_duration)
     else:
         try:
-            timings = _get_sentence_timestamps(audio_file, sentences)
+            timings, word_timings = _get_sentence_timestamps(audio_file, sentences)
         except Exception as exc:
             logger.warning(f"whisper failed ({exc}), falling back to uniform distribution")
             timings = _uniform_timestamps(sentences, audio_duration)
@@ -409,26 +425,65 @@ def start(job_path: str) -> Optional[dict]:
     # Image sentences: one Ken Burns clip for the full sentence duration —
     # multiple clips would show the same cached image repeatedly.
     _CLIP_TARGET = 4.0
-    clip_counter = 0  # unique index for clip filenames across all sentences
-    for idx, (sent, t_start, t_end) in enumerate(timings):
+    _MIN_CLIP_DUR = 1.2  # avoid sub-second flashes when splitting a video sentence
+
+    # ---- Pass 1: plan per-sentence clip durations so each sentence's visible
+    # footage sums to exactly its audio duration (prevents progressive
+    # visual/audio drift over long videos). ----
+    clip_plans = []
+    for sent, t_start, t_end in timings:
         sent_audio_dur = max(0.0, t_end - t_start)
         is_image = sent.get("media_type") == "image"
+
         if is_image:
-            num_clips = 1
-            clip_duration = max(sent_audio_dur, _CLIP_TARGET) if sent_audio_dur > 0 else _CLIP_TARGET
+            # One Ken Burns clip spanning the full sentence — no artificial
+            # floor, so the sum stays exactly equal to sent_audio_dur.
+            durations = [sent_audio_dur if sent_audio_dur > 0 else _CLIP_TARGET]
+        elif sent_audio_dur <= 0:
+            durations = [_CLIP_TARGET]
         else:
-            num_clips = max(1, round(sent_audio_dur / _CLIP_TARGET))
-            clip_duration = _CLIP_TARGET
+            ideal_clips = max(1, round(sent_audio_dur / _CLIP_TARGET))
+            max_clips_by_min_dur = max(1, int(sent_audio_dur // _MIN_CLIP_DUR))
+            num_clips = max(1, min(ideal_clips, max_clips_by_min_dur))
+            durations = [sent_audio_dur / num_clips] * num_clips
+
+        clip_plans.append({
+            "sent": sent,
+            "is_image": is_image,
+            "durations": durations,
+            "sent_audio_dur": sent_audio_dur,
+        })
+
+    # Crossfade trim-buffer padding is only consumed when combine_videos will
+    # actually run ffmpeg xfade (see video.XFADE_CLIP_LIMIT) — otherwise it
+    # would just inflate the final video's duration beyond the narration.
+    total_planned_clips = sum(len(p["durations"]) for p in clip_plans)
+    apply_trim_buffer = total_planned_clips <= video.XFADE_CLIP_LIMIT
+    trim_buffer = _TRIM_BUFFER if apply_trim_buffer else 0.0
+    logger.info(
+        f"planned {total_planned_clips} clips total "
+        f"({'with' if apply_trim_buffer else 'without'} crossfade trim buffer; "
+        f"xfade limit={video.XFADE_CLIP_LIMIT})"
+    )
+
+    # ---- Pass 2: fetch clips according to the plan ----
+    clip_counter = 0  # unique index for clip filenames across all sentences
+    for idx, plan in enumerate(clip_plans):
+        sent = plan["sent"]
+        durations = plan["durations"]
+        is_image = plan["is_image"]
         preview = sent["text"][:60] + ("…" if len(sent["text"]) > 60 else "")
         logger.info(
-            f"[{idx+1}/{total_sentences}] {sent_audio_dur:.2f}s audio → {num_clips} clip(s) {'(image)' if is_image else ''} — {preview}"
+            f"[{idx+1}/{total_sentences}] {plan['sent_audio_dur']:.2f}s audio → "
+            f"{len(durations)} clip(s) {'(image)' if is_image else ''} — {preview}"
         )
 
         got_any = False
-        for _ci in range(num_clips):
+        for clip_duration in durations:
             clip_path = _fetch_clip(
                 sentence=sent,
                 sent_duration=clip_duration,
+                trim_buffer=trim_buffer,
                 source=video_source,
                 video_aspect=video_aspect,
                 clip_idx=clip_counter,
@@ -468,7 +523,7 @@ def start(job_path: str) -> Optional[dict]:
         video_transition_mode=VideoTransitionMode.crossfade,
         # Clips are already pre-trimmed; use a large cap to avoid re-trimming.
         max_clip_duration=999,
-        threads=2,
+        threads=os.cpu_count() or 4,
     )
     if not os.path.exists(combined_path):
         logger.error("combine_videos() produced no output — aborting")
@@ -583,6 +638,14 @@ def start(job_path: str) -> Optional[dict]:
         if not subtitle.file_to_subtitles(subtitle_path):
             logger.warning("subtitle file is empty or invalid — subtitles disabled")
             subtitle_path = ""
+        elif word_timings:
+            words_path = subtitle_path.replace(".srt", ".words.json")
+            with open(words_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    [{"word": w, "start": s, "end": e} for w, s, e in word_timings],
+                    f,
+                )
+            logger.info(f"word timings saved: {words_path}")
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=75)
 

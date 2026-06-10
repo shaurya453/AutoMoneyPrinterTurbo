@@ -3,7 +3,7 @@ sentence_prep.py — sentence splitter and search-term scaffolder
 
 Splits a plain-text script into sentences and writes a job JSON template.
 Search terms are auto-extracted as a rough scaffold only — the agent running
-this pipeline must rewrite them (and set media_type/pan_direction) in Step 2
+this pipeline must rewrite them (and set media_type) in Step 2
 before calling cli.py.
 
 Usage:

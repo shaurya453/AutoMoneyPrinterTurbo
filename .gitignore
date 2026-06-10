@@ -29,8 +29,8 @@ resource/kokoro/*.bin
 venv/
 .venv
 
-# Per-job working files (scripts, job JSONs) — agent writes here
-/jobs/
+# Per-job working files — all live under storage/tasks/<title>/
+/storage/tasks/
 # Stray job files the agent may have created in the project root
 /job_*.json
 /script_*.txt

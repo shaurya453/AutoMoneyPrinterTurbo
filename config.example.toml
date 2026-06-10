@@ -27,8 +27,8 @@ pixabay_api_keys = []
 
 # ---------------------------------------------------------------------------
 # Image providers (used when job sentences have media_type = "image")
-# Searched in order: Pexels Photos → Pixabay Images → Unsplash → Wikimedia
-# Wikimedia Commons needs no key; the others use the keys above / below.
+# Searched in order: DuckDuckGo → Wikimedia Commons → Pexels Photos → Pixabay Images → Unsplash
+# DuckDuckGo and Wikimedia Commons need no key; the others use the keys above / below.
 # ---------------------------------------------------------------------------
 
 # Unsplash API key — register at https://unsplash.com/developers

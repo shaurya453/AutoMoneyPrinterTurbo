@@ -28,9 +28,7 @@ from moviepy.video.tools.subtitles import SubtitlesClip
 from PIL import Image, ImageDraw, ImageFont
 
 from app.config import config
-from app.models import const
 from app.models.schema import (
-    MaterialInfo,
     VideoAspect,
     VideoConcatMode,
     VideoParams,
@@ -70,6 +68,11 @@ audio_codec = "aac"
 # 这里显式抬高音频码率，避免成片阶段因为默认值过低而引入明显失真。
 audio_bitrate = "192k"
 fps = 30
+# Above this clip count, ffmpeg xfade concat is skipped (CLI length limits /
+# filter-graph size) and combine_videos falls back to plain concat with no
+# crossfade overlap. pipeline.py uses the same value to decide whether to add
+# crossfade trim-buffer padding to fetched clips.
+XFADE_CLIP_LIMIT = 40
 _BGM_EXTENSIONS = (".mp3",)
 _DEFAULT_VIDEO_CODEC = "libx264"
 _SUPPORTED_VIDEO_CODECS = (
@@ -228,6 +231,21 @@ def _disable_runtime_video_codec(codec: str, reason: str):
     )
 
 
+# Fastest preset per codec for throwaway intermediate encodes (concat output is
+# re-encoded again in generate_video(), so encode quality here doesn't matter).
+_FAST_PRESET_BY_CODEC = {
+    "libx264": "ultrafast",
+    "h264_nvenc": "p1",
+    "h264_qsv": "veryfast",
+    "h264_amf": "speed",
+}
+
+
+def _fast_preset_args(codec: str) -> List[str]:
+    preset = _FAST_PRESET_BY_CODEC.get(codec)
+    return ["-preset", preset] if preset else []
+
+
 def _fallback_write_videofile(clip, output_file: str, failed_codec: str, reason: str, **kwargs):
     """
     硬件编码失败后用 libx264 重试，只有重试成功才禁用该硬件编码器。
@@ -367,10 +385,9 @@ def concat_video_clips_with_crossfade(
 
     # xfade builds one -i per clip and one filter per transition; impractical above ~40 clips
     # and hits Windows CreateProcess command-line length limits for large clip counts.
-    _XFADE_CLIP_LIMIT = 40
-    if len(clip_files) > _XFADE_CLIP_LIMIT:
+    if len(clip_files) > XFADE_CLIP_LIMIT:
         logger.info(
-            f"clip count {len(clip_files)} > {_XFADE_CLIP_LIMIT}, "
+            f"clip count {len(clip_files)} > {XFADE_CLIP_LIMIT}, "
             "skipping xfade and using list-file concat"
         )
         concat_video_clips_with_ffmpeg(clip_files, output_file, threads, output_dir)
@@ -410,7 +427,8 @@ def concat_video_clips_with_crossfade(
         "-filter_complex", ";".join(filter_parts),
         "-map", "[vout]",
         "-c:v", codec,
-        "-threads", str(threads or 2),
+        *_fast_preset_args(codec),
+        "-threads", str(threads or os.cpu_count() or 4),
         "-pix_fmt", "yuv420p",
         output_file,
     ]
@@ -447,8 +465,9 @@ def concat_video_clips_with_ffmpeg(
             concat_list_file,
             "-c:v",
             codec,
+            *_fast_preset_args(codec),
             "-threads",
-            str(threads or 2),
+            str(threads or os.cpu_count() or 4),
             "-pix_fmt",
             "yuv420p",
             output_file,
@@ -511,75 +530,81 @@ def _open_image_clip_with_fallback(image_path: str):
         return ImageClip(sanitized_path), sanitized_path
 
 
+_BG_BRIGHTNESS = 0.5
+_BG_BLUR_FRACTION = 0.06  # downscale-then-upscale blur strength
+
+
+def _blur_and_darken(frame: np.ndarray, brightness: float = _BG_BRIGHTNESS, blur_fraction: float = _BG_BLUR_FRACTION) -> np.ndarray:
+    """Cheap blur (downscale + upscale) and brightness reduction for a background layer."""
+    h, w = frame.shape[:2]
+    small_w, small_h = max(1, int(w * blur_fraction)), max(1, int(h * blur_fraction))
+    small = Image.fromarray(frame).resize((small_w, small_h), Image.BILINEAR)
+    blurred = small.resize((w, h), Image.BICUBIC)
+    arr = np.asarray(blurred, dtype=np.float32) * brightness
+    return np.clip(arr, 0, 255).astype(np.uint8)
+
+
+def _cover_crop_image(img: Image.Image, width: int, height: int) -> Image.Image:
+    """Scale + center-crop a PIL image to exactly (width, height), covering the full frame."""
+    scale = max(width / img.width, height / img.height)
+    new_w = max(int(round(img.width * scale)), width)
+    new_h = max(int(round(img.height * scale)), height)
+    resized = img.resize((new_w, new_h), Image.LANCZOS)
+    x0, y0 = (new_w - width) // 2, (new_h - height) // 2
+    return resized.crop((x0, y0, x0 + width, y0 + height))
+
+
+def _make_blurred_cover_background(clip, width: int, height: int, brightness: float = _BG_BRIGHTNESS):
+    """For a video clip: cover-scale + center-crop to (width,height), then blur+darken every frame."""
+    clip_w, clip_h = clip.size
+    scale = max(width / clip_w, height / clip_h)
+    cover_w = max(int(round(clip_w * scale)), width)
+    cover_h = max(int(round(clip_h * scale)), height)
+    bg = clip.resized(new_size=(cover_w, cover_h))
+    bg = bg.with_effects([vfx.Crop(x_center=cover_w // 2, y_center=cover_h // 2, width=width, height=height)])
+    bg = bg.image_transform(lambda frame: _blur_and_darken(frame, brightness=brightness))
+    return bg.with_duration(clip.duration)
+
+
 def apply_ken_burns(
     image_path: str,
     duration: float,
     width: int,
     height: int,
-    pan_direction: str = None,
-    zoom_factor: float = 1.15,
+    zoom_start: float = 0.75,
+    zoom_end: float = 0.825,
 ):
     """
-    Create a Ken Burns VideoClip from a still image: slow zoom-in with optional pan.
+    Create a VideoClip from a still image: the full image is shown as a centered
+    inset (never cropped), slowly zooming from zoom_start to zoom_end of its
+    "fit" size, over a blurred and darkened cover-fill copy of itself.
 
-    The image is pre-scaled to zoom_factor × the target dimensions, giving room
-    for the crop window to move.  At t=0 the crop is centred and wide; by t=duration
-    it has shrunk by zoom_factor (zoomed in).  pan_direction shifts the crop window
-    across the image as time progresses.
-
-    pan_direction: "left" | "right" | "up" | "down" | None (centre zoom only)
     Returns a VideoClip of size (width, height) and the given duration.
     """
     from moviepy.video.VideoClip import VideoClip as _VideoClip
     from PIL import Image as _PILImage
 
-    # Pre-scale image so it is at least zoom_factor × the target in both axes
-    with _PILImage.open(image_path) as img:
-        img = img.convert("RGB")
-        scale = max(width * zoom_factor / img.width, height * zoom_factor / img.height)
-        large_w = max(int(img.width * scale), width + 2)
-        large_h = max(int(img.height * scale), height + 2)
-        img_large = img.resize((large_w, large_h), _PILImage.LANCZOS)
-        img_arr = np.array(img_large)   # (large_h, large_w, 3)
+    with _PILImage.open(image_path) as f:
+        img = f.convert("RGB")
+        img.load()
+        src_w, src_h = img.size
+        img_arr = np.array(img)
+        bg_arr = _blur_and_darken(np.array(_cover_crop_image(img, width, height)))
 
-    target_ar = width / height
+    fit_scale = min(width / src_w, height / src_h)
+    fit_w, fit_h = src_w * fit_scale, src_h * fit_scale
 
     def make_frame(t: float) -> np.ndarray:
         progress = t / max(duration, 1e-6)
-        zoom = 1.0 + (zoom_factor - 1.0) * progress
-        # Crop dimensions locked to TARGET aspect ratio so the final resize
-        # to (width, height) is lossless — no stretching of portrait/square images.
-        _cw = min(int(large_w / zoom), large_w)
-        _ch = int(_cw / target_ar)
-        if _ch > large_h:
-            _ch = large_h
-            _cw = int(_ch * target_ar)
-        crop_w = max(1, min(_cw, large_w))
-        crop_h = max(1, min(_ch, large_h))
-        max_x = large_w - crop_w
-        max_y = large_h - crop_h
+        scale_frac = zoom_start + (zoom_end - zoom_start) * progress
+        fg_w = max(1, int(round(fit_w * scale_frac)))
+        fg_h = max(1, int(round(fit_h * scale_frac)))
+        fg = _PILImage.fromarray(img_arr).resize((fg_w, fg_h), _PILImage.LANCZOS)
 
-        if pan_direction == "right":
-            x0 = int(max_x * progress)
-            y0 = max_y // 2
-        elif pan_direction == "left":
-            x0 = int(max_x * (1.0 - progress))
-            y0 = max_y // 2
-        elif pan_direction == "up":
-            x0 = max_x // 2
-            y0 = int(max_y * progress)
-        elif pan_direction == "down":
-            x0 = max_x // 2
-            y0 = int(max_y * (1.0 - progress))
-        else:
-            x0 = max_x // 2
-            y0 = max_y // 2
-
-        x0 = max(0, min(x0, max_x))
-        y0 = max(0, min(y0, max_y))
-        cropped = img_arr[y0:y0 + crop_h, x0:x0 + crop_w]
-        frame = _PILImage.fromarray(cropped).resize((width, height), _PILImage.LANCZOS)
-        return np.array(frame)
+        frame = bg_arr.copy()
+        x0, y0 = (width - fg_w) // 2, (height - fg_h) // 2
+        frame[y0:y0 + fg_h, x0:x0 + fg_w] = np.array(fg)
+        return frame
 
     # MoviePy 2.x: positional make_frame (not make_frame=), fps set via .with_fps()
     clip = _VideoClip(make_frame, duration=duration)
@@ -591,7 +616,6 @@ def render_ken_burns_clip(
     duration: float,
     width: int,
     height: int,
-    pan_direction: str,
     output_path: str,
     threads: int = 2,
 ) -> str:
@@ -599,7 +623,7 @@ def render_ken_burns_clip(
     Render a Ken Burns clip from image_path to an MP4 at output_path.
     Returns output_path on success, '' on failure.
     """
-    clip = apply_ken_burns(image_path, duration, width, height, pan_direction)
+    clip = apply_ken_burns(image_path, duration, width, height)
     try:
         _write_videofile_with_codec_fallback(
             clip,
@@ -782,7 +806,15 @@ def combine_videos(
     # When crossfade is used each transition overlaps adjacent clips by cf seconds,
     # so the effective output duration is shorter than the raw sum of clip durations.
     # We track the raw sum for book-keeping but use effective_duration for stop decisions.
-    cf_overlap = 0.2 if transition_value == VideoTransitionMode.crossfade.value else 0.0
+    # Crossfade overlap is only actually consumed by the final concat when xfade
+    # runs (see concat_video_clips_with_crossfade) — which is skipped above
+    # XFADE_CLIP_LIMIT clips. Predict that here so the clip-collection loop below
+    # doesn't assume overlap removal that will never happen.
+    crossfade_will_run = (
+        transition_value == VideoTransitionMode.crossfade.value
+        and len(video_paths) <= XFADE_CLIP_LIMIT
+    )
+    cf_overlap = 0.2 if crossfade_will_run else 0.0
 
     processed_clips = []
     subclipped_items = []
@@ -861,9 +893,9 @@ def combine_videos(
                     new_width = int(clip_w * scale_factor)
                     new_height = int(clip_h * scale_factor)
 
-                    background = ColorClip(size=(video_width, video_height), color=(0, 0, 0)).with_duration(clip_duration)
+                    background = _make_blurred_cover_background(clip, video_width, video_height)
                     clip_resized = clip.resized(new_size=(new_width, new_height)).with_position("center")
-                    clip = CompositeVideoClip([background, clip_resized])
+                    clip = CompositeVideoClip([background, clip_resized], size=(video_width, video_height)).with_duration(clip_duration)
 
             shuffle_side = random.choice(["left", "right", "top", "bottom"])
             if transition_value in (None, VideoTransitionMode.none.value):
@@ -1438,101 +1470,3 @@ def generate_video(
     )
     video_clip.close()
     del video_clip
-
-
-def preprocess_video(materials: List[MaterialInfo], clip_duration=4):
-    # WebUI 在某些二次生成场景下可能传入空素材列表，这里直接返回空结果，避免抛出 NoneType 异常。
-    if not materials:
-        return []
-
-    # 仅返回通过预处理校验的素材，避免低分辨率图片继续进入后续的视频合成流程。
-    valid_materials = []
-    local_videos_dir = utils.storage_dir("local_videos", create=True)
-
-    for material in materials:
-        if not material.url:
-            continue
-
-        try:
-            material_source_path = file_security.resolve_path_within_directory(
-                local_videos_dir, material.url
-            )
-        except ValueError as exc:
-            # local video_source 的素材路径来自 API 参数，必须限制在专用素材目录。
-            # 允许用户传文件名，也兼容历史返回的绝对路径，但不允许逃逸到系统
-            # 其他目录，避免任意文件读取或通过 MoviePy 探测本地敏感文件。
-            logger.warning(
-                f"skip unsafe local material: {material.url}, "
-                f"local_videos_dir: {local_videos_dir}, error: {str(exc)}"
-            )
-            continue
-
-        ext = utils.parse_extension(material_source_path)
-        try:
-            # 图片素材直接按图片方式读取，避免先走 VideoFileClip 误判后触发不稳定的回退分支。
-            if ext in const.FILE_TYPE_IMAGES:
-                clip, material_source_path = _open_image_clip_with_fallback(
-                    material_source_path
-                )
-            else:
-                clip = _open_video_clip_quietly(material_source_path)
-        except Exception:
-            # 非标准扩展名或探测失败时再回退到图片模式，兼容历史上直接传本地图片路径的情况。
-            try:
-                clip, material_source_path = _open_image_clip_with_fallback(
-                    material_source_path
-                )
-            except Exception as exc:
-                logger.warning(
-                    f"skip unreadable local material: {material.url}, error: {str(exc)}"
-                )
-                continue
-        try:
-            width = clip.size[0]
-            height = clip.size[1]
-            if width < 480 or height < 480:
-                logger.warning(f"low resolution material: {width}x{height}, minimum 480x480 required")
-                # 探测到低分辨率素材后立即关闭资源，并且不要把该素材返回给后续流程。
-                close_clip(clip)
-                continue
-
-            if ext in const.FILE_TYPE_IMAGES:
-                logger.info(f"processing image: {material_source_path}")
-                # 探测尺寸时已经打开过一次素材，这里先释放探测句柄，再重新创建用于导出的图片 clip。
-                close_clip(clip)
-                # Create an image clip and set its duration to 3 seconds
-                clip = (
-                    ImageClip(material_source_path)
-                    .with_duration(clip_duration)
-                    .with_position("center")
-                )
-                # Apply a zoom effect using the resize method.
-                # A lambda function is used to make the zoom effect dynamic over time.
-                # The zoom effect starts from the original size and gradually scales up to 120%.
-                # t represents the current time, and clip.duration is the total duration of the clip (3 seconds).
-                # Note: 1 represents 100% size, so 1.2 represents 120% size.
-                zoom_clip = clip.resized(
-                    lambda t: 1 + (clip_duration * 0.03) * (t / clip.duration)
-                )
-
-                # Optionally, create a composite video clip containing the zoomed clip.
-                # This is useful when you want to add other elements to the video.
-                final_clip = CompositeVideoClip([zoom_clip])
-
-                # Output the video to a file.
-                video_file = f"{material_source_path}.mp4"
-                final_clip.write_videofile(video_file, fps=30, logger=None)
-                close_clip(clip)
-                close_clip(final_clip)
-                material.url = video_file
-                logger.success(f"image processed: {video_file}")
-            else:
-                # 普通视频素材只需要读取尺寸做校验，校验完成后立即释放句柄即可。
-                close_clip(clip)
-        except Exception:
-            close_clip(clip)
-            raise
-
-        valid_materials.append(material)
-
-    return valid_materials

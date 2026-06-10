@@ -1,6 +1,6 @@
 import warnings
 from enum import Enum
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 import pydantic
 from pydantic import BaseModel, Field
@@ -36,12 +36,12 @@ class VideoAspect(str, Enum):
 
     def to_resolution(self):
         if self.value == "16:9":
-            return 1280, 720
+            return 1920, 1080
         elif self.value == "9:16":
-            return 720, 1280
+            return 1080, 1920
         elif self.value == "1:1":
-            return 720, 720
-        return 720, 1280
+            return 1080, 1080
+        return 1080, 1920
 
 
 class _Config:
@@ -58,18 +58,12 @@ class MaterialInfo:
 class VideoParams(BaseModel):
     video_subject: str
     video_script: str = ""
-    video_terms: Optional[str | list] = None
     video_aspect: Optional[VideoAspect] = VideoAspect.portrait.value
     video_concat_mode: Optional[VideoConcatMode] = VideoConcatMode.random.value
     video_transition_mode: Optional[VideoTransitionMode] = None
     video_clip_duration: Optional[int] = 5
-    video_count: Optional[int] = 1
 
     video_source: Optional[str] = "pexels"
-    video_materials: Optional[List[MaterialInfo]] = None
-
-    custom_audio_file: Optional[str] = None
-    video_language: Optional[str] = ""
 
     voice_name: Optional[str] = ""
     voice_volume: Optional[float] = 1.0

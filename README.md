@@ -11,7 +11,7 @@ script.txt  →  sentence_prep.py  →  job.json  →  [agent enriches]  →  cl
 ```
 
 1. **`sentence_prep.py`** splits your script into sentences and writes a job JSON with stub search terms.
-2. **You (or an AI agent) enrich** the job JSON — rewriting `search_terms`, setting `media_type` (`"video"` or `"image"`), and adding `pan_direction` for image shots.
+2. **You (or an AI agent) enrich** the job JSON — rewriting `search_terms` and setting `media_type` (`"video"` or `"image"`).
 3. **`cli.py`** runs the full pipeline: TTS → timestamp alignment → clip/image fetch → assembly → subtitles → BGM → `final.mp4`.
 
 ---
@@ -84,7 +84,6 @@ Open `jobs/My Video/job.json` and for each sentence set:
 
 - **`search_terms`** — what a stock camera would physically show (2 terms, max 3 words each)
 - **`media_type`** — `"video"` for motion b-roll, `"image"` for specific products/people/places
-- **`pan_direction`** — Ken Burns direction on image shots (`"left"`, `"right"`, `"up"`, `"down"`)
 
 See [`AGENT_GUIDE.md`](AGENT_GUIDE.md) for detailed guidance, especially on when to use images vs. video.
 

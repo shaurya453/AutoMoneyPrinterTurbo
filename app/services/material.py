@@ -1,5 +1,4 @@
 import os
-import random
 import threading
 from typing import List
 from urllib.parse import urlencode
@@ -7,9 +6,10 @@ from urllib.parse import urlencode
 import requests
 from loguru import logger
 from moviepy.video.io.VideoFileClip import VideoFileClip
+from PIL import Image, UnidentifiedImageError
 
 from app.config import config
-from app.models.schema import MaterialInfo, VideoAspect, VideoConcatMode
+from app.models.schema import MaterialInfo, VideoAspect
 from app.utils import utils
 
 # Thread-safe counter for API key rotation
@@ -84,6 +84,7 @@ def search_videos_pexels(
             logger.error(f"search videos failed: {response}")
             return video_items
         videos = response["videos"]
+        target_pixels = video_width * video_height
         # loop through each video in the result
         for v in videos:
             duration = v["duration"]
@@ -91,17 +92,32 @@ def search_videos_pexels(
             if duration < minimum_duration:
                 continue
             video_files = v["video_files"]
-            # loop through each url to determine the best quality
+            # Pick smallest resolution >= target; fall back to largest available.
+            best_video = None
+            best_diff = float("inf")
+            fallback_video = None
+            fallback_pixels = 0
             for video in video_files:
-                w = int(video["width"])
-                h = int(video["height"])
-                if w == video_width and h == video_height:
-                    item = MaterialInfo()
-                    item.provider = "pexels"
-                    item.url = video["link"]
-                    item.duration = duration
-                    video_items.append(item)
-                    break
+                w = int(video.get("width") or 0)
+                h = int(video.get("height") or 0)
+                if w <= 0 or h <= 0:
+                    continue
+                pixels = w * h
+                if pixels >= target_pixels:
+                    diff = pixels - target_pixels
+                    if diff < best_diff:
+                        best_diff = diff
+                        best_video = video
+                elif pixels > fallback_pixels:
+                    fallback_pixels = pixels
+                    fallback_video = video
+            chosen = best_video or fallback_video
+            if chosen:
+                item = MaterialInfo()
+                item.provider = "pexels"
+                item.url = chosen["link"]
+                item.duration = duration
+                video_items.append(item)
         return video_items
     except Exception as e:
         logger.error(f"search videos failed: {str(e)}")
@@ -233,74 +249,6 @@ def save_video(video_url: str, save_dir: str = "") -> str:
     return ""
 
 
-def download_videos(
-    task_id: str,
-    search_terms: List[str],
-    source: str = "pexels",
-    video_aspect: VideoAspect = VideoAspect.portrait,
-    video_contact_mode: VideoConcatMode = VideoConcatMode.random,
-    audio_duration: float = 0.0,
-    max_clip_duration: int = 5,
-) -> List[str]:
-    valid_video_items = []
-    valid_video_urls = []
-    found_duration = 0.0
-    search_videos = search_videos_pexels
-    if source == "pixabay":
-        search_videos = search_videos_pixabay
-
-    for search_term in search_terms:
-        video_items = search_videos(
-            search_term=search_term,
-            minimum_duration=max_clip_duration,
-            video_aspect=video_aspect,
-        )
-        logger.info(f"found {len(video_items)} videos for '{search_term}'")
-
-        for item in video_items:
-            if item.url not in valid_video_urls:
-                valid_video_items.append(item)
-                valid_video_urls.append(item.url)
-                found_duration += item.duration
-
-    logger.info(
-        f"found total videos: {len(valid_video_items)}, required duration: {audio_duration} seconds, found duration: {found_duration} seconds"
-    )
-    video_paths = []
-
-    material_directory = config.app.get("material_directory", "").strip()
-    if material_directory == "task":
-        material_directory = utils.task_dir(task_id)
-    elif material_directory and not os.path.isdir(material_directory):
-        material_directory = ""
-
-    concat_mode_value = getattr(video_contact_mode, "value", video_contact_mode)
-    if concat_mode_value == VideoConcatMode.random.value:
-        random.shuffle(valid_video_items)
-
-    total_duration = 0.0
-    for item in valid_video_items:
-        try:
-            logger.info(f"downloading video: {item.url}")
-            saved_video_path = save_video(
-                video_url=item.url, save_dir=material_directory
-            )
-            if saved_video_path:
-                logger.info(f"video saved: {saved_video_path}")
-                video_paths.append(saved_video_path)
-                seconds = min(max_clip_duration, item.duration)
-                total_duration += seconds
-                if total_duration > audio_duration:
-                    logger.info(
-                        f"total duration of downloaded videos: {total_duration} seconds, skip downloading more"
-                    )
-                    break
-        except Exception as e:
-            logger.error(f"failed to download video: {utils.to_json(item)} => {str(e)}")
-    logger.success(f"downloaded {len(video_paths)} videos")
-    return video_paths
-
-
 # ---------------------------------------------------------------------------
 # Image search + download
 # ---------------------------------------------------------------------------
@@ -389,6 +337,46 @@ def search_images_unsplash(search_term: str, n: int = 5) -> List[str]:
         return []
 
 
+def search_images_ddg(search_term: str, n: int = 5) -> List[str]:
+    """Return up to n image URLs from DuckDuckGo image search (free, no API key).
+
+    Filters out images that are too small or have an extreme aspect ratio --
+    those crop poorly into the target video frame's Ken Burns window.
+    """
+    try:
+        from ddgs import DDGS
+    except ImportError:
+        logger.warning("ddgs package not installed, skipping DuckDuckGo image search")
+        return []
+
+    proxy = (config.proxy or {}).get("https") or (config.proxy or {}).get("http")
+    try:
+        # Over-fetch since some results get filtered out below.
+        results = DDGS(proxy=proxy, timeout=30).images(query=search_term, max_results=n * 3)
+    except Exception as e:
+        logger.error(f"DuckDuckGo image search failed: {e}")
+        return []
+
+    urls = []
+    for r in results:
+        url = r.get("image")
+        if not url:
+            continue
+        try:
+            width, height = int(r.get("width") or 0), int(r.get("height") or 0)
+        except (TypeError, ValueError):
+            width, height = 0, 0
+        if width and height:
+            if min(width, height) < 480:
+                continue
+            if max(width, height) / min(width, height) > 3:
+                continue
+        urls.append(url)
+        if len(urls) >= n:
+            break
+    return urls
+
+
 def search_images_wikimedia(search_term: str, n: int = 5) -> List[str]:
     """Return up to n image URLs from Wikimedia Commons (no API key required)."""
     params = {
@@ -423,6 +411,22 @@ def search_images_wikimedia(search_term: str, n: int = 5) -> List[str]:
         return []
 
 
+def _is_valid_raster_image(image_path: str) -> bool:
+    """Return True if image_path is a raster image PIL can decode.
+
+    Rejects SVGs and other non-raster files that some search providers
+    (e.g. DuckDuckGo) occasionally return with a misleading .jpg/.png
+    extension -- Image.open() would otherwise crash later in the Ken
+    Burns renderer.
+    """
+    try:
+        with Image.open(image_path) as img:
+            img.verify()
+        return True
+    except (UnidentifiedImageError, OSError):
+        return False
+
+
 def save_image(image_url: str, save_dir: str = "") -> str:
     """Download an image URL and return its local path. Returns '' on failure."""
     if not save_dir:
@@ -437,10 +441,19 @@ def save_image(image_url: str, save_dir: str = "") -> str:
     image_path = os.path.join(save_dir, f"img-{url_hash}{ext}")
 
     if os.path.exists(image_path) and os.path.getsize(image_path) > 0:
-        logger.info(f"image already cached: {image_path}")
-        return image_path
+        if _is_valid_raster_image(image_path):
+            logger.info(f"image already cached: {image_path}")
+            return image_path
+        logger.warning(f"cached image is not a valid raster image, re-downloading: {image_path}")
+        os.remove(image_path)
 
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    }
     try:
         r = requests.get(
             image_url, headers=headers, proxies=config.proxy,
@@ -450,7 +463,10 @@ def save_image(image_url: str, save_dir: str = "") -> str:
         with open(image_path, "wb") as fh:
             fh.write(r.content)
         if os.path.exists(image_path) and os.path.getsize(image_path) > 0:
-            return image_path
+            if _is_valid_raster_image(image_path):
+                return image_path
+            logger.warning(f"downloaded file is not a valid raster image, discarding: {image_url}")
+            os.remove(image_path)
     except Exception as e:
         logger.error(f"image download failed: {image_url} => {e}")
     return ""
@@ -461,9 +477,10 @@ _IMAGE_PROVIDERS = {
     "pixabay": search_images_pixabay,
     "unsplash": search_images_unsplash,
     "wikimedia": search_images_wikimedia,
+    "duckduckgo": search_images_ddg,
 }
 
-_DEFAULT_IMAGE_SOURCE_ORDER = ["pexels", "pixabay", "unsplash", "wikimedia"]
+_DEFAULT_IMAGE_SOURCE_ORDER = ["duckduckgo", "wikimedia", "pexels", "pixabay", "unsplash"]
 
 # Pre-seeded local cache to avoid repeated network searches for common terms.
 _PRESEEDED_IMAGES = {
@@ -518,7 +535,11 @@ def download_image(
             if fn is None:
                 logger.warning(f"unknown image provider: {provider}")
                 continue
-            urls = fn(term, n=3)
+            # DDG draws from the broad open web, so individual hosts are more
+            # likely to block hotlinking (e.g. Akamai-protected CDNs) -- request
+            # more candidates so a working one is likely among them.
+            n = 8 if provider == "duckduckgo" else 3
+            urls = fn(term, n=n)
             for url in urls:
                 if not url:
                     continue
@@ -608,9 +629,3 @@ def download_bgm(search_term: str, save_dir: str = "") -> str:
                 return local
     logger.warning(f"no BGM found online for '{search_term}', will use local fallback")
     return ""
-
-
-if __name__ == "__main__":
-    download_videos(
-        "test123", ["Money Exchange Medium"], audio_duration=100, source="pixabay"
-    )
