@@ -2,7 +2,6 @@ import json
 import os
 import re
 import shutil
-from pathlib import Path
 from uuid import uuid4
 
 from loguru import logger
@@ -158,13 +157,6 @@ def text_to_srt(idx: int, msg: str, start_time: float, end_time: float) -> str:
     return srt
 
 
-def str_contains_punctuation(word):
-    for p in const.PUNCTUATIONS:
-        if p in word:
-            return True
-    return False
-
-
 def split_string_by_punctuations(s):
     result = []
     txt = ""
@@ -244,7 +236,3 @@ def md5(text):
     import hashlib
 
     return hashlib.md5(text.encode("utf-8")).hexdigest()
-
-
-def parse_extension(filename):
-    return Path(filename).suffix.lower().lstrip('.')

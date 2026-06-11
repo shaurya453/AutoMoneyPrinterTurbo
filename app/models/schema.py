@@ -3,7 +3,7 @@ from enum import Enum
 from typing import Optional, Union
 
 import pydantic
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from app.config import config
 
@@ -53,6 +53,7 @@ class MaterialInfo:
     provider: str = "pexels"
     url: str = ""
     duration: int = 0
+    thumbnail: str = ""
 
 
 class VideoParams(BaseModel):
@@ -85,6 +86,3 @@ class VideoParams(BaseModel):
     stroke_width: float = 1.5
     subtitle_highlight: bool = False
     n_threads: Optional[int] = 2
-    paragraph_number: int = Field(default=1, ge=1, le=10)
-    video_script_prompt: str = Field(default="", max_length=2000)
-    custom_system_prompt: str = Field(default="", max_length=8000)

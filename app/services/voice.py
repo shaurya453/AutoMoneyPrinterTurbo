@@ -1,6 +1,5 @@
 import asyncio
 import inspect
-import json
 import math
 import os
 import queue
@@ -27,35 +26,6 @@ _KOKORO_PREFIX = "kokoro:"
 _TTS_CHUNK_MAX_CHARS = 2500
 NO_VOICE_NAME = "no-voice"
 _NO_VOICE_ALIASES = {NO_VOICE_NAME, "none"}
-
-_AZURE_VOICES_DATA_FILE = os.path.join(
-    os.path.dirname(__file__), "data", "azure_voices.json"
-)
-_azure_voices_cache = None
-
-
-def _load_azure_voices() -> list[dict]:
-    global _azure_voices_cache
-    if _azure_voices_cache is None:
-        with open(_AZURE_VOICES_DATA_FILE, "r", encoding="utf-8") as f:
-            _azure_voices_cache = json.load(f)
-    return _azure_voices_cache
-
-
-def get_all_azure_voices(filter_locals=None) -> list[str]:
-    voices = []
-    for item in _load_azure_voices():
-        name = item["name"]
-        gender = item["gender"]
-        if filter_locals and any(
-            name.lower().startswith(fl.lower()) for fl in filter_locals
-        ):
-            voices.append(f"{name}-{gender}")
-        elif not filter_locals:
-            voices.append(f"{name}-{gender}")
-    voices.sort()
-    return voices
-
 
 def parse_voice_name(name: str):
     name = name.replace("-Female", "").replace("-Male", "").strip()

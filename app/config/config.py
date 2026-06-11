@@ -39,10 +39,6 @@ ui = _cfg.get("ui", {"hide_log": False})
 
 log_level = _cfg.get("log_level", "DEBUG")
 
-imagemagick_path = app.get("imagemagick_path", "")
-if imagemagick_path and os.path.isfile(imagemagick_path):
-    os.environ["IMAGEMAGICK_BINARY"] = imagemagick_path
-
 ffmpeg_path = app.get("ffmpeg_path", "")
 if ffmpeg_path and os.path.isfile(ffmpeg_path):
     os.environ["IMAGEIO_FFMPEG_EXE"] = ffmpeg_path

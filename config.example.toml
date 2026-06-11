@@ -37,6 +37,64 @@ pixabay_api_keys = []
 unsplash_api_keys = []
 
 # ---------------------------------------------------------------------------
+# Footage/image mix and relevance filtering
+# ---------------------------------------------------------------------------
+
+# Soft cap on the fraction of sentences that may use still images, regardless
+# of how the job's per-sentence media_type values are set. If this ratio
+# would be exceeded, the pipeline tries video first for that sentence
+# (falling back to image only if no video is found).
+max_image_ratio = 0.25
+
+# CLIP-based relevance filtering for image/footage search results. Scores
+# each candidate against the sentence's "visual_caption" (falling back to
+# "search_term, video_topic" if absent) and reorders/drops poor matches
+# before they reach the final video. Requires onnxruntime + tokenizers (see
+# requirements.txt) and downloads ~600MB of CLIP model weights to
+# storage/models/clip-vit-b32/ on first use. If a dependency is missing or
+# the model fails to load/download, this is automatically a no-op and the
+# pipeline behaves exactly as it did before.
+relevance_filter_enabled = true
+
+# A candidate is accepted only if its score against visual_caption beats the
+# worst-scoring "junk" anchor (watermark, unrelated stock photo, blurry, etc)
+# by at least this margin (roughly 0-1, typically ~0.01-0.05 for CLIP
+# ViT-B/32). There is no fixed global threshold -- this margin is what
+# replaces it. STARTING POINT ONLY -- calibrate using RELEVANCE_LOG_ONLY=1
+# (see AGENT_GUIDE.md) before relying on this for a real run.
+relevance_margin = 0.02
+
+# Number of evenly-spaced frames sampled from each video candidate for
+# relevance scoring, and how those per-frame scores are combined.
+relevance_video_frame_samples = 4
+relevance_video_pool = "mean"  # "mean" | "max"
+
+# How many candidates (downloaded + verified against the NSFW gate and the
+# relevance margin) are tried per video clip slot before giving up.
+max_video_download_attempts = 3
+
+# Log every candidate's relevance score at debug level (for calibration).
+relevance_debug_log = false
+
+# ---------------------------------------------------------------------------
+# NSFW pixel-level gate (NudeNet ONNX) -- mandatory, hard-reject, independent
+# of CLIP/relevance. Every downloaded image and sampled video frame is
+# scanned; a hit on exposed genitalia/breasts/buttocks is rejected outright
+# regardless of relevance score. Requires the `nudenet` package (see
+# requirements.txt) -- a small (~12MB) ONNX model bundled with the package,
+# no download needed. If the dependency is missing or fails to load, this is
+# automatically a no-op (relevance/tag-based filtering still applies).
+# ---------------------------------------------------------------------------
+nsfw_gate_enabled = true
+
+# Per-label confidence (0-1) above which a detection triggers a reject.
+nsfw_threshold = 0.25
+
+# Number of evenly-spaced frames sampled from each video candidate for the
+# NSFW gate (the whole clip is rejected if ANY sampled frame trips it).
+nsfw_frame_samples = 4
+
+# ---------------------------------------------------------------------------
 # Background music — online fetch
 # ---------------------------------------------------------------------------
 

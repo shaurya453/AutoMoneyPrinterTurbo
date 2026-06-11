@@ -1,6 +1,7 @@
 import os
+import re
 import threading
-from typing import List
+from typing import List, Tuple
 from urllib.parse import urlencode, urlparse
 
 import requests
@@ -10,6 +11,7 @@ from PIL import Image, UnidentifiedImageError
 
 from app.config import config
 from app.models.schema import MaterialInfo, VideoAspect
+from app.services import nsfw, relevance
 from app.utils import utils
 
 # Thread-safe counter for API key rotation
@@ -52,10 +54,58 @@ def get_api_key(cfg_key: str):
         return api_keys[_api_key_counter % len(api_keys)]
 
 
+def _download_bytes(url: str) -> bytes:
+    """Download a small resource (e.g. a thumbnail) and return its bytes, or
+    b'' on failure."""
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+    }
+    try:
+        r = requests.get(
+            url, headers=headers, proxies=config.proxy,
+            verify=_get_tls_verify(), timeout=(15, 30),
+        )
+        r.raise_for_status()
+        return r.content
+    except Exception as e:
+        logger.debug(f"thumbnail download failed: {url} => {e}")
+        return b""
+
+
+_MAX_RERANK_CANDIDATES = 12
+
+
+def _rerank_by_thumbnail(
+    items: List[MaterialInfo], prompt: str, kind: str = "video"
+) -> List[MaterialInfo]:
+    """Reorder video search results by CLIP relevance of their thumbnail
+    against `prompt` (a visual_caption or legacy search_term+video_topic
+    string).
+
+    No-op (returns items unchanged, in original order) if prompt is empty,
+    the relevance model is unavailable, or RELEVANCE_LOG_ONLY is set.
+    """
+    if not items or not prompt or not relevance.is_available():
+        return items
+
+    candidates = items[:_MAX_RERANK_CANDIDATES]
+    rest = items[_MAX_RERANK_CANDIDATES:]
+    pairs = [
+        (item, _download_bytes(item.thumbnail) if item.thumbnail else b"")
+        for item in candidates
+    ]
+    ranked = relevance.rank(prompt, pairs, kind=kind)
+    return [item for item, _ in ranked] + rest
+
+
 def search_videos_pexels(
     search_term: str,
     minimum_duration: int,
     video_aspect: VideoAspect = VideoAspect.portrait,
+    prompt: str = "",
 ) -> List[MaterialInfo]:
     aspect = VideoAspect(video_aspect)
     video_orientation = aspect.name
@@ -66,7 +116,7 @@ def search_videos_pexels(
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
     }
     # Build URL
-    params = {"query": search_term, "per_page": 20, "orientation": video_orientation}
+    params = {"query": search_term, "per_page": 80, "orientation": video_orientation}
     query_url = f"https://api.pexels.com/videos/search?{urlencode(params)}"
     logger.info(f"searching videos: {query_url}, with proxies: {config.proxy}")
 
@@ -117,8 +167,9 @@ def search_videos_pexels(
                 item.provider = "pexels"
                 item.url = chosen["link"]
                 item.duration = duration
+                item.thumbnail = v.get("image", "")
                 video_items.append(item)
-        return video_items
+        return _rerank_by_thumbnail(video_items, prompt, kind="video")
     except Exception as e:
         logger.error(f"search videos failed: {str(e)}")
 
@@ -129,6 +180,7 @@ def search_videos_pixabay(
     search_term: str,
     minimum_duration: int,
     video_aspect: VideoAspect = VideoAspect.portrait,
+    prompt: str = "",
 ) -> List[MaterialInfo]:
     aspect = VideoAspect(video_aspect)
 
@@ -139,7 +191,8 @@ def search_videos_pixabay(
     params = {
         "q": search_term,
         "video_type": "all",  # Accepted values: "all", "film", "animation"
-        "per_page": 50,
+        "per_page": 200,
+        "safesearch": "true",
         "key": api_key,
     }
     query_url = f"https://pixabay.com/api/videos/?{urlencode(params)}"
@@ -162,6 +215,12 @@ def search_videos_pixabay(
             if duration < minimum_duration:
                 continue
             video_files = v["videos"]
+            picture_id = v.get("picture_id", "")
+            thumbnail = (
+                f"https://i.vimeocdn.com/video/{picture_id}_640x360.jpg"
+                if picture_id
+                else ""
+            )
             # loop through each url to determine the best quality
             for video_type in video_files:
                 video = video_files[video_type]
@@ -172,9 +231,10 @@ def search_videos_pixabay(
                     item.provider = "pixabay"
                     item.url = video["url"]
                     item.duration = duration
+                    item.thumbnail = thumbnail
                     video_items.append(item)
                     break
-        return video_items
+        return _rerank_by_thumbnail(video_items, prompt, kind="video")
     except Exception as e:
         logger.error(f"search videos failed: {str(e)}")
 
@@ -293,6 +353,7 @@ def search_images_pixabay(search_term: str, n: int = 5) -> List[str]:
         "q": search_term,
         "image_type": "photo",
         "per_page": n,
+        "safesearch": "true",
         "key": api_key,
     }
     url = f"https://pixabay.com/api/?{urlencode(params)}"
@@ -355,6 +416,48 @@ def _is_watermarked_source(url: str) -> bool:
     return any(host == d or host.endswith("." + d) for d in _WATERMARKED_IMAGE_DOMAINS)
 
 
+# Known adult-content domains and explicit keywords. DuckDuckGo's image
+# search ("auto" backend) frequently falls back to a Bing-scraping engine
+# whose safesearch parameter is silently ignored by the underlying library,
+# so this keyword/domain check is the real safety net against explicit
+# results (e.g. nudity) ending up in a generated video.
+_NSFW_IMAGE_DOMAINS = {
+    "pornhub.com", "xvideos.com", "xnxx.com", "xhamster.com", "redtube.com",
+    "youporn.com", "tube8.com", "spankbang.com", "onlyfans.com", "chaturbate.com",
+    "xxx.com", "porn.com", "rule34.xxx", "e-hentai.org", "nhentai.net",
+    "motherless.com", "thothub.tv", "fapello.com", "erome.com",
+}
+
+_NSFW_KEYWORDS = {
+    "porn", "pornstar", "xxx", "nsfw", "nude", "naked", "nudity", "topless",
+    "sex", "sexy", "fetish", "hentai", "erotic", "erotica", "xvideos", "xnxx",
+    "onlyfans", "escort", "boobs", "tits", "vagina", "pussy", "penis", "cock",
+    "dick", "anal", "blowjob", "masturbat", "orgasm", "creampie", "cumshot",
+    "stripper", "camgirl", "milf", "bdsm", "bondage",
+}
+
+
+def _is_nsfw_result(result: dict) -> bool:
+    """Return True if a DDG image result looks like adult/explicit content.
+
+    Checks the result's source domain and its title/url text against a
+    blocklist of adult-content domains and explicit keywords.
+    """
+    for field in ("image", "url", "thumbnail"):
+        link = result.get(field) or ""
+        try:
+            host = urlparse(link).netloc.lower().split(":")[0]
+        except Exception:
+            host = ""
+        if host and any(host == d or host.endswith("." + d) for d in _NSFW_IMAGE_DOMAINS):
+            return True
+
+    text = " ".join(
+        str(result.get(field) or "") for field in ("title", "url", "image", "source")
+    ).lower()
+    return any(re.search(rf"\b{kw}\w*", text) for kw in _NSFW_KEYWORDS)
+
+
 def search_images_ddg(search_term: str, n: int = 5) -> List[str]:
     """Return up to n image URLs from DuckDuckGo image search (free, no API key).
 
@@ -371,7 +474,16 @@ def search_images_ddg(search_term: str, n: int = 5) -> List[str]:
     proxy = (config.proxy or {}).get("https") or (config.proxy or {}).get("http")
     try:
         # Over-fetch since some results get filtered out below.
-        results = DDGS(proxy=proxy, timeout=30).images(query=search_term, max_results=n * 3)
+        # safesearch="on" is honored by the "duckduckgo" backend (forces
+        # DuckDuckGo's strict p=1 filter), but the "bing" backend that ddgs
+        # falls back to ignores it entirely -- so this alone is not
+        # sufficient. The _is_nsfw_result() check below is the real
+        # defense-in-depth filter for results that slip through.
+        results = DDGS(proxy=proxy, timeout=30).images(
+            query=search_term,
+            max_results=n * 3,
+            safesearch="on",
+        )
     except Exception as e:
         logger.error(f"DuckDuckGo image search failed: {e}")
         return []
@@ -382,6 +494,9 @@ def search_images_ddg(search_term: str, n: int = 5) -> List[str]:
         if not url:
             continue
         if _is_watermarked_source(url):
+            continue
+        if _is_nsfw_result(r):
+            logger.info(f"skipping likely NSFW image result: {url}")
             continue
         try:
             width, height = int(r.get("width") or 0), int(r.get("height") or 0)
@@ -396,6 +511,17 @@ def search_images_ddg(search_term: str, n: int = 5) -> List[str]:
         if len(urls) >= n:
             break
     return urls
+
+
+# Wikimedia Commons indexes scanned documents (PDF/DJVU page renders), vector
+# diagrams (SVG), and audio/video alongside photos. Their thumbnails are
+# returned by the same API but are almost never useful documentary b-roll,
+# and PDF/DJVU page-render thumbnails are aggressively rate-limited (frequent
+# 429 Too Many Requests). Skip files whose original extension isn't a raster
+# photo format.
+_WIKIMEDIA_SKIP_EXTENSIONS = {
+    ".pdf", ".djvu", ".svg", ".tif", ".tiff", ".ogv", ".ogg", ".webm", ".mp4", ".gif",
+}
 
 
 def search_images_wikimedia(search_term: str, n: int = 5) -> List[str]:
@@ -421,6 +547,9 @@ def search_images_wikimedia(search_term: str, n: int = 5) -> List[str]:
         pages = r.json().get("query", {}).get("pages", {})
         urls = []
         for page in pages.values():
+            title_ext = os.path.splitext(page.get("title", ""))[-1].lower()
+            if title_ext in _WIKIMEDIA_SKIP_EXTENSIONS:
+                continue
             info = page.get("imageinfo", [])
             if info:
                 thumb = info[0].get("thumburl") or info[0].get("url")
@@ -503,31 +632,7 @@ _IMAGE_PROVIDERS = {
 
 _DEFAULT_IMAGE_SOURCE_ORDER = ["duckduckgo", "wikimedia", "pexels", "pixabay", "unsplash"]
 
-# Pre-seeded local cache to avoid repeated network searches for common terms.
-_PRESEEDED_IMAGES = {
-    "cereal aisle": "storage/cache_images/img-ec3756f5135e44565f416d52fe11fb59.jpeg",
-    "cereal box": "storage/cache_images/img-96a332f1d6fb5c5f4d36e3ccb37f298a.jpeg",
-    "snack cakes": "storage/cache_images/img-5047a25956ad49fd6882ee83ada6ac3a.jpeg",
-    "bakery shelf": "storage/cache_images/img-d956900c35ef9187919838f853bc4aba.jpeg",
-    "canned pasta": "storage/cache_images/img-eaec349b44544b1d654a4f69d9ff89e9.jpeg",
-    "food can": "storage/cache_images/img-614db0e887245fee2a1919d56d4cea8a.jpeg",
-    "canned soup": "storage/cache_images/img-490944996c1ffcf08fe905f9993fd257.jpeg",
-    "soup shelf": "storage/cache_images/img-bfc08931e66126adfb1e8cb9b935d8d9.jpeg",
-    "cookie bag": "storage/cache_images/img-6171da5daf8a5e814a5544addcb3618f.jpeg",
-    "store cookies": "storage/cache_images/img-8f47fc1a6875ef717ec0010d3bff9205.jpeg",
-    "frozen meals": "storage/cache_images/img-ba5614dccd87092494cd878975337a8b.jpeg",
-    "freezer aisle": "storage/cache_images/img-a84e361ceb964617fbaa914390c74e55.jpeg",
-    "ice cream taco": "storage/cache_images/img-171d5a5146f48f63b911f37d836fe6e8.jpeg",
-    "dessert freezer": "storage/cache_images/img-6eff69abef6a211b515418e8a6441201.jpeg",
-    "butter sticks": "storage/cache_images/img-30b84a141276d67825aa48a1ee80fa22.jpeg",
-    "dairy fridge": "storage/cache_images/img-69acdeddf8682536e04050aebe8c6f94.png",
-    "dairy farm": "storage/cache_images/img-1b4ff5147a521a459ec54b2f300e8c3f.jpeg",
-    "milk processing": "storage/cache_images/img-5128e04a84160a8a8ec349d43de65fcb.jpeg",
-    "corporate meeting": "storage/cache_images/img-b90fea9a33bcfed5443eaf4bafec26bf.jpeg",
-    "financial report": "storage/cache_images/img-d22583de68d8ab5202e466ec8c3252fe.jpeg",
-    "grocery aisle": "storage/cache_images/img-09d7d1fe31bbb7ef917fe1f441b2fa83.jpeg",
-    "empty shelves": "storage/cache_images/img-c0e20fa858235fb3cfc9a6b2f6b45dfe.jpeg",
-}
+_CANDIDATES_PER_TERM = 6
 
 
 def download_image(
@@ -535,6 +640,8 @@ def download_image(
     source_order: List[str] = None,
     save_dir: str = "",
     used_urls: set = None,
+    video_topic: str = "",
+    caption_prompt: str = "",
 ) -> str:
     """
     Search for a still image using multiple providers in priority order and
@@ -545,59 +652,130 @@ def download_image(
         ["pexels", "pixabay", "unsplash", "wikimedia"].
 
     used_urls: if provided, mutated in-place with the chosen image's source
-        identifier (remote URL or preseeded local path) so subsequent calls
-        across the run won't reuse the same image. A first pass avoids
-        anything already in used_urls; only if that pass finds nothing is a
-        second pass run allowing reuse.
+        URL so subsequent calls across the run won't reuse the same image.
+        Anything already in
+        used_urls is skipped entirely -- if every candidate across all terms
+        and providers has already been used, this returns '' rather than
+        reusing one (the caller falls back to a different media type).
+
+    Every downloaded candidate (regardless of relevance settings) is passed
+    through the NSFW pixel gate (app.services.nsfw); a hard-rejected
+    candidate is deleted and never claimed/used or considered for the
+    relevance fallback.
+
+    caption_prompt / video_topic: if either is set (and the CLIP relevance
+        model is available, and RELEVANCE_LOG_ONLY is not set), candidates
+        are downloaded and scored against `caption_prompt` (falling back to
+        `search_term + video_topic` if caption_prompt is empty); the first
+        one per term that beats the junk anchors by `relevance_margin` is
+        used. If nothing clears the margin, the best-scoring candidate seen
+        across all terms is used instead -- relevance filtering never
+        reduces the candidate pool to zero.
     """
     if source_order is None:
         source_order = _DEFAULT_IMAGE_SOURCE_ORDER
 
-    def _try(allow_reuse: bool) -> str:
+    use_relevance = (
+        bool(caption_prompt or video_topic)
+        and relevance.is_available()
+        and not relevance.is_log_only()
+    )
+    margin = float(config.app.get("relevance_margin", 0.02))
+
+    def _gather_urls(term: str) -> List[Tuple[str, str]]:
+        per_provider: List[Tuple[str, List[str]]] = []
+        for provider in source_order:
+            fn = _IMAGE_PROVIDERS.get(provider)
+            if fn is None:
+                logger.warning(f"unknown image provider: {provider}")
+                continue
+            # DDG draws from the broad open web, so individual hosts are more
+            # likely to block hotlinking (e.g. Akamai-protected CDNs) -- request
+            # more candidates so a working one is likely among them.
+            n = 10 if provider == "duckduckgo" else 6
+            urls = [
+                url for url in fn(term, n=n)
+                if url and (used_urls is None or url not in used_urls)
+            ]
+            per_provider.append((provider, urls))
+
+        # Interleave round-robin across providers so a relevance-limited
+        # slice (_CANDIDATES_PER_TERM) still draws from multiple sources
+        # instead of being dominated by whichever provider is first in
+        # source_order (e.g. DuckDuckGo, which usually returns the most
+        # results but is also the least curated/highest-risk source).
+        candidates: List[Tuple[str, str]] = []
+        i = 0
+        while True:
+            added = False
+            for provider, urls in per_provider:
+                if i < len(urls):
+                    candidates.append((provider, urls[i]))
+                    added = True
+            if not added:
+                break
+            i += 1
+        return candidates
+
+    def _claim(url: str, term: str, provider: str, local: str, note: str = "") -> str:
+        if used_urls is not None:
+            used_urls.add(url)
+        logger.info(f"image obtained via {provider} for '{term}': {local}{note}")
+        return local
+
+    def _try() -> str:
+        fallback_path = fallback_url = fallback_provider = fallback_term = ""
+        fallback_score = float("-inf")
+
         for term in search_terms:
-            preset = _PRESEEDED_IMAGES.get(term.lower())
-            if preset and os.path.exists(preset):
-                if used_urls is None or allow_reuse or preset not in used_urls:
-                    if used_urls is not None:
-                        if preset in used_urls:
-                            logger.warning(f"reusing preseeded image for '{term}': {preset}")
-                        used_urls.add(preset)
-                    logger.info(f"using preseeded image for '{term}': {preset}")
-                    return preset
-            for provider in source_order:
-                fn = _IMAGE_PROVIDERS.get(provider)
-                if fn is None:
-                    logger.warning(f"unknown image provider: {provider}")
+            candidates = _gather_urls(term)
+            iter_candidates = candidates if not use_relevance else candidates[:_CANDIDATES_PER_TERM]
+            prompt = caption_prompt or relevance.build_prompt(term, video_topic)
+
+            for provider, url in iter_candidates:
+                local = save_image(url, save_dir)
+                if not local:
                     continue
-                # DDG draws from the broad open web, so individual hosts are more
-                # likely to block hotlinking (e.g. Akamai-protected CDNs) -- request
-                # more candidates so a working one is likely among them.
-                n = 8 if provider == "duckduckgo" else 3
-                for url in fn(term, n=n):
-                    if not url:
-                        continue
-                    if used_urls is not None and not allow_reuse and url in used_urls:
-                        continue
-                    local = save_image(url, save_dir)
-                    if local:
-                        if used_urls is not None:
-                            if url in used_urls:
-                                logger.warning(f"image {url} already used — reusing for '{term}'")
-                            used_urls.add(url)
-                        logger.info(f"image obtained via {provider} for '{term}': {local}")
-                        return local
+
+                with open(local, "rb") as fh:
+                    image_bytes = fh.read()
+
+                if not nsfw.passes(nsfw.is_nsfw_image(image_bytes)):
+                    logger.info(f"rejected NSFW image candidate: {url}")
+                    try:
+                        os.remove(local)
+                    except Exception:
+                        pass
+                    continue
+
+                if not use_relevance:
+                    return _claim(url, term, provider, local)
+
+                s = relevance.score(prompt, image_bytes)
+                if config.app.get("relevance_debug_log", False):
+                    logger.debug(f"relevance[image] prompt={prompt!r} score={s} url={url}")
+                margin_ok = relevance.passes_margin(prompt, image_bytes, margin)
+                if margin_ok is None or margin_ok:
+                    note = f" (score={s:.3f})" if s is not None else ""
+                    return _claim(url, term, provider, local, note)
+                if s is not None and s > fallback_score:
+                    fallback_score = s
+                    fallback_path, fallback_url = local, url
+                    fallback_provider, fallback_term = provider, term
+
+        if fallback_path:
+            logger.warning(
+                f"no image cleared relevance margin {margin} for {search_terms}; "
+                f"using best available for '{fallback_term}' (score={fallback_score:.3f}): {fallback_path}"
+            )
+            return _claim(fallback_url, fallback_term, fallback_provider, fallback_path)
         return ""
 
-    result = _try(allow_reuse=False)
+    result = _try()
     if result:
         return result
-    if used_urls is not None:
-        # First pass found nothing new -- re-run allowing reuse before giving up.
-        result = _try(allow_reuse=True)
-        if result:
-            return result
 
-    logger.warning(f"no image found for terms {search_terms} from {source_order}")
+    logger.warning(f"no unused image found for terms {search_terms} from {source_order}")
     return ""
 
 

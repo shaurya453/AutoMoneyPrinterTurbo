@@ -1,5 +1,4 @@
 import glob
-import itertools
 import io
 import json
 import math
@@ -967,23 +966,20 @@ def combine_videos(
         except Exception as e:
             logger.error(f"failed to process clip: {str(e)}")
 
-    # loop processed clips until the effective output duration matches or exceeds the audio duration.
+    # NOTE: clips are intentionally NOT looped/repeated to cover any shortfall
+    # against audio_duration -- repeating already-shown footage is exactly the
+    # "same clip over and over" artifact this pipeline must avoid. Any gap is
+    # left for pipeline.py's outro step, which extends the result with a
+    # frozen last frame instead of replaying earlier clips.
     n = len(processed_clips)
     effective_duration = video_duration - max(0, n - 1) * cf_overlap
     if effective_duration < audio_duration:
-        logger.warning(f"effective duration ({effective_duration:.2f}s) is shorter than audio duration ({audio_duration:.2f}s), looping clips to match audio length.")
-        base_clips = processed_clips.copy()
-        for clip in itertools.cycle(base_clips):
-            n = len(processed_clips)
-            effective_duration = video_duration - max(0, n - 1) * cf_overlap
-            if effective_duration >= audio_duration:
-                break
-            processed_clips.append(clip)
-            video_duration += clip.duration
-        n = len(processed_clips)
-        effective_duration = video_duration - max(0, n - 1) * cf_overlap
-        logger.info(f"effective duration: {effective_duration:.2f}s, audio duration: {audio_duration:.2f}s, looped {n - len(base_clips)} clips")
-     
+        logger.warning(
+            f"effective duration ({effective_duration:.2f}s) is shorter than audio "
+            f"duration ({audio_duration:.2f}s); not looping clips — "
+            f"the outro freeze-frame will cover the remainder"
+        )
+
     # merge video clips progressively, avoid loading all videos at once to avoid memory overflow
     logger.info("starting clip merging process")
     if not processed_clips:

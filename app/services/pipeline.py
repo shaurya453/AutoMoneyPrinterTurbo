@@ -24,15 +24,13 @@ from typing import List, Optional, Tuple
 from loguru import logger
 
 from app.config import config
-from app.models import const
 from app.models.schema import (
     VideoConcatMode,
     VideoAspect,
     VideoParams,
     VideoTransitionMode,
 )
-from app.services import material, subtitle, video, voice
-from app.services import state as sm
+from app.services import material, nsfw, relevance, subtitle, video, voice
 from app.utils import utils
 
 
@@ -222,10 +220,19 @@ def _fetch_video_clip(
     clip_idx: int,
     clips_dir: str,
     used_urls: set,
+    caption_prompt: str = "",
 ) -> Optional[str]:
-    """Download + trim a stock-video clip. None if no candidates found at all.
+    """Download + trim a stock-video clip, verifying each candidate against
+    the NSFW pixel gate and a CLIP relevance margin before accepting it.
 
-    used_urls is mutated in-place on success.
+    Candidates are tried in order (cheap thumbnail-prefiltered by
+    `caption_prompt`) for up to `max_video_download_attempts`. Every
+    candidate that's downloaded -- whether accepted, NSFW-rejected, or
+    relevance-rejected -- is marked in `used_urls` so it's never retried by
+    this or a later sentence.
+
+    Returns None if no candidates are found at all, or none pass
+    verification within the attempt budget.
     """
     search_terms = sentence.get("search_terms", [])
     if not search_terms:
@@ -239,43 +246,110 @@ def _fetch_video_clip(
     )
 
     min_duration = max(1, int(sent_duration))
-    candidates = []
-    for term in search_terms:
-        items = search_fn(
-            search_term=term,
-            minimum_duration=min_duration,
-            video_aspect=video_aspect,
-        )
-        candidates.extend(items)
-        # Stop as soon as we have at least one candidate that hasn't been used.
-        # If all results from this term are already used, try the next term before
-        # accepting a reused clip — this keeps footage fresh late in long videos.
-        if any(c.url not in used_urls for c in candidates):
+    max_attempts = int(config.app.get("max_video_download_attempts", 3))
+    nsfw_frame_samples = int(config.app.get("nsfw_frame_samples", 4))
+    relevance_frame_samples = int(config.app.get("relevance_video_frame_samples", 4))
+    relevance_pool = config.app.get("relevance_video_pool", "mean")
+    margin = float(config.app.get("relevance_margin", 0.02))
+    use_relevance = relevance.is_available() and not relevance.is_log_only()
+    num_frames = max(nsfw_frame_samples, relevance_frame_samples)
+
+    # search_terms is a tiered list: term[0] is the most specific/niche ask
+    # for this sentence, later terms progressively easier-to-find fallbacks
+    # that still fit the sentence (see AGENT_GUIDE.md). Try one fresh
+    # candidate per term, in order, round-robin -- so a niche term that's
+    # empty or gets its candidate rejected falls through to the broader
+    # terms instead of burning the whole attempt budget on one tier. Each
+    # term's results (and thumbnail reranking) are only fetched lazily, the
+    # first time that term is actually reached.
+    term_results: List[Optional[list]] = [None] * len(search_terms)
+    term_pos = [0] * len(search_terms)
+
+    attempts = 0
+    while attempts < max_attempts:
+        progressed = False
+        for t_idx, term in enumerate(search_terms):
+            if attempts >= max_attempts:
+                break
+            if term_results[t_idx] is None:
+                term_results[t_idx] = search_fn(
+                    search_term=term,
+                    minimum_duration=min_duration,
+                    video_aspect=video_aspect,
+                    prompt=caption_prompt,
+                )
+            items = term_results[t_idx]
+            pos = term_pos[t_idx]
+            while pos < len(items) and items[pos].url in used_urls:
+                pos += 1
+            term_pos[t_idx] = pos
+            if pos >= len(items):
+                continue
+            candidate = items[pos]
+            term_pos[t_idx] = pos + 1
+            progressed = True
+            attempts += 1
+            used_urls.add(candidate.url)
+
+            downloaded = material.save_video(
+                video_url=candidate.url,
+                save_dir=utils.storage_dir("cache_videos"),
+            )
+            if not downloaded:
+                logger.warning(f"clip {clip_idx}: video download failed for {candidate.url}")
+                continue
+
+            ok = _trim_clip(downloaded, sent_duration + trim_buffer, out_path)
+            if not ok:
+                logger.warning(f"clip {clip_idx}: trim failed for {candidate.url}")
+                continue
+
+            frames = []
+            if nsfw.is_available() or use_relevance:
+                frames = nsfw.sample_frame_bytes(out_path, num_frames=num_frames)
+                if not frames:
+                    logger.warning(
+                        f"clip {clip_idx}: could not extract frames for verification, "
+                        f"skipping candidate: {candidate.url}"
+                    )
+                    try:
+                        os.remove(out_path)
+                    except Exception:
+                        pass
+                    continue
+
+            if nsfw.is_available() and not nsfw.passes(nsfw.is_nsfw_frames(frames)):
+                logger.info(f"clip {clip_idx}: rejected NSFW video candidate: {candidate.url}")
+                try:
+                    os.remove(out_path)
+                except Exception:
+                    pass
+                continue
+
+            if use_relevance:
+                margin_ok = relevance.passes_margin_frames(
+                    caption_prompt, frames, margin, pool=relevance_pool
+                )
+                if margin_ok is False:
+                    logger.info(
+                        f"clip {clip_idx}: rejected video candidate (relevance margin): {candidate.url}"
+                    )
+                    try:
+                        os.remove(out_path)
+                    except Exception:
+                        pass
+                    continue
+
+            return out_path
+
+        if not progressed:
             break
 
-    if not candidates:
-        return None
-
-    # Pick the first candidate whose URL hasn't been used in this run.
-    chosen = next((c for c in candidates if c.url not in used_urls), candidates[0])
-    if chosen.url in used_urls:
-        logger.warning(f"clip {clip_idx}: all video candidates already used — reusing {chosen.url}")
-    used_urls.add(chosen.url)
-
-    downloaded = material.save_video(
-        video_url=chosen.url,
-        save_dir=utils.storage_dir("cache_videos"),
+    logger.warning(
+        f"clip {clip_idx}: no video candidate passed verification for "
+        f"{search_terms} (tried {attempts}/{max_attempts} attempts)"
     )
-    if not downloaded:
-        logger.warning(f"clip {clip_idx}: video download failed")
-        return None
-
-    ok = _trim_clip(downloaded, sent_duration + trim_buffer, out_path)
-    if not ok:
-        logger.warning(f"clip {clip_idx}: trim failed")
-        return None
-
-    return out_path
+    return None
 
 
 def _fetch_image_clip(
@@ -286,10 +360,13 @@ def _fetch_image_clip(
     clip_idx: int,
     clips_dir: str,
     used_urls: set,
+    caption_prompt: str = "",
 ) -> Optional[str]:
     """Download an image and render a Ken Burns clip. None if no image found.
 
     used_urls is mutated in-place on success (see material.download_image).
+    Every downloaded candidate passes the NSFW gate and a CLIP relevance
+    margin against `caption_prompt` inside material.download_image.
     """
     search_terms = sentence.get("search_terms", [])
     if not search_terms:
@@ -302,6 +379,7 @@ def _fetch_image_clip(
         search_terms=search_terms,
         save_dir=utils.storage_dir("cache_images"),
         used_urls=used_urls,
+        caption_prompt=caption_prompt,
     )
     if not image_path:
         return None
@@ -329,23 +407,52 @@ def _fetch_clip(
     clip_idx: int,
     clips_dir: str,
     used_urls: set,
-) -> Optional[str]:
+    fallback_terms: Optional[List[str]] = None,
+    is_image_override: Optional[bool] = None,
+    video_topic: str = "",
+) -> Optional[Tuple[str, bool]]:
     """
     Fetch a clip (stock video or Ken Burns image) for one sentence, preferring
-    sentence['media_type']. If the preferred type finds nothing, falls back to
-    the other media type using the same search_terms before giving up.
+    sentence['media_type'] (or `is_image_override` if given — used by the
+    image-ratio cap to flip the preferred order without mutating the
+    sentence). If the preferred type finds nothing, falls back to the other
+    media type using the same search_terms before giving up.
+
+    If both fail and `fallback_terms` is provided, retries both media types
+    using a topic-wide pool of search terms (excluding this sentence's own
+    terms) so the sentence can still get *different* footage instead of
+    contributing nothing.
 
     used_urls is mutated in-place: the chosen clip's source is added so
     subsequent sentences won't reuse the same footage/image.
+
+    CLIP relevance ranking (the NSFW gate is independent of this) scores
+    candidates against `sentence['visual_caption']` (or `search_terms[0]` if
+    missing) combined with `video_topic`, so even an on-topic-sounding
+    caption is still anchored to the video's overall subject.
+
+    Returns (clip_path, used_image) or None if nothing was found at all.
     """
     search_terms = sentence.get("search_terms", [])
     if not search_terms:
         logger.warning(f"clip {clip_idx}: no search terms provided")
         return None
 
-    is_image = sentence.get("media_type") == "image"
-    args_video = (sentence, sent_duration, trim_buffer, source, video_aspect, clip_idx, clips_dir, used_urls)
-    args_image = (sentence, sent_duration, trim_buffer, video_aspect, clip_idx, clips_dir, used_urls)
+    # Always anchor the relevance prompt to video_topic, even when
+    # visual_caption is present -- a caption like "a person looking
+    # surprised" is otherwise scored in isolation and will happily match
+    # totally off-topic "surprised" stock footage (e.g. a pregnancy test
+    # reveal) for a grocery-industry documentary.
+    visual_caption = sentence.get("visual_caption", "")
+    caption_prompt = relevance.build_prompt(visual_caption or search_terms[0], video_topic)
+
+    is_image = (
+        is_image_override
+        if is_image_override is not None
+        else sentence.get("media_type") == "image"
+    )
+    args_video = (sentence, sent_duration, trim_buffer, source, video_aspect, clip_idx, clips_dir, used_urls, caption_prompt)
+    args_image = (sentence, sent_duration, trim_buffer, video_aspect, clip_idx, clips_dir, used_urls, caption_prompt)
 
     if is_image:
         result = _fetch_image_clip(*args_image)
@@ -355,14 +462,32 @@ def _fetch_clip(
         primary, fallback_name = "video", "image"
 
     if result:
-        return result
+        return result, is_image
 
     logger.warning(f"clip {clip_idx}: no {primary} found for terms {search_terms} — trying {fallback_name} fallback")
     result = _fetch_video_clip(*args_video) if fallback_name == "video" else _fetch_image_clip(*args_image)
     if result:
-        return result
+        return result, (fallback_name == "image")
 
-    logger.warning(f"clip {clip_idx}: no clip found for terms {search_terms} (tried both video and image)")
+    if fallback_terms:
+        own = set(search_terms)
+        extra_terms = [t for t in fallback_terms if t not in own]
+        if extra_terms:
+            fb_sentence = dict(sentence)
+            fb_sentence["search_terms"] = extra_terms
+            fb_caption_prompt = relevance.build_prompt(extra_terms[0], video_topic)
+            args_video_fb = (fb_sentence, sent_duration, trim_buffer, source, video_aspect, clip_idx, clips_dir, used_urls, fb_caption_prompt)
+            args_image_fb = (fb_sentence, sent_duration, trim_buffer, video_aspect, clip_idx, clips_dir, used_urls, fb_caption_prompt)
+            video_fb = _fetch_video_clip(*args_video_fb)
+            if video_fb:
+                logger.info(f"clip {clip_idx}: used topic-wide fallback terms {extra_terms[:3]}")
+                return video_fb, False
+            image_fb = _fetch_image_clip(*args_image_fb)
+            if image_fb:
+                logger.info(f"clip {clip_idx}: used topic-wide fallback terms {extra_terms[:3]}")
+                return image_fb, True
+
+    logger.warning(f"clip {clip_idx}: no clip found for terms {search_terms} (tried both media types, plus fallback terms)")
     return None
 
 
@@ -435,6 +560,7 @@ def start(job_path: str) -> Optional[dict]:
     task_id = job.get("task_id") or utils.get_uuid()
     sentences: list = job.get("sentences", [])
     video_script: str = job.get("video_script", "").strip()
+    video_topic: str = job.get("video_topic", "") or job.get("video_title", "")
 
     if not video_script:
         logger.error("job.video_script is empty — nothing to do")
@@ -450,7 +576,6 @@ def start(job_path: str) -> Optional[dict]:
     temp_dir = os.path.join(work_dir, "temp")
     os.makedirs(temp_dir, exist_ok=True)
 
-    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=5)
     logger.info(f"pipeline start | task={task_id} | folder={os.path.basename(work_dir)} | sentences={len(sentences)}")
 
     # ------------------------------------------------------------------ #
@@ -475,11 +600,9 @@ def start(job_path: str) -> Optional[dict]:
         )
         if sub_maker is None:
             logger.error("TTS failed — check voice name and network connectivity")
-            sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
             return None
         audio_duration = math.ceil(voice.get_audio_duration(sub_maker))
     logger.info(f"audio duration: {audio_duration}s")
-    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=15)
 
     # ------------------------------------------------------------------ #
     # 2. Sentence timestamps via faster-whisper                           #
@@ -495,8 +618,6 @@ def start(job_path: str) -> Optional[dict]:
         except Exception as exc:
             logger.warning(f"whisper failed ({exc}), falling back to uniform distribution")
             timings = _uniform_timestamps(sentences, audio_duration)
-
-    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=25)
 
     # ------------------------------------------------------------------ #
     # 3. Per-sentence clip download + trim                                #
@@ -514,46 +635,45 @@ def start(job_path: str) -> Optional[dict]:
     # Image sentences: one Ken Burns clip for the full sentence duration —
     # multiple clips would show the same cached image repeatedly.
     _CLIP_TARGET = 4.0
-    _MIN_VISUAL_DUR = 3.0             # absolute floor for any single clip's duration
-    _MAX_CARRY = 2 * _MIN_VISUAL_DUR  # 6.0s -- caps how much "padding debt" can build up
+    _MIN_VISUAL_DUR = 3.0  # absolute floor for any single clip's duration
 
-    # ---- Pass 1: plan per-sentence clip durations so each sentence's visible
-    # footage sums to exactly its audio duration (prevents progressive
-    # visual/audio drift), while giving every clip a >= _MIN_VISUAL_DUR floor.
+    # ---- Pass 1: plan per-sentence clip durations using absolute resync.
     #
-    # `carry` = accumulated (visual_time_so_far - audio_time_so_far), i.e. the
-    # "debt" owed back to the audio track from padding short sentences up to
-    # the floor. It is always >= 0 by construction. Sentences whose raw audio
-    # duration exceeds their floor automatically repay this debt (their
-    # visual duration is shrunk by up to `carry`, but never below their own
-    # floor) -- this is what keeps `carry` from growing unboundedly in normal
-    # scripts. `_MAX_CARRY` only suppresses further padding once debt is
-    # already high (a long run of ultra-short sentences won't inflate carry
-    # forever); it never blocks repayment, so normal scripts still
-    # self-correct to carry == 0.
-    carry = 0.0
+    # Each sentence's footage starts no earlier than max(when its narration
+    # begins, when the previous sentence's footage ends) -- guaranteeing
+    # footage never precedes the VO -- and runs until the next sentence's
+    # narration begins (or audio_duration for the last sentence), floored at
+    # num_clips * _MIN_VISUAL_DUR. This keeps the cumulative footage timeline
+    # tracking absolute whisper timestamps directly, instead of drifting via
+    # per-sentence duration sums.
+    t0 = timings[0][1]
+    rel_starts = [max(0.0, t_start - t0) for _, t_start, _ in timings]
+
+    cum_end = 0.0
     clip_plans = []
-    for sent, t_start, t_end in timings:
+    for idx, (sent, t_start, t_end) in enumerate(timings):
         sent_audio_dur = max(0.0, t_end - t_start)
         is_image = sent.get("media_type") == "image"
+
+        start_k = max(rel_starts[idx], cum_end)
+        if idx + 1 < len(rel_starts):
+            target_end_k = max(rel_starts[idx + 1], start_k)
+        else:
+            target_end_k = max(audio_duration, start_k)
+        raw_total = target_end_k - start_k
 
         if is_image or sent_audio_dur <= 0:
             num_clips = 1
         else:
-            ideal_clips = max(1, round(sent_audio_dur / _CLIP_TARGET))
-            max_clips_by_min_dur = max(1, int(sent_audio_dur // _MIN_VISUAL_DUR))
+            basis = raw_total if raw_total > 0 else sent_audio_dur
+            ideal_clips = max(1, round(basis / _CLIP_TARGET))
+            max_clips_by_min_dur = max(1, int(basis // _MIN_VISUAL_DUR))
             num_clips = max(1, min(ideal_clips, max_clips_by_min_dur))
 
-        raw_target = sent_audio_dur if sent_audio_dur > 0 else _CLIP_TARGET
         floor = num_clips * _MIN_VISUAL_DUR
-        total = max(floor, raw_target - carry)
-        if carry >= _MAX_CARRY and total > raw_target:
-            # Debt is already high and this sentence would only pad it
-            # further -- stop growing carry; fall back to the un-padded
-            # duration (may be < _MIN_VISUAL_DUR as a last resort).
-            total = raw_target
+        total = max(floor, raw_total)
         durations = [total / num_clips] * num_clips
-        carry += total - raw_target
+        cum_end = start_k + total
 
         clip_plans.append({
             "sent": sent,
@@ -574,8 +694,28 @@ def start(job_path: str) -> Optional[dict]:
         f"xfade limit={video.XFADE_CLIP_LIMIT})"
     )
 
+    # Topic-wide pool of search terms (deduped, order-preserving), used as a
+    # last-resort fallback so a sentence whose own terms are exhausted can
+    # still pull *different* footage instead of leaving a gap that
+    # combine_videos would later fill by repeating clips.
+    _all_search_terms: List[str] = []
+    _seen_terms: set = set()
+    for plan in clip_plans:
+        for term in plan["sent"].get("search_terms", []):
+            if term not in _seen_terms:
+                _seen_terms.add(term)
+                _all_search_terms.append(term)
+
     # ---- Pass 2: fetch clips according to the plan ----
+    # Soft cap on the fraction of clips that may come from still images —
+    # backstops the enrichment agent's media_type choices regardless of how
+    # well it followed AGENT_GUIDE.md's image-ratio guidance.
+    max_image_ratio = float(job.get("max_image_ratio", config.app.get("max_image_ratio", 0.25)))
+    image_clip_count = 0
+    video_clip_count = 0
+
     clip_counter = 0  # unique index for clip filenames across all sentences
+    obtained_duration = 0.0  # sum of planned durations that yielded a clip
     for idx, plan in enumerate(clip_plans):
         sent = plan["sent"]
         durations = plan["durations"]
@@ -588,7 +728,18 @@ def start(job_path: str) -> Optional[dict]:
 
         got_any = False
         for clip_duration in durations:
-            clip_path = _fetch_clip(
+            is_image_override = None
+            if is_image:
+                total_so_far = image_clip_count + video_clip_count
+                projected_ratio = (image_clip_count + 1) / (total_so_far + 1)
+                if projected_ratio > max_image_ratio:
+                    is_image_override = False
+                    logger.info(
+                        f"clip {clip_counter}: image ratio cap reached "
+                        f"({image_clip_count}/{total_so_far or 1} so far) — trying video first"
+                    )
+
+            fetched = _fetch_clip(
                 sentence=sent,
                 sent_duration=clip_duration,
                 trim_buffer=trim_buffer,
@@ -597,25 +748,76 @@ def start(job_path: str) -> Optional[dict]:
                 clip_idx=clip_counter,
                 clips_dir=clips_dir,
                 used_urls=used_urls,
+                fallback_terms=_all_search_terms,
+                is_image_override=is_image_override,
+                video_topic=video_topic,
             )
             clip_counter += 1
-            if clip_path:
+            if fetched:
+                clip_path, used_image = fetched
                 ordered_clips.append(clip_path)
                 got_any = True
+                obtained_duration += clip_duration
+                if used_image:
+                    image_clip_count += 1
+                else:
+                    video_clip_count += 1
 
         if not got_any:
             logger.warning(f"sentence {idx+1}: skipping — no clip available")
 
-        # Update progress proportionally across 25–55%
-        progress = 25 + int((idx + 1) / total_sentences * 30)
-        sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=progress)
-
     if not ordered_clips:
         logger.error("no clips obtained for any sentence — aborting")
-        sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
         return None
 
     logger.info(f"obtained {len(ordered_clips)}/{total_sentences} clips")
+    _total_clips = image_clip_count + video_clip_count
+    if _total_clips:
+        logger.info(
+            f"clip mix: {video_clip_count} video / {image_clip_count} image "
+            f"({image_clip_count / _total_clips:.0%} image)"
+        )
+
+    # ---- Gap-fill: cover any shortfall with extra unique clips. combine_videos
+    # never repeats footage, so anything still missing after this is covered by
+    # the outro's frozen-last-frame extension instead. ----
+    if obtained_duration < audio_duration - 0.5 and _all_search_terms:
+        max_gap_fill_attempts = len(_all_search_terms) * 3 + 20
+        attempts = 0
+        logger.info(
+            f"obtained {obtained_duration:.2f}s of {audio_duration:.2f}s — gap-filling with extra clips"
+        )
+        while obtained_duration < audio_duration - 0.5 and attempts < max_gap_fill_attempts:
+            term = _all_search_terms[attempts % len(_all_search_terms)]
+            attempts += 1
+            filler_sentence = {
+                "search_terms": [term],
+                "media_type": "video",
+                "visual_caption": relevance.build_prompt(term, video_topic),
+            }
+            fetched = _fetch_clip(
+                sentence=filler_sentence,
+                sent_duration=_CLIP_TARGET,
+                trim_buffer=trim_buffer,
+                source=video_source,
+                video_aspect=video_aspect,
+                clip_idx=clip_counter,
+                clips_dir=clips_dir,
+                used_urls=used_urls,
+                video_topic=video_topic,
+            )
+            clip_counter += 1
+            if fetched:
+                ordered_clips.append(fetched[0])
+                obtained_duration += _CLIP_TARGET
+        if obtained_duration < audio_duration - 0.5:
+            logger.warning(
+                f"gap-fill exhausted after {attempts} attempts — still "
+                f"{audio_duration - obtained_duration:.2f}s short; the outro "
+                f"freeze-frame will cover the remainder without repeating footage"
+            )
+        else:
+            logger.info(f"gap-fill complete: {obtained_duration:.2f}s obtained")
 
     # ------------------------------------------------------------------ #
     # 4. Combine clips                                                     #
@@ -636,13 +838,10 @@ def start(job_path: str) -> Optional[dict]:
         )
     except Exception:
         logger.exception("combine_videos() raised — aborting")
-        sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
         return None
     if not os.path.exists(combined_path):
         logger.error("combine_videos() produced no output — aborting")
-        sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
         return None
-    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=65)
 
     # Probe the actual combined clip duration — crossfade overlaps reduce it below the
     # raw sum of clip durations, so combine_videos may still fall a few seconds short.
@@ -760,8 +959,6 @@ def start(job_path: str) -> Optional[dict]:
                 )
             logger.info(f"word timings saved: {words_path}")
 
-    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=75)
-
     # ------------------------------------------------------------------ #
     # 6. Final video                                                       #
     # ------------------------------------------------------------------ #
@@ -800,12 +997,10 @@ def start(job_path: str) -> Optional[dict]:
         )
     except Exception:
         logger.exception("generate_video() raised — aborting")
-        sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
         return None
 
     if not os.path.exists(output_file):
         logger.error("final video not found after generate_video()")
-        sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
         return None
 
     result = {
@@ -818,10 +1013,5 @@ def start(job_path: str) -> Optional[dict]:
         "audio_duration": audio_duration,
     }
 
-    # Avoid passing duplicate task_id to update_task
-    payload = {k: v for k, v in result.items() if k != "task_id"}
-    sm.state.update_task(
-        task_id, state=const.TASK_STATE_COMPLETE, progress=100, **payload
-    )
     logger.success(f"pipeline complete → {output_file}")
     return result

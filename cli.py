@@ -68,9 +68,16 @@ def main():
 
     if result is None:
         logger.error("pipeline failed — check logs above for details")
-        sys.exit(1)
+        sys.stderr.flush()
+        # Optional ML deps (e.g. onnxruntime/tokenizers, used by the CLIP
+        # relevance filter) can leave background threads running that hang
+        # normal interpreter shutdown. All work is done, so exit immediately
+        # at the OS level rather than risk the process never returning.
+        os._exit(1)
 
     print(json.dumps(result, indent=2, ensure_ascii=False))
+    sys.stdout.flush()
+    os._exit(0)
 
 
 if __name__ == "__main__":

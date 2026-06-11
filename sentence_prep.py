@@ -9,7 +9,7 @@ before calling cli.py.
 Usage:
     python sentence_prep.py --script script.txt --out job.json
     python sentence_prep.py --script script.txt --out job.json \\
-        --voice en-US-AriaNeural --aspect 16:9 --source pexels --terms 2
+        --voice en-US-AriaNeural --aspect 16:9 --source pexels --terms 3
 """
 
 import argparse
@@ -144,8 +144,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Primary stock video provider (default: pexels)",
     )
     p.add_argument(
-        "--terms", type=int, default=2, choices=[1, 2, 3],
-        help="Search terms per sentence (default: 2)",
+        "--terms", type=int, default=3, choices=[1, 2, 3],
+        help="Search terms per sentence (default: 3)",
     )
     p.add_argument(
         "--task-id", default=None,

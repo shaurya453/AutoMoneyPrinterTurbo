@@ -3,7 +3,6 @@ edge_tts==7.2.7
 faster-whisper==1.1.0
 loguru==0.7.3
 nltk==3.9.1
-pyyaml==6.0.3
 requests==2.33.1
 toml==0.10.2
 pydantic==2.13.4
@@ -11,3 +10,22 @@ numpy==2.4.6
 pillow==11.3.0
 imageio-ffmpeg==0.6.0
 ddgs==9.14.4
+
+# CLIP-based relevance filtering (app/services/relevance.py): runs the
+# Qdrant/clip-ViT-B-32-vision and clip-ViT-B-32-text ONNX ports of CLIP
+# directly via onnxruntime (~600MB of model weights, downloaded on first
+# use and cached under storage/models/clip-vit-b32/). onnxruntime and
+# tokenizers are already transitive deps of faster-whisper but are pinned
+# here since relevance.py imports them directly. If either package or the
+# model fails to load, app/services/relevance.py degrades to a no-op
+# automatically (see relevance_filter_enabled in config.toml).
+onnxruntime==1.26.0
+tokenizers==0.23.1
+
+# Pixel-level NSFW gate (app/services/nsfw.py): bundles a small (~12MB) ONNX
+# YOLO-based nudity detector, no separate model download needed. Pulls in
+# opencv-python-headless as a transitive dep. If this package or its model
+# fails to load, app/services/nsfw.py degrades to a no-op automatically (see
+# nsfw_gate_enabled in config.toml) -- relevance/tag-based filtering still
+# applies, but the pixel-level safety net is disabled.
+nudenet==3.4.2
