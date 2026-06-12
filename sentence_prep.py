@@ -2,9 +2,9 @@
 sentence_prep.py — sentence splitter and search-term scaffolder
 
 Splits a plain-text script into sentences and writes a job JSON template.
-Search terms are auto-extracted as a rough scaffold only — the agent running
-this pipeline must rewrite them (and set media_type) in Step 2
-before calling cli.py.
+Visual concepts are auto-extracted as a rough scaffold only — the agent
+running this pipeline must rewrite them (and set media_type, content_track)
+in Step 2 before calling cli.py.
 
 Usage:
     python sentence_prep.py --script script.txt --out job.json
@@ -185,7 +185,8 @@ def main():
         terms = extract_search_terms(sent, stopwords_set, n=args.terms)
         sentence_entries.append({
             "text": sent,
-            "search_terms": terms,
+            "visual_concepts": terms,
+            "content_track": "broll",
             "media_type": "video",
         })
 
@@ -228,7 +229,7 @@ def main():
     for i, entry in enumerate(sentence_entries[:preview_count], 1):
         text_preview = entry["text"][:70] + ("..." if len(entry["text"]) > 70 else "")
         print(f"  [{i}] {text_preview}")
-        print(f"       terms: {entry['search_terms']}")
+        print(f"       terms: {entry['visual_concepts']}")
     if len(sentence_entries) > preview_count:
         print(f"  ... ({len(sentence_entries) - preview_count} more sentences)")
 

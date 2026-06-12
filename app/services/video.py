@@ -72,6 +72,17 @@ fps = 30
 # crossfade overlap. pipeline.py uses the same value to decide whether to add
 # crossfade trim-buffer padding to fetched clips.
 XFADE_CLIP_LIMIT = 40
+# Default crossfade overlap between adjacent clips, in seconds. Must match
+# concat_video_clips_with_crossfade's default `crossfade_duration` so
+# combine_videos's effective-duration bookkeeping reflects the overlap that
+# the xfade concat step will actually consume.
+_DEFAULT_CROSSFADE_SECONDS = 0.2
+# Duration of each per-clip transition effect (fade/slide in or out).
+_CLIP_TRANSITION_SECONDS = 1
+# Final video fade-to-black duration, covering the frozen-frame outro tail.
+_OUTRO_FADEOUT_SECONDS = 1.5
+# BGM fade-out duration at the end of the video.
+_BGM_FADEOUT_SECONDS = 3
 # ffmpeg concat/xfade subprocess timeout. These run a single local encode pass
 # over already-downloaded clips (no network I/O), but a hung hardware encoder
 # or a malformed input stream could otherwise block the pipeline forever.
@@ -318,7 +329,8 @@ def _make_ducked_bgm(
     fade_secs: float = 0.25,
 ):
     """
-    Return a looped BGM AudioClip with volume ducked during narration periods.
+    Return a looped BGM AudioClip with volume ducked during narration periods,
+    plus the underlying AudioFileClip so the caller can close it after rendering.
 
     duck_to: volume fraction applied while narration is active (0.15 = 15% of
              bgm_volume — clearly audible but not competing with speech).
@@ -366,7 +378,10 @@ def _make_ducked_bgm(
         return frame * (vols[:, np.newaxis] if frame.ndim == 2 else vols)
 
     # MoviePy 2.x renamed make_frame= to frame_function= in AudioClip
-    return _AudioClip(frame_function=make_frame, duration=audio_duration, fps=_SR)
+    ducked = _AudioClip(frame_function=make_frame, duration=audio_duration, fps=_SR)
+    # bgm_raw is captured by make_frame's closure and stays open for the life of
+    # `ducked`; return it too so the caller can close it once rendering is done.
+    return ducked, bgm_raw
 
 
 def concat_video_clips_with_crossfade(
@@ -375,7 +390,7 @@ def concat_video_clips_with_crossfade(
     output_file: str,
     threads: int,
     output_dir: str,
-    crossfade_duration: float = 0.2,
+    crossfade_duration: float = _DEFAULT_CROSSFADE_SECONDS,
 ):
     """
     Concatenate clips using ffmpeg's xfade filter for smooth dissolves between cuts.
@@ -515,34 +530,6 @@ def concat_video_clips_with_ffmpeg(
         delete_files(concat_list_file)
 
 
-def _sanitize_image_file(image_path: str) -> str:
-    # 某些本地图片虽然能被 Pillow 打开，但会因为损坏的 EXIF/eXIf 元数据导致
-    # ImageClip 在解析阶段直接抛异常。这里重新导出一份“干净图片”，把坏元数据剥离掉。
-    image_root, _ = os.path.splitext(image_path)
-    sanitized_path = f"{image_root}.sanitized.png"
-
-    with Image.open(image_path) as image:
-        image.load()
-        # 统一导出为 PNG，避免 JPEG/PNG 不同元数据路径继续把坏块带过去。
-        cleaned_image = Image.new(image.mode, image.size)
-        cleaned_image.putdata(list(image.getdata()))
-        cleaned_image.save(sanitized_path)
-
-    return sanitized_path
-
-
-def _open_image_clip_with_fallback(image_path: str):
-    # 优先直接打开原始图片；如果因为损坏元数据失败，再尝试生成无元数据副本。
-    try:
-        return ImageClip(image_path), image_path
-    except Exception as exc:
-        logger.warning(
-            f"failed to open image directly, trying sanitized copy: {image_path}, error: {str(exc)}"
-        )
-        sanitized_path = _sanitize_image_file(image_path)
-        return ImageClip(sanitized_path), sanitized_path
-
-
 _BG_BRIGHTNESS = 0.5
 _BG_BLUR_FRACTION = 0.06  # downscale-then-upscale blur strength
 
@@ -577,6 +564,40 @@ def _make_blurred_cover_background(clip, width: int, height: int, brightness: fl
     bg = bg.with_effects([vfx.Crop(x_center=cover_w // 2, y_center=cover_h // 2, width=width, height=height)])
     bg = bg.image_transform(lambda frame: _blur_and_darken(frame, brightness=brightness))
     return bg.with_duration(clip.duration)
+
+
+def _resize_clip_to_aspect(clip, video_width: int, video_height: int):
+    """Resize `clip` to exactly (video_width, video_height).
+
+    If the clip's aspect ratio matches the target, it's a plain resize.
+    Otherwise it's scaled to fit and composited over a blurred, cropped
+    copy of itself so the frame is fully covered (letterboxing).
+    """
+    clip_w, clip_h = clip.size
+    if clip_w == video_width and clip_h == video_height:
+        return clip
+
+    clip_ratio = clip_w / clip_h
+    video_ratio = video_width / video_height
+    logger.debug(
+        f"resizing clip, source: {clip_w}x{clip_h}, ratio: {clip_ratio:.2f}, "
+        f"target: {video_width}x{video_height}, ratio: {video_ratio:.2f}"
+    )
+
+    if clip_ratio == video_ratio:
+        return clip.resized(new_size=(video_width, video_height))
+
+    if clip_ratio > video_ratio:
+        scale_factor = video_width / clip_w
+    else:
+        scale_factor = video_height / clip_h
+
+    new_width = int(clip_w * scale_factor)
+    new_height = int(clip_h * scale_factor)
+
+    background = _make_blurred_cover_background(clip, video_width, video_height)
+    clip_resized = clip.resized(new_size=(new_width, new_height)).with_position("center")
+    return CompositeVideoClip([background, clip_resized], size=(video_width, video_height)).with_duration(clip.duration)
 
 
 def apply_ken_burns(
@@ -734,27 +755,6 @@ def delete_files(files: List[str] | str):
             logger.debug(f"failed to delete file {file}: {str(e)}")
 
 
-def _resolve_bgm_file_path(song_dir: str, bgm_file: str) -> str:
-    # 背景音乐只允许读取 resource/songs 目录内的文件，避免用户输入任意路径后
-    # 被 MoviePy 打开。这里兼容两种常见输入：
-    # 1. output000.mp3：来自 BGM 列表或用户只填写文件名
-    # 2. ./resource/songs/output000.mp3：用户按项目目录结构填写的相对路径
-    # 两种写法最终都会再次通过 resource/songs 白名单校验，不能绕过目录限制。
-    try:
-        return file_security.resolve_path_within_directory(song_dir, bgm_file)
-    except ValueError as song_dir_exc:
-        if os.path.isabs(bgm_file):
-            raise song_dir_exc
-
-        project_relative_file = os.path.join(utils.root_dir(), bgm_file)
-        try:
-            return file_security.resolve_path_within_directory(
-                song_dir, project_relative_file
-            )
-        except ValueError as root_dir_exc:
-            raise ValueError(str(root_dir_exc)) from song_dir_exc
-
-
 def get_bgm_file(bgm_type: str = "random", bgm_file: str = ""):
     if not bgm_type:
         return ""
@@ -791,6 +791,25 @@ def get_bgm_file(bgm_type: str = "random", bgm_file: str = ""):
         return random.choice(files)
 
     return ""
+
+
+# Each entry maps a VideoTransitionMode value to a `(clip, shuffle_side) -> clip`
+# transition function. VideoTransitionMode.shuffle resolves to a random pick
+# from _SHUFFLE_TRANSITIONS instead of a single function.
+_TRANSITION_DISPATCH = {
+    VideoTransitionMode.fade_in.value: lambda clip, side: video_effects.fadein_transition(clip, _CLIP_TRANSITION_SECONDS),
+    VideoTransitionMode.fade_out.value: lambda clip, side: video_effects.fadeout_transition(clip, _CLIP_TRANSITION_SECONDS),
+    VideoTransitionMode.slide_in.value: lambda clip, side: video_effects.slidein_transition(clip, _CLIP_TRANSITION_SECONDS, side),
+    VideoTransitionMode.slide_out.value: lambda clip, side: video_effects.slideout_transition(clip, _CLIP_TRANSITION_SECONDS, side),
+    VideoTransitionMode.shuffle.value: "shuffle",
+}
+
+_SHUFFLE_TRANSITIONS = [
+    lambda clip, side: video_effects.fadein_transition(clip, _CLIP_TRANSITION_SECONDS),
+    lambda clip, side: video_effects.fadeout_transition(clip, _CLIP_TRANSITION_SECONDS),
+    lambda clip, side: video_effects.slidein_transition(clip, _CLIP_TRANSITION_SECONDS, side),
+    lambda clip, side: video_effects.slideout_transition(clip, _CLIP_TRANSITION_SECONDS, side),
+]
 
 
 def combine_videos(
@@ -831,7 +850,7 @@ def combine_videos(
         transition_value == VideoTransitionMode.crossfade.value
         and len(video_paths) <= XFADE_CLIP_LIMIT
     )
-    cf_overlap = 0.2 if crossfade_will_run else 0.0
+    cf_overlap = _DEFAULT_CROSSFADE_SECONDS if crossfade_will_run else 0.0
 
     processed_clips = []
     subclipped_items = []
@@ -894,46 +913,14 @@ def combine_videos(
             clip_duration = clip.duration
             # Not all videos are same size, so we need to resize them
             clip_w, clip_h = clip.size
-            if clip_w != video_width or clip_h != video_height:
-                clip_ratio = clip.w / clip.h
-                video_ratio = video_width / video_height
-                logger.debug(f"resizing clip, source: {clip_w}x{clip_h}, ratio: {clip_ratio:.2f}, target: {video_width}x{video_height}, ratio: {video_ratio:.2f}")
-
-                if clip_ratio == video_ratio:
-                    clip = clip.resized(new_size=(video_width, video_height))
-                else:
-                    if clip_ratio > video_ratio:
-                        scale_factor = video_width / clip_w
-                    else:
-                        scale_factor = video_height / clip_h
-
-                    new_width = int(clip_w * scale_factor)
-                    new_height = int(clip_h * scale_factor)
-
-                    background = _make_blurred_cover_background(clip, video_width, video_height)
-                    clip_resized = clip.resized(new_size=(new_width, new_height)).with_position("center")
-                    clip = CompositeVideoClip([background, clip_resized], size=(video_width, video_height)).with_duration(clip_duration)
+            clip = _resize_clip_to_aspect(clip, video_width, video_height)
 
             shuffle_side = random.choice(["left", "right", "top", "bottom"])
-            if transition_value in (None, VideoTransitionMode.none.value):
-                clip = clip
-            elif transition_value == VideoTransitionMode.fade_in.value:
-                clip = video_effects.fadein_transition(clip, 1)
-            elif transition_value == VideoTransitionMode.fade_out.value:
-                clip = video_effects.fadeout_transition(clip, 1)
-            elif transition_value == VideoTransitionMode.slide_in.value:
-                clip = video_effects.slidein_transition(clip, 1, shuffle_side)
-            elif transition_value == VideoTransitionMode.slide_out.value:
-                clip = video_effects.slideout_transition(clip, 1, shuffle_side)
-            elif transition_value == VideoTransitionMode.shuffle.value:
-                transition_funcs = [
-                    lambda c: video_effects.fadein_transition(c, 1),
-                    lambda c: video_effects.fadeout_transition(c, 1),
-                    lambda c: video_effects.slidein_transition(c, 1, shuffle_side),
-                    lambda c: video_effects.slideout_transition(c, 1, shuffle_side),
-                ]
-                shuffle_transition = random.choice(transition_funcs)
-                clip = shuffle_transition(clip)
+            transition_func = _TRANSITION_DISPATCH.get(transition_value)
+            if transition_func == "shuffle":
+                transition_func = random.choice(_SHUFFLE_TRANSITIONS)
+            if transition_func:
+                clip = transition_func(clip, shuffle_side)
 
             if clip.duration > max_clip_duration:
                 clip = clip.subclipped(0, max_clip_duration)
@@ -1437,9 +1424,11 @@ def generate_video(
         else:
             video_clip = CompositeVideoClip([video_clip, *text_clips])
 
-    # Fade the video to black over the last 1.5 s (covers the 2 s outro tail).
-    video_clip = video_clip.with_effects([vfx.FadeOut(1.5)])
+    # Fade the video to black over the last _OUTRO_FADEOUT_SECONDS (covers the 2 s outro tail).
+    video_clip = video_clip.with_effects([vfx.FadeOut(_OUTRO_FADEOUT_SECONDS)])
 
+    voice_audio_clip = audio_clip
+    bgm_audio_clip = None
     bgm_file = get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file)
     if bgm_file:
         try:
@@ -1447,7 +1436,7 @@ def generate_video(
             has_subtitles = bool(subtitle_path and os.path.exists(subtitle_path))
             if has_subtitles and duck_ratio < 1.0:
                 logger.info(f"applying BGM ducking: {duck_ratio:.0%} during narration")
-                bgm_clip = _make_ducked_bgm(
+                bgm_clip, bgm_audio_clip = _make_ducked_bgm(
                     bgm_file=bgm_file,
                     audio_duration=video_clip.duration,
                     subtitle_path=subtitle_path,
@@ -1455,10 +1444,11 @@ def generate_video(
                     duck_to=duck_ratio,
                 )
             else:
-                bgm_clip = AudioFileClip(bgm_file).with_effects(
+                bgm_audio_clip = AudioFileClip(bgm_file)
+                bgm_clip = bgm_audio_clip.with_effects(
                     [
                         afx.MultiplyVolume(params.bgm_volume),
-                        afx.AudioFadeOut(3),
+                        afx.AudioFadeOut(_BGM_FADEOUT_SECONDS),
                         afx.AudioLoop(duration=video_clip.duration),
                     ]
                 )
@@ -1483,4 +1473,7 @@ def generate_video(
         fps=fps,
     )
     video_clip.close()
+    voice_audio_clip.close()
+    if bgm_audio_clip is not None:
+        bgm_audio_clip.close()
     del video_clip

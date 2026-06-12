@@ -18,6 +18,12 @@ from app.utils import utils
 _api_key_counter = 0
 _api_key_lock = threading.Lock()
 
+# requests timeouts as (connect, read) tuples, in seconds.
+_HTTP_TIMEOUT_THUMBNAIL = (15, 30)  # small thumbnail downloads for reranking
+_HTTP_TIMEOUT_API = (30, 60)        # provider search/JSON endpoints
+_HTTP_TIMEOUT_IMAGE = (30, 120)     # full-size image downloads
+_HTTP_TIMEOUT_MEDIA = (60, 240)     # video/audio downloads
+
 
 def _get_tls_verify() -> bool:
     # 默认开启 TLS 证书校验，防止素材搜索和下载过程被中间人篡改。
@@ -54,6 +60,34 @@ def get_api_key(cfg_key: str):
         return api_keys[_api_key_counter % len(api_keys)]
 
 
+def _api_get_json(url: str, headers: dict = None, timeout: tuple = _HTTP_TIMEOUT_API) -> dict:
+    """GET `url` and return the parsed JSON body, raising on HTTP errors.
+
+    Shared by the provider search functions below to avoid repeating the
+    proxies/verify/timeout boilerplate.
+    """
+    r = requests.get(
+        url, headers=headers, proxies=config.proxy,
+        verify=_get_tls_verify(), timeout=timeout,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def _api_post_json(url: str, json_body: dict, headers: dict = None, timeout: tuple = _HTTP_TIMEOUT_API) -> dict:
+    """POST `json_body` to `url` and return the parsed JSON body, raising on HTTP errors.
+
+    POST analog of `_api_get_json`, for providers (e.g. Serper) whose search
+    endpoint takes the query in a JSON request body rather than the URL.
+    """
+    r = requests.post(
+        url, json=json_body, headers=headers, proxies=config.proxy,
+        verify=_get_tls_verify(), timeout=timeout,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
 def _download_bytes(url: str) -> bytes:
     """Download a small resource (e.g. a thumbnail) and return its bytes, or
     b'' on failure."""
@@ -66,7 +100,7 @@ def _download_bytes(url: str) -> bytes:
     try:
         r = requests.get(
             url, headers=headers, proxies=config.proxy,
-            verify=_get_tls_verify(), timeout=(15, 30),
+            verify=_get_tls_verify(), timeout=_HTTP_TIMEOUT_THUMBNAIL,
         )
         r.raise_for_status()
         return r.content
@@ -121,14 +155,7 @@ def search_videos_pexels(
     logger.info(f"searching videos: {query_url}, with proxies: {config.proxy}")
 
     try:
-        r = requests.get(
-            query_url,
-            headers=headers,
-            proxies=config.proxy,
-            verify=_get_tls_verify(),
-            timeout=(30, 60),
-        )
-        response = r.json()
+        response = _api_get_json(query_url, headers=headers)
         video_items = []
         if "videos" not in response:
             logger.error(f"search videos failed: {response}")
@@ -199,15 +226,13 @@ def search_videos_pixabay(
     logger.info(f"searching videos: {query_url}, with proxies: {config.proxy}")
 
     try:
-        r = requests.get(
-            query_url, proxies=config.proxy, verify=_get_tls_verify(), timeout=(30, 60)
-        )
-        response = r.json()
+        response = _api_get_json(query_url)
         video_items = []
         if "hits" not in response:
             logger.error(f"search videos failed: {response}")
             return video_items
         videos = response["hits"]
+        target_pixels = video_width * video_height
         # loop through each video in the result
         for v in videos:
             duration = v["duration"]
@@ -221,19 +246,33 @@ def search_videos_pixabay(
                 if picture_id
                 else ""
             )
-            # loop through each url to determine the best quality
-            for video_type in video_files:
-                video = video_files[video_type]
-                w = int(video["width"])
-                # h = int(video["height"])
-                if w >= video_width:
-                    item = MaterialInfo()
-                    item.provider = "pixabay"
-                    item.url = video["url"]
-                    item.duration = duration
-                    item.thumbnail = thumbnail
-                    video_items.append(item)
-                    break
+            # Pick smallest resolution >= target; fall back to largest available.
+            best_video = None
+            best_diff = float("inf")
+            fallback_video = None
+            fallback_pixels = 0
+            for video in video_files.values():
+                w = int(video.get("width") or 0)
+                h = int(video.get("height") or 0)
+                if w <= 0 or h <= 0:
+                    continue
+                pixels = w * h
+                if pixels >= target_pixels:
+                    diff = pixels - target_pixels
+                    if diff < best_diff:
+                        best_diff = diff
+                        best_video = video
+                elif pixels > fallback_pixels:
+                    fallback_pixels = pixels
+                    fallback_video = video
+            chosen = best_video or fallback_video
+            if chosen:
+                item = MaterialInfo()
+                item.provider = "pixabay"
+                item.url = chosen["url"]
+                item.duration = duration
+                item.thumbnail = thumbnail
+                video_items.append(item)
         return _rerank_by_thumbnail(video_items, prompt, kind="video")
     except Exception as e:
         logger.error(f"search videos failed: {str(e)}")
@@ -264,16 +303,16 @@ def save_video(video_url: str, save_dir: str = "") -> str:
 
     # if video does not exist, download it
     try:
+        r = requests.get(
+            video_url,
+            headers=headers,
+            proxies=config.proxy,
+            verify=_get_tls_verify(),
+            timeout=_HTTP_TIMEOUT_MEDIA,
+        )
+        r.raise_for_status()
         with open(video_path, "wb") as f:
-            f.write(
-                requests.get(
-                    video_url,
-                    headers=headers,
-                    proxies=config.proxy,
-                    verify=_get_tls_verify(),
-                    timeout=(60, 240),
-                ).content
-            )
+            f.write(r.content)
     except Exception as e:
         logger.warning(f"failed to download video {video_url}: {e}")
         try:
@@ -327,11 +366,7 @@ def search_images_pexels(search_term: str, n: int = 5) -> List[str]:
     params = {"query": search_term, "per_page": n, "orientation": "landscape"}
     url = f"https://api.pexels.com/v1/search?{urlencode(params)}"
     try:
-        r = requests.get(
-            url, headers=headers, proxies=config.proxy,
-            verify=_get_tls_verify(), timeout=(30, 60),
-        )
-        photos = r.json().get("photos", [])
+        photos = _api_get_json(url, headers=headers).get("photos", [])
         return [
             p["src"].get("large2x") or p["src"]["original"]
             for p in photos
@@ -358,10 +393,7 @@ def search_images_pixabay(search_term: str, n: int = 5) -> List[str]:
     }
     url = f"https://pixabay.com/api/?{urlencode(params)}"
     try:
-        r = requests.get(
-            url, proxies=config.proxy, verify=_get_tls_verify(), timeout=(30, 60)
-        )
-        hits = r.json().get("hits", [])
+        hits = _api_get_json(url).get("hits", [])
         return [
             h.get("largeImageURL") or h.get("webformatURL")
             for h in hits
@@ -383,11 +415,7 @@ def search_images_unsplash(search_term: str, n: int = 5) -> List[str]:
     params = {"query": search_term, "per_page": n, "orientation": "landscape"}
     url = f"https://api.unsplash.com/search/photos?{urlencode(params)}"
     try:
-        r = requests.get(
-            url, headers=headers, proxies=config.proxy,
-            verify=_get_tls_verify(), timeout=(30, 60),
-        )
-        results = r.json().get("results", [])
+        results = _api_get_json(url, headers=headers).get("results", [])
         return [
             p["urls"].get("full") or p["urls"].get("regular")
             for p in results
@@ -513,6 +541,61 @@ def search_images_ddg(search_term: str, n: int = 5) -> List[str]:
     return urls
 
 
+def search_images_serper(search_term: str, n: int = 5) -> List[str]:
+    """Return up to n image URLs from Google Images via the Serper API.
+
+    Used for `content_track="named"` sentences (specific products, people,
+    places, events) that generic stock-photo libraries are unlikely to
+    carry. Applies the same watermark/NSFW/dimension filters as
+    `search_images_ddg` so Serper results pass through the same safety gate
+    as every other provider.
+    """
+    try:
+        api_key = get_api_key("serper_api_keys")
+    except ValueError:
+        logger.warning("serper_api_keys not configured, skipping Serper image search")
+        return []
+
+    headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
+    body = {"q": search_term, "num": n * 3}
+    try:
+        data = _api_post_json("https://google.serper.dev/images", body, headers=headers)
+    except Exception as e:
+        logger.error(f"Serper image search failed: {e}")
+        return []
+
+    urls = []
+    for item in data.get("images", []):
+        url = item.get("imageUrl")
+        if not url:
+            continue
+        result = {
+            "image": url,
+            "url": item.get("link", ""),
+            "thumbnail": item.get("thumbnailUrl", ""),
+            "title": item.get("title", ""),
+            "source": item.get("domain", ""),
+        }
+        if _is_watermarked_source(url):
+            continue
+        if _is_nsfw_result(result):
+            logger.info(f"skipping likely NSFW image result: {url}")
+            continue
+        try:
+            width, height = int(item.get("imageWidth") or 0), int(item.get("imageHeight") or 0)
+        except (TypeError, ValueError):
+            width, height = 0, 0
+        if width and height:
+            if min(width, height) < 480:
+                continue
+            if max(width, height) / min(width, height) > 3:
+                continue
+        urls.append(url)
+        if len(urls) >= n:
+            break
+    return urls
+
+
 # Wikimedia Commons indexes scanned documents (PDF/DJVU page renders), vector
 # diagrams (SVG), and audio/video alongside photos. Their thumbnails are
 # returned by the same API but are almost never useful documentary b-roll,
@@ -540,11 +623,7 @@ def search_images_wikimedia(search_term: str, n: int = 5) -> List[str]:
     url = f"https://commons.wikimedia.org/w/api.php?{urlencode(params)}"
     headers = {"User-Agent": "MoneyPrinterTurbo/1.0 (documentary-pipeline)"}
     try:
-        r = requests.get(
-            url, headers=headers, proxies=config.proxy,
-            verify=_get_tls_verify(), timeout=(30, 60),
-        )
-        pages = r.json().get("query", {}).get("pages", {})
+        pages = _api_get_json(url, headers=headers).get("query", {}).get("pages", {})
         urls = []
         for page in pages.values():
             title_ext = os.path.splitext(page.get("title", ""))[-1].lower()
@@ -607,7 +686,7 @@ def save_image(image_url: str, save_dir: str = "") -> str:
     try:
         r = requests.get(
             image_url, headers=headers, proxies=config.proxy,
-            verify=_get_tls_verify(), timeout=(30, 120),
+            verify=_get_tls_verify(), timeout=_HTTP_TIMEOUT_IMAGE,
         )
         r.raise_for_status()
         with open(image_path, "wb") as fh:
@@ -628,6 +707,7 @@ _IMAGE_PROVIDERS = {
     "unsplash": search_images_unsplash,
     "wikimedia": search_images_wikimedia,
     "duckduckgo": search_images_ddg,
+    "serper": search_images_serper,
 }
 
 _DEFAULT_IMAGE_SOURCE_ORDER = ["duckduckgo", "wikimedia", "pexels", "pixabay", "unsplash"]
@@ -800,10 +880,7 @@ def search_bgm_pixabay(search_term: str, n: int = 3) -> List[str]:
     }
     url = f"https://pixabay.com/api/music/?{urlencode(params)}"
     try:
-        r = requests.get(
-            url, proxies=config.proxy, verify=_get_tls_verify(), timeout=(30, 60)
-        )
-        hits = r.json().get("hits", [])
+        hits = _api_get_json(url).get("hits", [])
         return [h["audio"] for h in hits if h.get("audio")]
     except Exception as e:
         logger.error(f"Pixabay BGM search failed: {e}")
@@ -827,7 +904,7 @@ def save_bgm(bgm_url: str, save_dir: str = "") -> str:
     try:
         r = requests.get(
             bgm_url, headers=headers, proxies=config.proxy,
-            verify=_get_tls_verify(), timeout=(60, 240),
+            verify=_get_tls_verify(), timeout=_HTTP_TIMEOUT_MEDIA,
         )
         r.raise_for_status()
         with open(bgm_path, "wb") as fh:

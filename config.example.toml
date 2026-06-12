@@ -37,6 +37,21 @@ pixabay_api_keys = []
 unsplash_api_keys = []
 
 # ---------------------------------------------------------------------------
+# Serper API (Google Images) -- used for content_track="named" sentences
+# (specific products, people, places, events) where generic stock libraries
+# are unlikely to have the exact subject. Register at https://serper.dev/
+# Multiple keys supported: serper_api_keys = ["key1", "key2"]
+# If unset, content_track="named" sentences silently skip Serper and fall
+# back to the rest of named_track_image_source_order below.
+# ---------------------------------------------------------------------------
+serper_api_keys = []
+
+# Provider order for content_track="named" sentences. "serper" (Google
+# Images) is first -- most likely to have a real photo of a specific named
+# product/person/place/event that stock-photo libraries don't carry.
+named_track_image_source_order = ["serper", "duckduckgo", "wikimedia", "pexels", "pixabay", "unsplash"]
+
+# ---------------------------------------------------------------------------
 # Footage/image mix and relevance filtering
 # ---------------------------------------------------------------------------
 

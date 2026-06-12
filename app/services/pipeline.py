@@ -164,8 +164,8 @@ def _uniform_timestamps(
 # the total clip count is small enough that combine_videos will actually run
 # ffmpeg xfade (see video.XFADE_CLIP_LIMIT) — otherwise this padding would
 # never be consumed and would just inflate the final video's duration.
-_CROSSFADE_DUR = 0.2
-_TRIM_BUFFER = 0.2 + _CROSSFADE_DUR / 2   # 0.3 s total padding per clip
+_CROSSFADE_DUR = video._DEFAULT_CROSSFADE_SECONDS
+_TRIM_BUFFER = _CROSSFADE_DUR + _CROSSFADE_DUR / 2   # 0.3 s total padding per clip
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +211,36 @@ def _trim_clip(src_path: str, duration: float, out_path: str) -> bool:
         return False
 
 
+def _get_visual_concepts(sentence: dict) -> List[str]:
+    """Return the sentence's local visual ideas.
+
+    Backward compat: older job.json files use "search_terms" (a 3-tier
+    niche/medium/generic list) instead of "visual_concepts".
+    """
+    return sentence.get("visual_concepts") or sentence.get("search_terms", [])
+
+
+def _build_query_ladder(video_topic: str, visual_concepts: List[str]) -> List[str]:
+    """Build subject-anchored search queries from local visual concepts.
+
+    Each concept is combined with `video_topic` ("{concept} {video_topic}"),
+    deduped in order, with a final bare-`video_topic` rung appended as the
+    safety net -- broadening a query never drops the subject. If
+    `video_topic` is empty, queries fall back to the bare concepts (legacy
+    behavior).
+    """
+    video_topic = (video_topic or "").strip()
+    ladder: List[str] = []
+    for concept in visual_concepts:
+        concept = (concept or "").strip()
+        q = f"{concept} {video_topic}".strip() if video_topic else concept
+        if q and q not in ladder:
+            ladder.append(q)
+    if video_topic and video_topic not in ladder:
+        ladder.append(video_topic)
+    return ladder
+
+
 def _fetch_video_clip(
     sentence: dict,
     sent_duration: float,
@@ -221,6 +251,7 @@ def _fetch_video_clip(
     clips_dir: str,
     used_urls: set,
     caption_prompt: str = "",
+    query_ladder: Optional[List[str]] = None,
 ) -> Optional[str]:
     """Download + trim a stock-video clip, verifying each candidate against
     the NSFW pixel gate and a CLIP relevance margin before accepting it.
@@ -234,7 +265,7 @@ def _fetch_video_clip(
     Returns None if no candidates are found at all, or none pass
     verification within the attempt budget.
     """
-    search_terms = sentence.get("search_terms", [])
+    search_terms = query_ladder if query_ladder is not None else _get_visual_concepts(sentence)
     if not search_terms:
         return None
 
@@ -254,14 +285,15 @@ def _fetch_video_clip(
     use_relevance = relevance.is_available() and not relevance.is_log_only()
     num_frames = max(nsfw_frame_samples, relevance_frame_samples)
 
-    # search_terms is a tiered list: term[0] is the most specific/niche ask
-    # for this sentence, later terms progressively easier-to-find fallbacks
-    # that still fit the sentence (see AGENT_GUIDE.md). Try one fresh
-    # candidate per term, in order, round-robin -- so a niche term that's
-    # empty or gets its candidate rejected falls through to the broader
-    # terms instead of burning the whole attempt budget on one tier. Each
-    # term's results (and thumbnail reranking) are only fetched lazily, the
-    # first time that term is actually reached.
+    # search_terms is a subject-anchored query ladder: each entry is
+    # "{visual_concept} {video_topic}", specific concept first and
+    # progressively broader, with a final bare-video_topic rung as the
+    # safety net (see _build_query_ladder / AGENT_GUIDE.md). Try one fresh
+    # candidate per query, in order, round-robin -- so a query that's empty
+    # or gets its candidate rejected falls through to the next rung instead
+    # of burning the whole attempt budget on one query. Each query's results
+    # (and thumbnail reranking) are only fetched lazily, the first time that
+    # query is actually reached.
     term_results: List[Optional[list]] = [None] * len(search_terms)
     term_pos = [0] * len(search_terms)
 
@@ -361,6 +393,8 @@ def _fetch_image_clip(
     clips_dir: str,
     used_urls: set,
     caption_prompt: str = "",
+    query_ladder: Optional[List[str]] = None,
+    source_order: Optional[List[str]] = None,
 ) -> Optional[str]:
     """Download an image and render a Ken Burns clip. None if no image found.
 
@@ -368,7 +402,7 @@ def _fetch_image_clip(
     Every downloaded candidate passes the NSFW gate and a CLIP relevance
     margin against `caption_prompt` inside material.download_image.
     """
-    search_terms = sentence.get("search_terms", [])
+    search_terms = query_ladder if query_ladder is not None else _get_visual_concepts(sentence)
     if not search_terms:
         return None
 
@@ -377,6 +411,7 @@ def _fetch_image_clip(
 
     image_path = material.download_image(
         search_terms=search_terms,
+        source_order=source_order,
         save_dir=utils.storage_dir("cache_images"),
         used_urls=used_urls,
         caption_prompt=caption_prompt,
@@ -412,30 +447,45 @@ def _fetch_clip(
     video_topic: str = "",
 ) -> Optional[Tuple[str, bool]]:
     """
-    Fetch a clip (stock video or Ken Burns image) for one sentence, preferring
-    sentence['media_type'] (or `is_image_override` if given — used by the
-    image-ratio cap to flip the preferred order without mutating the
-    sentence). If the preferred type finds nothing, falls back to the other
-    media type using the same search_terms before giving up.
+    Fetch a clip (stock video or Ken Burns image) for one sentence.
 
-    If both fail and `fallback_terms` is provided, retries both media types
-    using a topic-wide pool of search terms (excluding this sentence's own
-    terms) so the sentence can still get *different* footage instead of
+    Every search query is built by `_build_query_ladder(video_topic,
+    visual_concepts)`: each local visual concept combined with the
+    persistent `video_topic` subject, specific-first, with a final
+    bare-`video_topic` rung as the safety net -- broadening never drops the
+    subject.
+
+    Routing is governed by `sentence['content_track']`:
+      - "named" (a specific product/person/place/event): always fetched as
+        an image via a Serper-first `source_order` (named_track_image_source_order),
+        regardless of `media_type` -- generic stock libraries rarely have
+        named entities, but Google Images often does.
+      - "broll" (default): existing `media_type` / `is_image_override`
+        -driven primary choice, using the default image source order.
+
+    If the primary attempt finds nothing, falls back to the other media type
+    using the same query ladder. If that also fails and `fallback_terms` is
+    provided, retries both media types using a topic-wide pool of *concepts*
+    (excluding this sentence's own concepts), rebuilding the ladder from
+    those, so the sentence can still get *different* footage instead of
     contributing nothing.
 
     used_urls is mutated in-place: the chosen clip's source is added so
     subsequent sentences won't reuse the same footage/image.
 
     CLIP relevance ranking (the NSFW gate is independent of this) scores
-    candidates against `sentence['visual_caption']` (or `search_terms[0]` if
-    missing) combined with `video_topic`, so even an on-topic-sounding
-    caption is still anchored to the video's overall subject.
+    candidates against `sentence['visual_caption']` (or the first visual
+    concept if missing) combined with `video_topic`, so even an
+    on-topic-sounding caption is still anchored to the video's overall
+    subject. Serper results pass through the same NSFW gate, relevance
+    margin, and denylist as every other provider.
 
     Returns (clip_path, used_image) or None if nothing was found at all.
     """
-    search_terms = sentence.get("search_terms", [])
-    if not search_terms:
-        logger.warning(f"clip {clip_idx}: no search terms provided")
+    visual_concepts = _get_visual_concepts(sentence)
+    query_ladder = _build_query_ladder(video_topic, visual_concepts)
+    if not query_ladder:
+        logger.warning(f"clip {clip_idx}: no visual concepts or video_topic provided")
         return None
 
     # Always anchor the relevance prompt to video_topic, even when
@@ -444,50 +494,72 @@ def _fetch_clip(
     # totally off-topic "surprised" stock footage (e.g. a pregnancy test
     # reveal) for a grocery-industry documentary.
     visual_caption = sentence.get("visual_caption", "")
-    caption_prompt = relevance.build_prompt(visual_caption or search_terms[0], video_topic)
-
-    is_image = (
-        is_image_override
-        if is_image_override is not None
-        else sentence.get("media_type") == "image"
+    caption_prompt = relevance.build_prompt(
+        visual_caption or (visual_concepts[0] if visual_concepts else video_topic),
+        video_topic,
     )
-    args_video = (sentence, sent_duration, trim_buffer, source, video_aspect, clip_idx, clips_dir, used_urls, caption_prompt)
-    args_image = (sentence, sent_duration, trim_buffer, video_aspect, clip_idx, clips_dir, used_urls, caption_prompt)
 
-    if is_image:
-        result = _fetch_image_clip(*args_image)
-        primary, fallback_name = "image", "video"
+    content_track = sentence.get("content_track", "broll")
+    named_source_order = config.app.get(
+        "named_track_image_source_order",
+        ["serper", "duckduckgo", "wikimedia", "pexels", "pixabay", "unsplash"],
+    )
+
+    args_video = (sentence, sent_duration, trim_buffer, source, video_aspect, clip_idx, clips_dir, used_urls, caption_prompt, query_ladder)
+    args_image = (sentence, sent_duration, trim_buffer, video_aspect, clip_idx, clips_dir, used_urls, caption_prompt, query_ladder)
+
+    if content_track == "named":
+        # Named/specific subjects are always served as images via Serper,
+        # regardless of media_type or the image-ratio cap's preference flip.
+        result = _fetch_image_clip(*args_image, source_order=named_source_order)
+        primary, fallback_name, is_image = "image", "video", True
     else:
-        result = _fetch_video_clip(*args_video)
-        primary, fallback_name = "video", "image"
+        is_image = (
+            is_image_override
+            if is_image_override is not None
+            else sentence.get("media_type") == "image"
+        )
+        if is_image:
+            result = _fetch_image_clip(*args_image, source_order=None)
+            primary, fallback_name = "image", "video"
+        else:
+            result = _fetch_video_clip(*args_video)
+            primary, fallback_name = "video", "image"
 
     if result:
         return result, is_image
 
-    logger.warning(f"clip {clip_idx}: no {primary} found for terms {search_terms} — trying {fallback_name} fallback")
-    result = _fetch_video_clip(*args_video) if fallback_name == "video" else _fetch_image_clip(*args_image)
+    logger.warning(f"clip {clip_idx}: no {primary} found for {query_ladder} — trying {fallback_name} fallback")
+    if fallback_name == "video":
+        result = _fetch_video_clip(*args_video)
+    else:
+        result = _fetch_image_clip(
+            *args_image,
+            source_order=(named_source_order if content_track == "named" else None),
+        )
     if result:
         return result, (fallback_name == "image")
 
     if fallback_terms:
-        own = set(search_terms)
-        extra_terms = [t for t in fallback_terms if t not in own]
-        if extra_terms:
+        own = set(visual_concepts)
+        extra_concepts = [c for c in fallback_terms if c not in own]
+        if extra_concepts:
+            fb_ladder = _build_query_ladder(video_topic, extra_concepts)
             fb_sentence = dict(sentence)
-            fb_sentence["search_terms"] = extra_terms
-            fb_caption_prompt = relevance.build_prompt(extra_terms[0], video_topic)
-            args_video_fb = (fb_sentence, sent_duration, trim_buffer, source, video_aspect, clip_idx, clips_dir, used_urls, fb_caption_prompt)
-            args_image_fb = (fb_sentence, sent_duration, trim_buffer, video_aspect, clip_idx, clips_dir, used_urls, fb_caption_prompt)
+            fb_sentence["visual_concepts"] = extra_concepts
+            fb_caption_prompt = relevance.build_prompt(extra_concepts[0], video_topic)
+            args_video_fb = (fb_sentence, sent_duration, trim_buffer, source, video_aspect, clip_idx, clips_dir, used_urls, fb_caption_prompt, fb_ladder)
+            args_image_fb = (fb_sentence, sent_duration, trim_buffer, video_aspect, clip_idx, clips_dir, used_urls, fb_caption_prompt, fb_ladder)
             video_fb = _fetch_video_clip(*args_video_fb)
             if video_fb:
-                logger.info(f"clip {clip_idx}: used topic-wide fallback terms {extra_terms[:3]}")
+                logger.info(f"clip {clip_idx}: used topic-wide fallback concepts {extra_concepts[:3]}")
                 return video_fb, False
-            image_fb = _fetch_image_clip(*args_image_fb)
+            image_fb = _fetch_image_clip(*args_image_fb, source_order=None)
             if image_fb:
-                logger.info(f"clip {clip_idx}: used topic-wide fallback terms {extra_terms[:3]}")
+                logger.info(f"clip {clip_idx}: used topic-wide fallback concepts {extra_concepts[:3]}")
                 return image_fb, True
 
-    logger.warning(f"clip {clip_idx}: no clip found for terms {search_terms} (tried both media types, plus fallback terms)")
+    logger.warning(f"clip {clip_idx}: no clip found for {query_ladder} (tried both media types, plus fallback concepts)")
     return None
 
 
@@ -694,17 +766,17 @@ def start(job_path: str) -> Optional[dict]:
         f"xfade limit={video.XFADE_CLIP_LIMIT})"
     )
 
-    # Topic-wide pool of search terms (deduped, order-preserving), used as a
-    # last-resort fallback so a sentence whose own terms are exhausted can
-    # still pull *different* footage instead of leaving a gap that
+    # Topic-wide pool of visual concepts (deduped, order-preserving), used as
+    # a last-resort fallback so a sentence whose own concepts are exhausted
+    # can still pull *different* footage instead of leaving a gap that
     # combine_videos would later fill by repeating clips.
-    _all_search_terms: List[str] = []
-    _seen_terms: set = set()
+    _all_concepts: List[str] = []
+    _seen_concepts: set = set()
     for plan in clip_plans:
-        for term in plan["sent"].get("search_terms", []):
-            if term not in _seen_terms:
-                _seen_terms.add(term)
-                _all_search_terms.append(term)
+        for concept in _get_visual_concepts(plan["sent"]):
+            if concept not in _seen_concepts:
+                _seen_concepts.add(concept)
+                _all_concepts.append(concept)
 
     # ---- Pass 2: fetch clips according to the plan ----
     # Soft cap on the fraction of clips that may come from still images —
@@ -729,7 +801,7 @@ def start(job_path: str) -> Optional[dict]:
         got_any = False
         for clip_duration in durations:
             is_image_override = None
-            if is_image:
+            if is_image and sent.get("content_track", "broll") != "named":
                 total_so_far = image_clip_count + video_clip_count
                 projected_ratio = (image_clip_count + 1) / (total_so_far + 1)
                 if projected_ratio > max_image_ratio:
@@ -748,7 +820,7 @@ def start(job_path: str) -> Optional[dict]:
                 clip_idx=clip_counter,
                 clips_dir=clips_dir,
                 used_urls=used_urls,
-                fallback_terms=_all_search_terms,
+                fallback_terms=_all_concepts,
                 is_image_override=is_image_override,
                 video_topic=video_topic,
             )
@@ -781,19 +853,20 @@ def start(job_path: str) -> Optional[dict]:
     # ---- Gap-fill: cover any shortfall with extra unique clips. combine_videos
     # never repeats footage, so anything still missing after this is covered by
     # the outro's frozen-last-frame extension instead. ----
-    if obtained_duration < audio_duration - 0.5 and _all_search_terms:
-        max_gap_fill_attempts = len(_all_search_terms) * 3 + 20
+    if obtained_duration < audio_duration - 0.5 and _all_concepts:
+        max_gap_fill_attempts = len(_all_concepts) * 3 + 20
         attempts = 0
         logger.info(
             f"obtained {obtained_duration:.2f}s of {audio_duration:.2f}s — gap-filling with extra clips"
         )
         while obtained_duration < audio_duration - 0.5 and attempts < max_gap_fill_attempts:
-            term = _all_search_terms[attempts % len(_all_search_terms)]
+            concept = _all_concepts[attempts % len(_all_concepts)]
             attempts += 1
             filler_sentence = {
-                "search_terms": [term],
+                "visual_concepts": [concept],
                 "media_type": "video",
-                "visual_caption": relevance.build_prompt(term, video_topic),
+                "content_track": "broll",
+                "visual_caption": concept,
             }
             fetched = _fetch_clip(
                 sentence=filler_sentence,
@@ -976,7 +1049,6 @@ def start(job_path: str) -> Optional[dict]:
         subtitle_enabled=bool(job.get("subtitle_enabled", True)),
         subtitle_position=job.get("subtitle_position", "bottom"),
         text_background_color=False,
-        rounded_subtitle_background=False,
         font_name=job.get("font_name", "Inter_18pt-SemiBold.ttf"),
         text_fore_color=job.get("text_fore_color", "#FFFFFF"),
         font_size=int(job.get("font_size", 30)),

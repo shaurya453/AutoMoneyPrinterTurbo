@@ -1,6 +1,5 @@
 import asyncio
 import inspect
-import math
 import os
 import queue
 import re
@@ -9,12 +8,10 @@ import threading
 import time
 import unicodedata
 from typing import Union
-from xml.sax.saxutils import unescape
 
 import edge_tts
 from edge_tts import SubMaker
 from loguru import logger
-from moviepy.video.tools import subtitles
 from moviepy.audio.io.AudioFileClip import AudioFileClip
 
 from app.config import config
@@ -340,34 +337,25 @@ def _get_mp3_duration_seconds(mp3_file: str) -> float:
 
 
 def _merge_submakers(makers: list, offsets_seconds: list) -> SubMaker:
-    """Merge SubMakers, shifting each by the given cumulative offset."""
+    """Merge SubMakers, shifting each by the given cumulative offset.
+
+    edge_tts 7.2.7's SubMaker always populates `.cues` (azure_tts_v1 only
+    returns a maker once `get_srt()` is non-empty), so this only needs the
+    cues-based merge path.
+    """
     import datetime
 
     merged = SubMaker()
-
-    # Prefer cues-based API (newer edge_tts)
-    if all(hasattr(m, "cues") and m.cues for m in makers):
-        all_cues = []
-        for maker, offset_sec in zip(makers, offsets_seconds):
-            delta = datetime.timedelta(seconds=offset_sec)
-            for cue in maker.cues:
-                shifted = type(cue).__new__(type(cue))
-                shifted.__dict__.update(cue.__dict__)
-                shifted.start = cue.start + delta
-                shifted.end = cue.end + delta
-                all_cues.append(shifted)
-        merged.cues = all_cues
-        return merged
-
-    # Legacy subs/offset API — edge_tts stores timestamps in 100-nanosecond units
-    merged = ensure_legacy_submaker_fields(merged)
+    all_cues = []
     for maker, offset_sec in zip(makers, offsets_seconds):
-        offset_100ns = int(offset_sec * 10_000_000)  # seconds → 100ns ticks
-        for sub, (start, end) in zip(
-            getattr(maker, "subs", []), getattr(maker, "offset", [])
-        ):
-            merged.subs.append(sub)
-            merged.offset.append((start + offset_100ns, end + offset_100ns))
+        delta = datetime.timedelta(seconds=offset_sec)
+        for cue in maker.cues:
+            shifted = type(cue).__new__(type(cue))
+            shifted.__dict__.update(cue.__dict__)
+            shifted.start = cue.start + delta
+            shifted.end = cue.end + delta
+            all_cues.append(shifted)
+    merged.cues = all_cues
     return merged
 
 
@@ -574,219 +562,6 @@ def kokoro_tts(
     )
     logger.info(f"kokoro tts complete → {voice_file}")
     return sub_maker
-
-
-def mktimestamp(time_unit: float) -> str:
-    hour = math.floor(time_unit / 10**7 / 3600)
-    minute = math.floor((time_unit / 10**7 / 60) % 60)
-    seconds = (time_unit / 10**7) % 60
-    return f"{hour:02d}:{minute:02d}:{seconds:06.3f}"
-
-
-def _format_text(text: str) -> str:
-    text = text.replace("[", " ")
-    text = text.replace("]", " ")
-    text = text.replace("(", " ")
-    text = text.replace(")", " ")
-    text = text.replace("{", " ")
-    text = text.replace("}", " ")
-    return utils.normalize_script_for_subtitle_matching(text)
-
-
-def _build_subtitle_formatter():
-    def formatter(idx: int, start_time: float, end_time: float, sub_text: str) -> str:
-        start_t = mktimestamp(start_time).replace(".", ",")
-        end_t = mktimestamp(end_time).replace(".", ",")
-        return f"{idx}\n{start_t} --> {end_t}\n{sub_text}\n"
-    return formatter
-
-
-_ARABIC_DIACRITICS = re.compile("[ؐ-ًؚ-ٰٟـۖ-ۭ]")
-
-
-def _normalize_arabic(text: str) -> str:
-    text = _ARABIC_DIACRITICS.sub("", text)
-    for src, dst in (
-        ("أإآٱ", "ا"),
-        ("ىئ", "ي"),
-        ("ة", "ه"),
-        ("ؤ", "و"),
-    ):
-        for ch in src:
-            text = text.replace(ch, dst)
-    return text
-
-
-def _match_script_line(script_lines: list[str], current_text: str, sub_index: int) -> str:
-    if len(script_lines) <= sub_index:
-        return ""
-
-    target_line = script_lines[sub_index]
-    if current_text == target_line:
-        return target_line.strip()
-
-    current_text_normalized = re.sub(r"[_\W]+", "", current_text)
-    target_line_normalized = re.sub(r"[_\W]+", "", target_line)
-    if current_text_normalized == target_line_normalized:
-        return target_line.strip()
-
-    current_ar = re.sub(r"[_\W]+", "", _normalize_arabic(current_text))
-    target_ar = re.sub(r"[_\W]+", "", _normalize_arabic(target_line))
-    if current_ar and current_ar == target_ar:
-        return target_line.strip()
-
-    return ""
-
-
-def _write_subtitle_items(sub_items: list[str], subtitle_file: str) -> bool:
-    try:
-        ensure_file_path_exists(subtitle_file)
-        with open(subtitle_file, "w", encoding="utf-8") as file:
-            file.write("\n".join(sub_items) + "\n")
-
-        sbs = subtitles.file_to_subtitles(subtitle_file, encoding="utf-8")
-        duration = max([tb for ((ta, tb), txt) in sbs]) if sbs else 0
-        logger.info(
-            f"completed, subtitle file created: {subtitle_file}, duration: {duration}"
-        )
-        return True
-    except Exception as e:
-        logger.error(f"failed, error: {str(e)}")
-        if os.path.exists(subtitle_file):
-            os.remove(subtitle_file)
-        return False
-
-
-def _build_subtitle_items_from_edge_cues(
-    sub_maker: SubMaker, script_lines: list[str]
-) -> list[str]:
-    formatter = _build_subtitle_formatter()
-    sub_items = []
-    sub_index = 0
-    current_text = ""
-    current_start_time = None
-
-    for cue in sub_maker.cues:
-        cue_text = unescape(cue.content)
-        if current_start_time is None:
-            current_start_time = int(cue.start.total_seconds() * 10000000)
-
-        current_end_time = int(cue.end.total_seconds() * 10000000)
-        current_text += cue_text
-
-        matched_text = _match_script_line(script_lines, current_text, sub_index)
-        if not matched_text:
-            continue
-
-        sub_index += 1
-        sub_items.append(
-            formatter(
-                idx=sub_index,
-                start_time=current_start_time,
-                end_time=current_end_time,
-                sub_text=matched_text,
-            )
-        )
-        current_text = ""
-        current_start_time = None
-
-    if current_text.strip():
-        logger.warning(
-            f"edge cues still have unmatched text after aggregation: {current_text}"
-        )
-
-    return sub_items
-
-
-def _build_subtitle_items_from_legacy_submaker(
-    sub_maker: SubMaker, script_lines: list[str]
-) -> list[str]:
-    formatter = _build_subtitle_formatter()
-    start_time = -1.0
-    sub_items = []
-    sub_index = 0
-    sub_line = ""
-
-    legacy_offsets = getattr(sub_maker, "offset", [])
-    legacy_subs = getattr(sub_maker, "subs", [])
-    for _, (offset, sub) in enumerate(zip(legacy_offsets, legacy_subs)):
-        current_start_time, current_end_time = offset
-        if start_time < 0:
-            start_time = current_start_time
-
-        sub_line += unescape(sub)
-        matched_text = _match_script_line(script_lines, sub_line, sub_index)
-        if not matched_text:
-            continue
-
-        sub_index += 1
-        sub_items.append(
-            formatter(
-                idx=sub_index,
-                start_time=start_time,
-                end_time=current_end_time,
-                sub_text=matched_text,
-            )
-        )
-        start_time = -1.0
-        sub_line = ""
-
-    if sub_line.strip():
-        logger.warning(
-            f"legacy subtitle items still have unmatched text after aggregation: {sub_line}"
-        )
-
-    return sub_items
-
-
-def create_subtitle(sub_maker: SubMaker, text: str, subtitle_file: str):
-    text = _format_text(text)
-    script_lines = utils.split_string_by_punctuations(text)
-    try:
-        if hasattr(sub_maker, "cues") and sub_maker.cues:
-            sub_items = _build_subtitle_items_from_edge_cues(sub_maker, script_lines)
-        else:
-            sub_items = _build_subtitle_items_from_legacy_submaker(
-                sub_maker, script_lines
-            )
-
-        if len(sub_items) != len(script_lines):
-            logger.warning(
-                f"failed, sub_items len: {len(sub_items)}, script_lines len: {len(script_lines)}"
-            )
-            return
-
-        _write_subtitle_items(sub_items, subtitle_file)
-    except Exception as e:
-        logger.error(f"failed, error: {str(e)}")
-
-
-def create_word_timings(sub_maker: SubMaker) -> list:
-    """Return [{word, start, end}] in seconds from SubMaker cues or legacy offsets."""
-    if hasattr(sub_maker, "cues") and sub_maker.cues:
-        result = []
-        for cue in sub_maker.cues:
-            w = unescape(cue.content).strip()
-            if w:
-                result.append({
-                    "word": w,
-                    "start": cue.start.total_seconds(),
-                    "end": cue.end.total_seconds(),
-                })
-        return result
-
-    legacy_offsets = getattr(sub_maker, "offset", [])
-    legacy_subs = getattr(sub_maker, "subs", [])
-    result = []
-    for (start_100ns, end_100ns), sub in zip(legacy_offsets, legacy_subs):
-        w = unescape(sub).strip()
-        if w:
-            result.append({
-                "word": w,
-                "start": start_100ns / 10_000_000,
-                "end": end_100ns / 10_000_000,
-            })
-    return result
 
 
 def _get_audio_duration_from_submaker(sub_maker: SubMaker):
