@@ -10,8 +10,8 @@ A headless, CLI-driven pipeline that turns a plain-text script into a finished d
 script.txt  →  sentence_prep.py  →  job.json  →  [agent enriches]  →  cli.py  →  final.mp4
 ```
 
-1. **`sentence_prep.py`** splits your script into sentences and writes a job JSON with stub search terms.
-2. **You (or an AI agent) enrich** the job JSON — rewriting `search_terms` and setting `media_type` (`"video"` or `"image"`).
+1. **`sentence_prep.py`** splits your script into sentences and writes a job JSON with stub `visual_concepts`.
+2. **You (or an AI agent) enrich** the job JSON — rewriting `visual_concepts`, setting `content_track` (`"named"` or `"broll"`) and `media_type` (`"video"` or `"image"`), and writing a short `video_topic` that anchors every search query.
 3. **`cli.py`** runs the full pipeline: TTS → timestamp alignment → clip/image fetch → assembly → subtitles → BGM → `final.mp4`.
 
 ---
@@ -43,8 +43,9 @@ cp config.example.toml config.toml
 | `pexels_api_keys` | [pexels.com/api](https://www.pexels.com/api/) | Yes (or Pixabay) |
 | `pixabay_api_keys` | [pixabay.com/api/docs](https://pixabay.com/api/docs/) | Yes (or Pexels) |
 | `unsplash_api_keys` | [unsplash.com/developers](https://unsplash.com/developers) | Optional — image fallback |
+| `serper_api_keys` | [serper.dev](https://serper.dev/) | Optional — Google Images for `content_track: "named"` sentences |
 
-Image searches try DuckDuckGo and Wikimedia Commons first (no key needed), then fall back to Pexels Photos, Pixabay Images, and Unsplash in that order.
+For `content_track: "broll"` sentences (the default), image searches try DuckDuckGo and Wikimedia Commons first (no key needed), then fall back to Pexels Photos, Pixabay Images, and Unsplash. For `content_track: "named"` sentences (specific products, people, places, events), Serper/Google Images is tried first, then the same fallback chain — see `named_track_image_source_order` in `config.toml`.
 
 > `config.toml` is gitignored and must never be committed — it contains your live API keys.
 
@@ -81,12 +82,14 @@ python sentence_prep.py \
 
 ### Step 3 — Enrich the job JSON
 
-Open `storage/tasks/My Video/job.json` and for each sentence set:
+Open `storage/tasks/My Video/job.json` and set:
 
-- **`search_terms`** — what a stock camera would physically show (2 terms, max 3 words each)
-- **`media_type`** — `"video"` for motion b-roll, `"image"` for specific products/people/places
+- **`video_topic`** (top-level) — a short (2-6 word) description of the video's subject. It's appended to every search query and used for relevance scoring, so it must read like a search term.
+- **`visual_concepts`** (per sentence) — 1-3 subject-free local visual ideas, specific → broad (e.g. `["frozen food aisle", "shopper with cart"]`). The pipeline combines each with `video_topic` to build the actual search queries, with a bare-`video_topic` rung as a final fallback.
+- **`content_track`** (per sentence) — `"named"` for a specific product/person/place/event (routed to Google Images first via Serper), or `"broll"` (default) for a generic conceptual scene (routed to stock video/image libraries).
+- **`media_type`** (per sentence) — `"video"` for motion b-roll, `"image"` for stills. Ignored for `content_track: "named"`, which always searches images.
 
-See [`AGENT_GUIDE.md`](AGENT_GUIDE.md) for detailed guidance, especially on when to use images vs. video.
+See [`AGENT_GUIDE.md`](AGENT_GUIDE.md) for detailed guidance, including worked examples of the query-ladder construction and the `content_track` decision rule.
 
 ### Step 4 — Run the pipeline
 
@@ -125,6 +128,8 @@ Online BGM is fetched from Pixabay (no extra key — uses your existing `pixabay
 
 BGM is automatically ducked during narration and rises back between sentences.
 
+To render without any background music, set `"bgm_file": "none"` (and leave `bgm_search_term` empty) in the job JSON.
+
 ---
 
 ## Subtitles
@@ -147,6 +152,7 @@ This pipeline is built to be driven by an AI agent. Read [`AGENT_GUIDE.md`](AGEN
 | Timestamp alignment | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) |
 | Video assembly | [MoviePy 2](https://github.com/Zulko/moviepy) + FFmpeg |
 | Stock video | Pexels, Pixabay |
-| Stock images | DuckDuckGo, Wikimedia Commons, Pexels Photos, Pixabay Images, Unsplash |
+| Stock images | DuckDuckGo, Wikimedia Commons, Pexels Photos, Pixabay Images, Unsplash, Serper (Google Images) |
 | BGM | Pixabay Music (online) or user-supplied MP3s in `resource/songs/` |
 | Subtitles | Pillow (burned-in), Inter SemiBold |
+| Footage safety/relevance | NudeNet ONNX (NSFW gate), CLIP ViT-B/32 (relevance ranking) |
