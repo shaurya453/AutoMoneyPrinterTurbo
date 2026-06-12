@@ -47,8 +47,6 @@ cp config.example.toml config.toml
 
 For `content_track: "broll"` sentences (the default), image searches try DuckDuckGo and Wikimedia Commons first (no key needed), then fall back to Pexels Photos, Pixabay Images, and Unsplash. For `content_track: "named"` sentences (specific products, people, places, events), Serper/Google Images is tried first, then the same fallback chain — see `named_track_image_source_order` in `config.toml`.
 
-> `config.toml` is gitignored and must never be committed — it contains your live API keys.
-
 ---
 
 ## Usage
