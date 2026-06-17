@@ -120,6 +120,18 @@ Additional rules:
 - **Abstract concept** → find a concrete visual metaphor: don't use `"hope"`, use `"sunrise over city"`
 - Max **3 words per concept**
 - **Never write a vague `visual_concepts[0]`** — a good `[1]`/`[2]` does not excuse a weak `[0]`. And don't pad `[1]`/`[2]` with near-duplicates of `[0]` — each entry should be a genuinely broader idea than the one before it, or it doesn't actually buy you anything.
+- **For thematic videos, make concepts self-sufficient** — `video_topic` is only a fallback now, not a constant suffix. A concept like `"fraud"` or `"scam"` will be searched on its own first; it must be concrete enough to return usable footage without the topic appended. Write the *scene*, not the abstract noun: `"person inspecting bank statement"` instead of `"financial fraud"`, `"smartphone fraud alert"` instead of `"scam"`.
+
+**Concrete vs abstract — thematic video example (`video_type: "thematic"`, topic: `"credit card scams"`):**
+
+| Abstract (avoid) | Concrete (prefer) |
+|---|---|
+| `["credit card fraud"]` | `["person inspecting bank statement at kitchen table"]` |
+| `["stolen money"]` | `["ATM machine cash withdrawal at night"]` |
+| `["cybercrime"]` | `["hooded person typing on laptop in dark room"]` |
+| `["financial loss"]` | `["worried elderly person with unpaid bills"]` |
+
+The concrete versions return useful footage even before `video_topic` is appended. The abstract versions return stock clichés or nothing unless the topic rescues them — defeating the point of thematic anchoring.
 
 ### `visual_caption`
 
@@ -147,38 +159,44 @@ copy one into the other:
 Write a `visual_caption` for **every** sentence, including ones with
 `media_type: "image"` — it's used for image candidates too.
 
-### Context anchoring — `video_topic` and the query ladder
+### Context anchoring — `video_topic`, `video_type`, and the query ladder
 
-Before enriching sentences, set a `video_topic` field (see Job JSON
-reference below) — a short phrase describing what this video is actually
-about (e.g. `"ultra-processed food industry"`, `"weight loss diet trends"`,
-`"smartphone manufacturing"`).
+Before enriching sentences, set both `video_topic` and `video_type` in the job JSON.
 
-`video_topic` now does **two jobs**:
+**`video_topic`** — a short 2-6 word phrase describing the video's overall subject (e.g. `"ultra-processed food industry"`, `"credit card scams"`, `"Tesla electric vehicles"`). `video_topic` does two jobs:
 
-1. **Query anchoring** (new) — the pipeline appends `video_topic` to every
-   `visual_concepts` entry to build the actual search query (see
-   `visual_concepts` above). Because it's appended to *every* query,
-   **`video_topic` must stay short and query-shaped — 2-6 words**. A long or
-   sentence-like `video_topic` (e.g. "a documentary exploring how processed
-   foods took over the American diet") will pollute every search query in
-   the job and return nothing useful.
-2. **Relevance scoring** (existing) — `video_topic` is appended to
-   `visual_caption` when scoring candidates (see "Automated Relevance
-   Filter" below).
+1. **Query anchoring** — used in search queries alongside `visual_concepts`, with a strategy determined by `video_type` (see below).
+2. **Relevance scoring** — always appended to `visual_caption` when scoring candidates via CLIP, anchoring the relevance check to the video's subject regardless of `video_type`.
 
-**How to choose `video_topic`**: capture the video's primary subject/domain
-(e.g. `"ultra-processed food industry"`), or — if the whole video centers on
-one recurring named entity (a company, product line, person) — that entity
-plus its domain (e.g. `"Tesla electric vehicles"`).
+**`video_type`** — `"thematic"` (default) or `"named_entity"`. This controls how `video_topic` is used in queries.
 
-**Disambiguation is now a second line of defense.** Because `video_topic` is
-appended to every query automatically, most ambiguous single words get
-resolved for free — `"scale"` + `"ultra-processed food industry"` already
-steers away from musical scales or fish scales. But pick `visual_concepts`
-that don't *rely entirely* on this: if a concept is so generic that even
-combined with `video_topic` it could mean several things, add a
-disambiguating word to the concept itself:
+| `video_type` | When to use | Query ladder behavior |
+|---|---|---|
+| `"thematic"` | Video is about an abstract idea, trend, problem, or category — no single object represents it (e.g. "credit card scams", "grocery price inflation") | Bare concept tried first; `video_topic` folded in only as a fallback rung if the bare search returns nothing or off-topic results |
+| `"named_entity"` | Video is about one specific recurring subject — a brand, product, person, or company that IS the visual (e.g. "Tesla Model Y", "Elon Musk") | `video_topic` appended to every concept query; constant anchor preserved |
+
+**Why `video_type` matters:** A constant topic anchor is correct for named-entity videos (variety comes from different angles/aspects of the same subject) but causes heavy visual repetition for thematic videos. For "credit card scams", appending the topic to every query returns the same canonical cluster (hand holding a card + phone) for nearly every sentence. With `video_type: "thematic"`, each sentence's concrete local concept is searched first — `"worried person reading bank statement"` returns different, richer results than `"worried person reading bank statement credit card scams"`, and the topic is only added as a disambiguation net when needed.
+
+**Thematic query ladder** (new):
+```
+["worried person reading bank statement",
+ "worried person reading bank statement credit card scams",
+ "bank statement review",
+ "bank statement review credit card scams",
+ "credit card scams"]
+```
+
+**Named-entity query ladder** (unchanged):
+```
+["Tesla interior dashboard",
+ "Tesla exterior design",
+ "electric car charging",
+ "Tesla electric vehicles"]
+```
+
+**How to choose `video_topic`**: capture the primary domain (thematic) or the entity plus domain (named-entity).
+
+**Disambiguation**: for thematic videos, `visual_concepts` must be concrete enough to stand alone — the topic is only a fallback, not a constant suffix. Write concepts that don't *rely entirely* on the topic to be meaningful. If a concept is so generic that it's ambiguous without the topic, add a disambiguating word to the concept itself:
 
 | Ambiguous concept | Could wrongly return even with topic appended | Better concept |
 |---|---|---|
@@ -197,17 +215,24 @@ appended is a red flag during the Step 2.5 review pass below.
 
 ### Worked example — full ladder construction
 
-With `video_topic = "ultra-processed food industry"`:
+**Thematic video** (`video_type: "thematic"`, `video_topic = "ultra-processed food industry"`):
 
 | # | Sentence | `content_track` | `visual_concepts` | Query ladder tried in order |
 |---|---|---|---|---|
-| 1 | "I bought a box of Kellogg's Chocos" | `"named"` | `["Chocos cereal box"]` | `["Chocos cereal box ultra-processed food industry", "ultra-processed food industry"]` (Serper first) |
-| 2 | "I walked through the freezer aisle" | `"broll"` | `["frozen food aisle", "shopper with cart"]` | `["frozen food aisle ultra-processed food industry", "shopper with cart ultra-processed food industry", "ultra-processed food industry"]` (stock video/image sources) |
-| 3 | "Companies reformulate recipes to cut costs" | `"broll"` | `["food factory production line"]` | `["food factory production line ultra-processed food industry", "ultra-processed food industry"]` |
+| 1 | "I bought a box of Kellogg's Chocos" | `"named"` | `["Chocos cereal box"]` | `["Chocos cereal box ultra-processed food industry", "ultra-processed food industry"]` (Serper first; named uses constant anchor) |
+| 2 | "I walked through the freezer aisle" | `"broll"` | `["person pushing cart frozen aisle", "supermarket freezer section"]` | `["person pushing cart frozen aisle", "person pushing cart frozen aisle ultra-processed food industry", "supermarket freezer section", "supermarket freezer section ultra-processed food industry", "ultra-processed food industry"]` |
+| 3 | "Companies reformulate recipes to cut costs" | `"broll"` | `["food factory production line", "industrial food processing"]` | `["food factory production line", "food factory production line ultra-processed food industry", "industrial food processing", "industrial food processing ultra-processed food industry", "ultra-processed food industry"]` |
 
-Notice the subject ("ultra-processed food industry") is present in **every**
-query, and the final rung of every ladder is the bare topic — it can never be
-dropped, no matter how broad the fallback gets.
+For thematic videos, each concept is tried bare first — then the topic-anchored form — so the pipeline only reaches the anchor when the bare concept fails or returns off-topic results. The final bare-`video_topic` rung is still the last-resort safety net.
+
+**Named-entity video** (`video_type: "named_entity"`, `video_topic = "Tesla electric vehicles"`):
+
+| # | Sentence | `visual_concepts` | Query ladder tried in order |
+|---|---|---|---|
+| 1 | "The Model Y hit record sales" | `["Model Y exterior", "Tesla showroom"]` | `["Model Y exterior Tesla electric vehicles", "Tesla showroom Tesla electric vehicles", "Tesla electric vehicles"]` |
+| 2 | "Charging infrastructure expanded" | `["Tesla Supercharger station", "EV charging highway"]` | `["Tesla Supercharger station Tesla electric vehicles", "EV charging highway Tesla electric vehicles", "Tesla electric vehicles"]` |
+
+Named-entity queries always anchor to the subject — variety comes from different aspects, not different subjects.
 
 `content_track` is explained in the next section.
 
@@ -247,6 +272,52 @@ always counts as an image for the `max_image_ratio` cap (the cap-avoidance
 logic just doesn't apply to it — see "Pipeline Internals" below). Reserve
 `"named"` for sentences where a generic stock photo/video genuinely wouldn't
 represent the subject — most sentences should remain `"broll"`.
+
+### `motif_palette` and `assigned_motif` (thematic videos only)
+
+Thematic videos need deliberate visual variety — without it, every sentence's search collapses into the same cluster of stock clichés. The solution is to plan a **motif palette** upfront and assign a different motif to each sentence, rotating so no two consecutive shots look the same.
+
+**`motif_palette`** (job level) — derive 4-8 distinct visual anchors that together cover the theme. Each motif should be:
+- Visually distinct from the others (different object, different setting, different action)
+- Concrete enough to be searchable on its own
+- Representative of the theme without being the *same* stock cliché
+
+```jsonc
+// credit card scams:
+"motif_palette": [
+  "ATM machine cash withdrawal",
+  "phishing text message on phone",
+  "hooded figure at laptop",
+  "worried person reading bank statement",
+  "padlock on credit card",
+  "bank fraud alert notification",
+  "elderly person with credit card",
+  "identity theft shredded documents"
+]
+
+// grocery price inflation:
+"motif_palette": [
+  "shopper reading price label",
+  "empty grocery shelf",
+  "cashier scanning items",
+  "family reviewing grocery receipt",
+  "produce section close-up",
+  "shopping cart with few items"
+]
+```
+
+**`assigned_motif`** (per sentence) — which motif drives this sentence's visual. Set it during enrichment, then write `visual_concepts` and `visual_caption` to reflect it. Rules:
+- Never assign the same motif to two consecutive sentences.
+- Distribute the palette as evenly as possible across the script.
+- The motif informs `visual_concepts` — translate it into a specific, self-sufficient scene description (see `visual_concepts` section above).
+
+**Motif → visual_concepts translation:**
+
+| `assigned_motif` | `visual_concepts` | `visual_caption` |
+|---|---|---|
+| `"worried person reading bank statement"` | `["person inspecting bank statement at kitchen table", "person reviewing financial documents"]` | `"close-up of a worried person scanning a bank statement at a kitchen table"` |
+| `"phishing text message on phone"` | `["smartphone showing suspicious text message", "person looking alarmed at phone"]` | `"a person reading a phishing SMS alert on their smartphone"` |
+| `"hooded figure at laptop"` | `["hooded person typing on laptop in dark room", "cybercriminal at computer"]` | `"silhouette of a hooded figure hunched over a laptop in a dimly lit room"` |
 
 ### `media_type`
 
@@ -338,14 +409,27 @@ automatically.
   "task_id": "auto-generated-uuid",        // leave as-is
   "video_script": "Full script text...",   // do not edit
   "video_topic": "ultra-processed food industry", // YOU write this — short (2-6 word) phrase describing the video's overall subject; appended to every search query AND to visual_caption when scoring candidates
+  "video_type": "thematic",               // YOU write this — "thematic" (default) or "named_entity"; controls how video_topic is used in queries (see below)
+
+  // Thematic videos only — derive a spread of distinct visual motifs covering the theme,
+  // then assign a different motif per sentence so consecutive shots vary visually.
+  "motif_palette": [                       // YOU write this for thematic videos
+    "ATM machine withdrawal",
+    "phishing text message on phone",
+    "hooded figure at laptop",
+    "worried person reading bank statement",
+    "padlock on credit card",
+    "bank fraud alert notification"
+  ],
 
   "sentences": [
     {
       "text": "The sentence as it appears in the script.",
-      "visual_concepts": ["local idea", "broader local idea"],  // YOU write these — 1-3 subject-free local visual ideas, specific → broad, see above
+      "visual_concepts": ["concrete scene description", "broader local idea"],  // YOU write these — 1-3 subject-free local visual ideas, specific → broad, concrete and self-sufficient (see below)
       "content_track": "broll",           // YOU decide: "named" (specific product/person/place/event → Google Images) or "broll" (default, generic scene → stock sources)
       "visual_caption": "what the camera should show, one sentence", // YOU write this
-      "media_type": "video"               // YOU decide: "video" or "image" (ignored when content_track = "named")
+      "media_type": "video",              // YOU decide: "video" or "image" (ignored when content_track = "named")
+      "assigned_motif": "worried person reading bank statement"  // thematic videos only — which motif from motif_palette drives this sentence's visual_concepts; rotate across palette, never repeat in consecutive sentences
     }
   ],
 
@@ -409,10 +493,12 @@ After enriching all sentences, re-read the **entire** sentences list as a qualit
 - Does `visual_concepts[0]` describe something a camera would physically show **for that specific sentence**?
 - Did I write a generic fallback (`"business"`, `"technology"`, `"people"`) instead of a concrete visual?
 - If a named person, product, or place appears again later in the script, does it have the same specific concept it got the first time (consistency)?
-- **Cold-reader check**: if I combined `visual_concepts[0]` with `video_topic` and typed the result into an image/video search with zero other context, would the results plausibly match this sentence? If there's a real chance of an unrelated-domain result (sports, music, a different industry, etc.), make the concept more specific.
-- **Concept-ladder check**: does any `visual_concepts` entry repeat `video_topic`'s own words? It shouldn't — the pipeline appends `video_topic` automatically, so repeating it here produces a redundant/garbled query. Do `visual_concepts[1]`/`[2]` (if present) actually get progressively broader than `[0]`, or are they near-duplicates?
+- **Cold-reader check (thematic)**: if I searched `visual_concepts[0]` *alone* (no topic appended) would the results be useful? For thematic videos the bare concept is tried first — if it only makes sense with the topic appended, rewrite it to be self-sufficient.
+- **Cold-reader check (named-entity)**: if I combined `visual_concepts[0]` with `video_topic` and typed the result into an image/video search with zero other context, would the results plausibly match this sentence?
+- **Concept-ladder check**: does any `visual_concepts` entry repeat `video_topic`'s own words? It shouldn't — the pipeline appends `video_topic` as a fallback, so repeating it here produces a redundant/garbled query. Do `visual_concepts[1]`/`[2]` (if present) actually get progressively broader than `[0]`, or are they near-duplicates?
 - **`content_track` check**: is every specific named product/person/place/event marked `"named"`? Is every generic scene/category left as `"broll"` (not overused)?
 - **Image-ratio check**: count how many sentences ended up with `media_type: "image"` (including `content_track: "named"` ones, which are always images). If it's noticeably above ~20-25% of the total, revisit the weakest "image"/"named" calls and consider whether a generic-category "broll" video would already cover it.
+- **Motif-rotation check (thematic)**: scan `assigned_motif` down the sentence list — are any two consecutive sentences assigned the same motif? If yes, swap one with a different motif from the palette and update `visual_concepts`/`visual_caption` to match.
 
 Fix anything that looks weak. The review pass exists because the writing mode and the footage-quality audit mode catch different problems — the same sentence often looks fine when you write it but obviously vague when you read it cold.
 
@@ -455,7 +541,9 @@ TTS (edge_tts)
   └─► audio.mp3
         └─► faster-whisper (base, cpu) → per-sentence timestamps
               └─► for each sentence:
-                    ├─ build query ladder: ["{concept} {video_topic}" for concept in visual_concepts] + [video_topic]
+                    ├─ build query ladder:
+                    │     named_entity: ["{concept} {topic}" for each concept] + [topic]
+                    │     thematic:     [concept, "{concept} {topic}" for each concept] + [topic]
                     ├─ content_track = "named"
                     │     → Google Images (Serper) → DuckDuckGo → Wikimedia → Pexels → Pixabay → Unsplash, per query ladder
                     │     → each candidate downloaded, NSFW-gated, relevance-margin checked
@@ -468,6 +556,8 @@ TTS (edge_tts)
                                 → same NSFW + relevance-margin checks → Ken Burns render
                                 └─ nothing passes → fall back to video (same query ladder)
                     (all directions dedupe against used_urls from earlier sentences;
+                     accepted clips also checked against a CLIP-embedding deque
+                     of the last N shots — near-duplicates rejected for variety;
                      if everything still fails, the topic-wide pool of every
                      sentence's visual_concepts is tried as a last resort)
                           └─► combine_videos() sequential + xfade crossfade
@@ -526,7 +616,9 @@ never overrides it.
 ## Common Mistakes to Avoid
 
 - **Trusting the stub visual concepts** — rewrite all of them, they are a scaffold not an answer
-- **Using abstract terms** — always picture what a camera lens would physically show
+- **Using abstract terms** — always picture what a camera lens would physically show; for thematic videos this is critical since the bare concept is searched first without the topic anchor
+- **Setting `video_type: "named_entity"` for a thematic video** — if the video isn't about one specific recurring subject, use `"thematic"`; a constant anchor collapses every shot into the same visual stereotype
+- **Setting `video_type: "thematic"` for a named-entity video** — if every sentence is about the same product/person, use `"named_entity"` to keep the subject in every query
 - **Leaving `content_track: "broll"` (or unset) for a load-bearing named entity** (product, portrait, logo, document) — use `"named"` so the exact subject is searched for via Google Images
 - **Defaulting to `content_track: "named"` for a generic scene** (store, restaurant, office) — a real photo of a specific storefront is usually a watermarked stock image; use `"broll"` + `"video"` with a specific concept + broader category fallback (e.g. `["Kroger storefront", "supermarket interior"]`) instead
 - **Repeating `video_topic`'s words inside `visual_concepts`** (e.g. `video_topic = "ultra-processed food industry"`, `visual_concepts = ["ultra-processed cereal box"]`) — the pipeline appends `video_topic` to every query automatically; repeating it produces a redundant/garbled query. Write only the *local* idea.

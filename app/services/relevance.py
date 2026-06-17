@@ -23,7 +23,7 @@ mirrors the SKIP_WHISPER=1 dry-run pattern in pipeline.py.
 
 import io
 import os
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
 from loguru import logger
 
@@ -307,3 +307,49 @@ def rank(
 
     scored.sort(key=lambda kv: kv[1] if kv[1] is not None else float("-inf"), reverse=True)
     return scored
+
+
+def embed_image(image_bytes: bytes) -> "Optional[Any]":
+    """Return the L2-normalised CLIP image embedding as a numpy array, or None if
+    the model is unavailable or the image can't be decoded.
+
+    The returned vector is unit-length so cosine similarity equals the dot product,
+    matching the representation used internally by `score()`.
+    """
+    model = _get_model()
+    if model is None or not image_bytes:
+        return None
+    try:
+        import numpy as np
+        from PIL import Image
+
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            emb = _embed_image(model, img)[0]
+        norm = float(np.linalg.norm(emb))
+        return (emb / norm) if norm > 0 else emb
+    except Exception as exc:
+        logger.debug(f"embed_image failed: {exc}")
+        return None
+
+
+def too_similar(
+    embedding: "Any",
+    recent: "Sequence[Any]",
+    threshold: float,
+) -> bool:
+    """True if `embedding` has a cosine similarity >= `threshold` to ANY vector in
+    `recent`.  Both vectors must be L2-normalised (as returned by `embed_image`)
+    so the similarity equals the dot product.  Returns False when `recent` is
+    empty or when numpy is unavailable.
+    """
+    if not recent:
+        return False
+    try:
+        import numpy as np
+
+        for prev in recent:
+            if float(np.dot(embedding, prev)) >= threshold:
+                return True
+    except Exception as exc:
+        logger.debug(f"too_similar check failed: {exc}")
+    return False

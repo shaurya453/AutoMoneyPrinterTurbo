@@ -18,8 +18,9 @@ import math
 import os
 import re
 import subprocess
+from collections import deque
 from difflib import SequenceMatcher
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from loguru import logger
 
@@ -220,22 +221,49 @@ def _get_visual_concepts(sentence: dict) -> List[str]:
     return sentence.get("visual_concepts") or sentence.get("search_terms", [])
 
 
-def _build_query_ladder(video_topic: str, visual_concepts: List[str]) -> List[str]:
-    """Build subject-anchored search queries from local visual concepts.
+def _build_query_ladder(
+    video_topic: str,
+    visual_concepts: List[str],
+    video_type: str = "thematic",
+) -> List[str]:
+    """Build search queries from local visual concepts, with anchoring strategy
+    determined by `video_type`.
 
-    Each concept is combined with `video_topic` ("{concept} {video_topic}"),
-    deduped in order, with a final bare-`video_topic` rung appended as the
-    safety net -- broadening a query never drops the subject. If
-    `video_topic` is empty, queries fall back to the bare concepts (legacy
-    behavior).
+    named_entity — every concept is combined with `video_topic` upfront
+        ("{concept} {video_topic}"), preserving the original constant-anchor
+        behavior.  Variety comes from different aspects of the same subject.
+
+    thematic (default) — the bare concept is tried first, with the anchored
+        form ("{concept} {video_topic}") as the immediately-following fallback
+        rung.  The anchor is only reached when the bare-concept search returns
+        nothing or all candidates fail relevance, keeping the theme as a
+        disambiguation net rather than a constant prefix that collapses every
+        shot into the same visual stereotype.
+
+    In both modes a final bare-`video_topic` rung is appended as the last-resort
+    safety net.  Duplicates are removed in order.  When `video_topic` is empty,
+    both modes fall back to bare concepts (legacy behavior).
     """
     video_topic = (video_topic or "").strip()
     ladder: List[str] = []
+
     for concept in visual_concepts:
         concept = (concept or "").strip()
-        q = f"{concept} {video_topic}".strip() if video_topic else concept
-        if q and q not in ladder:
-            ladder.append(q)
+        if not concept:
+            continue
+        if not video_topic or video_type == "named_entity":
+            # Named-entity: anchor every query; no topic: bare concept only.
+            q = f"{concept} {video_topic}".strip() if video_topic else concept
+            if q not in ladder:
+                ladder.append(q)
+        else:
+            # Thematic: bare concept first, anchored version as fallback rung.
+            if concept not in ladder:
+                ladder.append(concept)
+            anchored = f"{concept} {video_topic}"
+            if anchored not in ladder:
+                ladder.append(anchored)
+
     if video_topic and video_topic not in ladder:
         ladder.append(video_topic)
     return ladder
@@ -252,6 +280,8 @@ def _fetch_video_clip(
     used_urls: set,
     caption_prompt: str = "",
     query_ladder: Optional[List[str]] = None,
+    recent_embeddings: Optional[Any] = None,
+    dedup_threshold: float = 0.92,
 ) -> Optional[str]:
     """Download + trim a stock-video clip, verifying each candidate against
     the NSFW pixel gate and a CLIP relevance margin before accepting it.
@@ -372,6 +402,20 @@ def _fetch_video_clip(
                         pass
                     continue
 
+            if recent_embeddings is not None and frames:
+                dedup_emb = relevance.embed_image(frames[0])
+                if dedup_emb is not None:
+                    if relevance.too_similar(dedup_emb, recent_embeddings, dedup_threshold):
+                        logger.info(
+                            f"clip {clip_idx}: rejected near-duplicate video candidate: {candidate.url}"
+                        )
+                        try:
+                            os.remove(out_path)
+                        except Exception:
+                            pass
+                        continue
+                    recent_embeddings.append(dedup_emb)
+
             return out_path
 
         if not progressed:
@@ -395,6 +439,8 @@ def _fetch_image_clip(
     caption_prompt: str = "",
     query_ladder: Optional[List[str]] = None,
     source_order: Optional[List[str]] = None,
+    recent_embeddings: Optional[Any] = None,
+    dedup_threshold: float = 0.92,
 ) -> Optional[str]:
     """Download an image and render a Ken Burns clip. None if no image found.
 
@@ -415,6 +461,8 @@ def _fetch_image_clip(
         save_dir=utils.storage_dir("cache_images"),
         used_urls=used_urls,
         caption_prompt=caption_prompt,
+        recent_embeddings=recent_embeddings,
+        dedup_threshold=dedup_threshold,
     )
     if not image_path:
         return None
@@ -445,6 +493,9 @@ def _fetch_clip(
     fallback_terms: Optional[List[str]] = None,
     is_image_override: Optional[bool] = None,
     video_topic: str = "",
+    video_type: str = "thematic",
+    recent_embeddings: Optional[Any] = None,
+    dedup_threshold: float = 0.92,
 ) -> Optional[Tuple[str, bool]]:
     """
     Fetch a clip (stock video or Ken Burns image) for one sentence.
@@ -483,7 +534,7 @@ def _fetch_clip(
     Returns (clip_path, used_image) or None if nothing was found at all.
     """
     visual_concepts = _get_visual_concepts(sentence)
-    query_ladder = _build_query_ladder(video_topic, visual_concepts)
+    query_ladder = _build_query_ladder(video_topic, visual_concepts, video_type)
     if not query_ladder:
         logger.warning(f"clip {clip_idx}: no visual concepts or video_topic provided")
         return None
@@ -507,11 +558,12 @@ def _fetch_clip(
 
     args_video = (sentence, sent_duration, trim_buffer, source, video_aspect, clip_idx, clips_dir, used_urls, caption_prompt, query_ladder)
     args_image = (sentence, sent_duration, trim_buffer, video_aspect, clip_idx, clips_dir, used_urls, caption_prompt, query_ladder)
+    dedup_kw = {"recent_embeddings": recent_embeddings, "dedup_threshold": dedup_threshold}
 
     if content_track == "named":
         # Named/specific subjects are always served as images via Serper,
         # regardless of media_type or the image-ratio cap's preference flip.
-        result = _fetch_image_clip(*args_image, source_order=named_source_order)
+        result = _fetch_image_clip(*args_image, source_order=named_source_order, **dedup_kw)
         primary, fallback_name, is_image = "image", "video", True
     else:
         is_image = (
@@ -520,10 +572,10 @@ def _fetch_clip(
             else sentence.get("media_type") == "image"
         )
         if is_image:
-            result = _fetch_image_clip(*args_image, source_order=None)
+            result = _fetch_image_clip(*args_image, source_order=None, **dedup_kw)
             primary, fallback_name = "image", "video"
         else:
-            result = _fetch_video_clip(*args_video)
+            result = _fetch_video_clip(*args_video, **dedup_kw)
             primary, fallback_name = "video", "image"
 
     if result:
@@ -531,11 +583,12 @@ def _fetch_clip(
 
     logger.warning(f"clip {clip_idx}: no {primary} found for {query_ladder} — trying {fallback_name} fallback")
     if fallback_name == "video":
-        result = _fetch_video_clip(*args_video)
+        result = _fetch_video_clip(*args_video, **dedup_kw)
     else:
         result = _fetch_image_clip(
             *args_image,
             source_order=(named_source_order if content_track == "named" else None),
+            **dedup_kw,
         )
     if result:
         return result, (fallback_name == "image")
@@ -544,17 +597,17 @@ def _fetch_clip(
         own = set(visual_concepts)
         extra_concepts = [c for c in fallback_terms if c not in own]
         if extra_concepts:
-            fb_ladder = _build_query_ladder(video_topic, extra_concepts)
+            fb_ladder = _build_query_ladder(video_topic, extra_concepts, video_type)
             fb_sentence = dict(sentence)
             fb_sentence["visual_concepts"] = extra_concepts
             fb_caption_prompt = relevance.build_prompt(extra_concepts[0], video_topic)
             args_video_fb = (fb_sentence, sent_duration, trim_buffer, source, video_aspect, clip_idx, clips_dir, used_urls, fb_caption_prompt, fb_ladder)
             args_image_fb = (fb_sentence, sent_duration, trim_buffer, video_aspect, clip_idx, clips_dir, used_urls, fb_caption_prompt, fb_ladder)
-            video_fb = _fetch_video_clip(*args_video_fb)
+            video_fb = _fetch_video_clip(*args_video_fb, **dedup_kw)
             if video_fb:
                 logger.info(f"clip {clip_idx}: used topic-wide fallback concepts {extra_concepts[:3]}")
                 return video_fb, False
-            image_fb = _fetch_image_clip(*args_image_fb, source_order=None)
+            image_fb = _fetch_image_clip(*args_image_fb, source_order=None, **dedup_kw)
             if image_fb:
                 logger.info(f"clip {clip_idx}: used topic-wide fallback concepts {extra_concepts[:3]}")
                 return image_fb, True
@@ -633,6 +686,12 @@ def start(job_path: str) -> Optional[dict]:
     sentences: list = job.get("sentences", [])
     video_script: str = job.get("video_script", "").strip()
     video_topic: str = job.get("video_topic", "") or job.get("video_title", "")
+    video_type: str = job.get("video_type", "thematic")
+
+    dedup_enabled: bool = bool(config.app.get("dedup_enabled", True))
+    dedup_threshold: float = float(config.app.get("dedup_similarity_threshold", 0.92))
+    dedup_lookback: int = int(config.app.get("dedup_lookback_window", 8))
+    recent_embs: Optional[Any] = deque(maxlen=dedup_lookback) if dedup_enabled else None
 
     if not video_script:
         logger.error("job.video_script is empty — nothing to do")
@@ -823,6 +882,9 @@ def start(job_path: str) -> Optional[dict]:
                 fallback_terms=_all_concepts,
                 is_image_override=is_image_override,
                 video_topic=video_topic,
+                video_type=video_type,
+                recent_embeddings=recent_embs,
+                dedup_threshold=dedup_threshold,
             )
             clip_counter += 1
             if fetched:
@@ -878,6 +940,9 @@ def start(job_path: str) -> Optional[dict]:
                 clips_dir=clips_dir,
                 used_urls=used_urls,
                 video_topic=video_topic,
+                video_type=video_type,
+                recent_embeddings=recent_embs,
+                dedup_threshold=dedup_threshold,
             )
             clip_counter += 1
             if fetched:

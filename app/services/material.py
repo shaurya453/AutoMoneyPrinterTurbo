@@ -722,6 +722,8 @@ def download_image(
     used_urls: set = None,
     video_topic: str = "",
     caption_prompt: str = "",
+    recent_embeddings=None,
+    dedup_threshold: float = 0.92,
 ) -> str:
     """
     Search for a still image using multiple providers in priority order and
@@ -806,6 +808,7 @@ def download_image(
     def _try() -> str:
         fallback_path = fallback_url = fallback_provider = fallback_term = ""
         fallback_score = float("-inf")
+        fallback_emb = None
 
         for term in search_terms:
             candidates = _gather_urls(term)
@@ -828,7 +831,22 @@ def download_image(
                         pass
                     continue
 
+                dedup_emb = None
+                if recent_embeddings is not None:
+                    dedup_emb = relevance.embed_image(image_bytes)
+                    if dedup_emb is not None and relevance.too_similar(
+                        dedup_emb, recent_embeddings, dedup_threshold
+                    ):
+                        logger.info(f"skipping near-duplicate image candidate: {url}")
+                        try:
+                            os.remove(local)
+                        except Exception:
+                            pass
+                        continue
+
                 if not use_relevance:
+                    if dedup_emb is not None:
+                        recent_embeddings.append(dedup_emb)
                     return _claim(url, term, provider, local)
 
                 s = relevance.score(prompt, image_bytes)
@@ -837,17 +855,22 @@ def download_image(
                 margin_ok = relevance.passes_margin(prompt, image_bytes, margin)
                 if margin_ok is None or margin_ok:
                     note = f" (score={s:.3f})" if s is not None else ""
+                    if dedup_emb is not None:
+                        recent_embeddings.append(dedup_emb)
                     return _claim(url, term, provider, local, note)
                 if s is not None and s > fallback_score:
                     fallback_score = s
                     fallback_path, fallback_url = local, url
                     fallback_provider, fallback_term = provider, term
+                    fallback_emb = dedup_emb
 
         if fallback_path:
             logger.warning(
                 f"no image cleared relevance margin {margin} for {search_terms}; "
                 f"using best available for '{fallback_term}' (score={fallback_score:.3f}): {fallback_path}"
             )
+            if fallback_emb is not None and recent_embeddings is not None:
+                recent_embeddings.append(fallback_emb)
             return _claim(fallback_url, fallback_term, fallback_provider, fallback_path)
         return ""
 

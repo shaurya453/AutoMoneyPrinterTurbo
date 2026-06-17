@@ -110,6 +110,27 @@ nsfw_threshold = 0.25
 nsfw_frame_samples = 4
 
 # ---------------------------------------------------------------------------
+# Embedding-based de-duplication at clip selection
+# Rejects any candidate whose CLIP embedding is too similar to a recently
+# placed shot, keeping the visual variety high even when the search pool is
+# small.  Uses the same CLIP model already loaded for relevance ranking — no
+# extra model or download needed.  Degrades to a silent no-op if the CLIP
+# model is unavailable (same pattern as relevance_filter_enabled).
+# ---------------------------------------------------------------------------
+dedup_enabled = true
+
+# Cosine-similarity threshold (0–1) above which a candidate is considered a
+# near-duplicate of a recently placed shot.  CLIP ViT-B/32 space: values in
+# the 0.90–0.95 range catch tight visual repetition; lower values reject more
+# aggressively.  Start with 0.92 and tune down if you still see repetition.
+dedup_similarity_threshold = 0.92
+
+# How many of the most recently placed shots to compare each new candidate
+# against.  Larger windows reduce repetition over longer stretches at the
+# cost of a wider de-dup exclusion zone.
+dedup_lookback_window = 8
+
+# ---------------------------------------------------------------------------
 # Background music — online fetch
 # ---------------------------------------------------------------------------
 
