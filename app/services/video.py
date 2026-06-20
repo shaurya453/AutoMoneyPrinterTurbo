@@ -645,6 +645,78 @@ def apply_ken_burns(
     return clip.with_fps(fps)
 
 
+def _render_ken_burns_ffmpeg(
+    image_path: str,
+    duration: float,
+    width: int,
+    height: int,
+    output_path: str,
+    threads: int = 2,
+    zoom_start: float = 0.75,
+    zoom_end: float = 0.825,
+) -> str:
+    """
+    FFmpeg-native Ken Burns via scale+overlay with eval=frame.
+    Floating-point per-frame sizing avoids the integer-rounding staircase
+    that makes MoviePy's PIL-resize variant look jittery.
+    Returns output_path on success, '' on failure.
+    """
+    import tempfile
+    from PIL import Image as _PILImage
+
+    ffmpeg_bin = utils.get_ffmpeg_binary()
+    codec = _get_configured_video_codec()
+
+    with _PILImage.open(image_path) as f:
+        img = f.convert("RGB")
+        img.load()
+        src_w, src_h = img.size
+        bg_arr = _blur_and_darken(np.array(_cover_crop_image(img, width, height)))
+
+    fit_scale = min(width / src_w, height / src_h)
+    fit_w = src_w * fit_scale
+    fit_h = src_h * fit_scale
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_bg:
+        bg_path = tmp_bg.name
+    _PILImage.fromarray(bg_arr).save(bg_path)
+
+    try:
+        # trunc(x/2)*2 keeps dimensions even (required by H.264).
+        # t is the current frame time in seconds inside the filter graph.
+        zoom_expr = f"({zoom_start}+({zoom_end}-{zoom_start})*t/{duration})"
+        scale_w = f"trunc({fit_w}*{zoom_expr}/2)*2"
+        scale_h = f"trunc({fit_h}*{zoom_expr}/2)*2"
+        filter_complex = (
+            f"[0:v]scale=w='{scale_w}':h='{scale_h}':eval=frame,"
+            f"setpts=PTS-STARTPTS[fg];"
+            f"[1:v][fg]overlay=x='(main_w-overlay_w)/2':y='(main_h-overlay_h)/2':eval=frame"
+        )
+        cmd = [
+            ffmpeg_bin, "-y",
+            "-loop", "1", "-t", str(duration), "-i", image_path,
+            "-loop", "1", "-t", str(duration), "-i", bg_path,
+            "-filter_complex", filter_complex,
+            "-t", str(duration),
+            "-r", str(fps),
+            "-c:v", codec, "-preset", "fast",
+            "-an",
+            "-threads", str(threads),
+            output_path,
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        if proc.returncode != 0:
+            logger.warning(f"FFmpeg Ken Burns stderr: {proc.stderr[-600:]}")
+            return ""
+    finally:
+        try:
+            os.remove(bg_path)
+        except OSError:
+            pass
+
+    return output_path if os.path.exists(output_path) else ""
+
+
 def render_ken_burns_clip(
     image_path: str,
     duration: float,
@@ -657,6 +729,15 @@ def render_ken_burns_clip(
     Render a Ken Burns clip from image_path to an MP4 at output_path.
     Returns output_path on success, '' on failure.
     """
+    # Prefer FFmpeg (sub-pixel smooth zoom) over MoviePy (integer rounding jitter).
+    try:
+        result = _render_ken_burns_ffmpeg(image_path, duration, width, height, output_path, threads)
+        if result:
+            return result
+        logger.warning(f"FFmpeg Ken Burns returned empty for {image_path}, falling back to MoviePy")
+    except Exception as exc:
+        logger.warning(f"FFmpeg Ken Burns exception for {image_path}: {exc} — falling back to MoviePy")
+
     clip = apply_ken_burns(image_path, duration, width, height)
     try:
         _write_videofile_with_codec_fallback(
@@ -669,8 +750,6 @@ def render_ken_burns_clip(
             logger=None,
         )
     except Exception as exc:
-        # A single bad image must not crash the whole multi-sentence pipeline —
-        # let the caller fall back to a stock-video clip for this sentence.
         logger.warning(f"Ken Burns render failed for {image_path}: {str(exc)}")
     finally:
         close_clip(clip)

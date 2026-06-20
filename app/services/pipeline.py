@@ -652,12 +652,21 @@ def _fetch_clip(
         result = _fetch_image_clip(*args_image, source_order=named_source_order, **dedup_kw)
         primary, fallback_name, is_image = "image", "video", True
     elif video_type == "named_entity":
-        # For named_entity videos, accuracy beats variety: try Serper-first
-        # images before stock video even for broll sentences. Stock libraries
-        # can't distinguish specific product models or vintage car variants;
-        # Google Images can. Falls back to video if no image passes.
-        result = _fetch_image_clip(*args_image, source_order=named_source_order, **dedup_kw)
-        primary, fallback_name, is_image = "image", "video", True
+        # For named_entity broll, respect media_type but route image requests
+        # through named_source_order (Serper first) — stock libraries can't
+        # distinguish specific product models or persons. Video requests try
+        # stock video first; image fallback already uses named_source_order below.
+        is_image = (
+            is_image_override
+            if is_image_override is not None
+            else sentence.get("media_type") == "image"
+        )
+        if is_image:
+            result = _fetch_image_clip(*args_image, source_order=named_source_order, **dedup_kw)
+            primary, fallback_name = "image", "video"
+        else:
+            result = _fetch_video_clip(*args_video, **dedup_kw)
+            primary, fallback_name = "video", "image"
     else:
         is_image = (
             is_image_override
