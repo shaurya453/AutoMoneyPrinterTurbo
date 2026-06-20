@@ -769,7 +769,7 @@ def _is_valid_raster_image(image_path: str) -> bool:
         with Image.open(image_path) as img:
             img.verify()
         return True
-    except (UnidentifiedImageError, OSError):
+    except (UnidentifiedImageError, OSError, SyntaxError):
         return False
 
 

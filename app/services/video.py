@@ -694,8 +694,11 @@ def _render_ken_burns_ffmpeg(
         )
         cmd = [
             ffmpeg_bin, "-y",
-            "-loop", "1", "-t", str(duration), "-i", image_path,
-            "-loop", "1", "-t", str(duration), "-i", bg_path,
+            # -f image2 forces the image2 demuxer so -loop works for both .jpg
+            # and .jpeg extensions (FFmpeg 8 picks a different demuxer for .jpeg
+            # that does not support -loop without explicit format override).
+            "-f", "image2", "-loop", "1", "-t", str(duration), "-i", image_path,
+            "-f", "image2", "-loop", "1", "-t", str(duration), "-i", bg_path,
             "-filter_complex", filter_complex,
             "-t", str(duration),
             "-r", str(fps),
