@@ -273,6 +273,27 @@ logic just doesn't apply to it — see "Pipeline Internals" below). Reserve
 `"named"` for sentences where a generic stock photo/video genuinely wouldn't
 represent the subject — most sentences should remain `"broll"`.
 
+**Special rule for `video_type: "named_entity"` videos**: stock video libraries
+(Pexels, Pixabay, Coverr) almost never carry footage of a specific product
+model, vintage car, named person, or niche brand. If a sentence's primary
+visual should show the named entity itself — the actual car, the actual
+product, the actual person — mark it `content_track: "named"` even if the
+scene sounds "generic" (a race, a factory floor, a stage). The CLIP relevance
+filter cannot distinguish a Ferrari 250 GTO from an Alfa Romeo in a wide race
+shot; only Serper (Google Images) can return a photo that is specifically of
+the named entity. Use `"broll"` only for sentences where the entity does NOT
+need to be literally visible — backgrounds, atmosphere, crowd shots, locations
+where any similar footage communicates the idea equally well.
+
+| `video_type` | Sentence | Primary visual needed | `content_track` |
+|---|---|---|---|
+| `named_entity` (Ferrari 250 GTO) | "swept the podium at the 1962 Tour de France" | the actual GTO racing | `"named"` |
+| `named_entity` (Ferrari 250 GTO) | "the crowd packed the pit lane" | generic racing crowd | `"broll"` |
+| `named_entity` (Ferrari 250 GTO) | "Enzo Ferrari gave the order to build it" | Enzo's portrait | `"named"` |
+| `named_entity` (Ferrari 250 GTO) | "the factory workshop smelled of oil and metal" | any vintage workshop | `"broll"` |
+| `thematic` | "I bought a box of Kellogg's Chocos" | the specific product box | `"named"` |
+| `thematic` | "I walked through the freezer aisle" | any freezer aisle | `"broll"` |
+
 ### `motif_palette` and `assigned_motif` (thematic videos only)
 
 Thematic videos need deliberate visual variety — without it, every sentence's search collapses into the same cluster of stock clichés. The solution is to plan a **motif palette** upfront and assign a different motif to each sentence, rotating so no two consecutive shots look the same.
