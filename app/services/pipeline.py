@@ -651,6 +651,13 @@ def _fetch_clip(
         # regardless of media_type or the image-ratio cap's preference flip.
         result = _fetch_image_clip(*args_image, source_order=named_source_order, **dedup_kw)
         primary, fallback_name, is_image = "image", "video", True
+    elif video_type == "named_entity":
+        # For named_entity videos, accuracy beats variety: try Serper-first
+        # images before stock video even for broll sentences. Stock libraries
+        # can't distinguish specific product models or vintage car variants;
+        # Google Images can. Falls back to video if no image passes.
+        result = _fetch_image_clip(*args_image, source_order=named_source_order, **dedup_kw)
+        primary, fallback_name, is_image = "image", "video", True
     else:
         is_image = (
             is_image_override

@@ -342,21 +342,14 @@ Thematic videos need deliberate visual variety — without it, every sentence's 
 
 ### `media_type`
 
-**Default to `"video"`.** Footage carries a documentary; still images are
-the exception, not the rule. As a soft target, **no more than roughly 1 in
-4 sentences (≈20-25%) should end up as `media_type: "image"`**. After
-enriching all sentences, count them. If the image fraction is higher, go
-back through the borderline `"image"` sentences and ask whether a
-generic-category *video* would actually work for that beat instead (e.g. a
-"supermarket interior" video instead of a still photo of a product on a
-shelf). The pipeline also enforces its own soft image-ratio cap as a
-backstop, but don't rely on that — write the enrichment as if it were the
-only safeguard.
+**Default depends on `video_type`:**
+
+- **`video_type: "thematic"`** — default to `"video"`. Footage carries a thematic documentary; images are the exception. Keep images to roughly ≤25% of sentences. If the fraction is higher, revisit borderline sentences and ask whether a generic-category video would work instead.
+- **`video_type: "named_entity"`** — default to `"image"`. The pipeline already tries Serper (Google Images) first for every broll sentence in a named_entity video — stock video libraries cannot carry footage of a specific car model, product, or person, so `"video"` would almost always fall through to image anyway. Writing `"image"` explicitly is more honest and skips the wasted video search attempt. Use `"video"` only for sentences where generic scene motion adds something real and the specific entity doesn't need to be visible (crowd shots, panning location shots, atmosphere).
 
 `media_type` is a **preference**, not a hard requirement: if the chosen type
-finds nothing for `visual_concepts`, the pipeline automatically retries with
-the other type using the same query ladder. So picking `"video"` for a scene
-is low-risk — worst case it falls back to an image.
+finds nothing, the pipeline retries with the other type using the same query
+ladder.
 
 **`media_type` is ignored for `content_track: "named"` sentences** — those
 always fetch via Google Images (Serper) first, regardless of `media_type`.
