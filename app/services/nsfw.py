@@ -118,43 +118,6 @@ def is_nsfw_image(image_bytes: bytes) -> Optional[bool]:
         return None
 
 
-def is_nsfw_video(video_path: str, num_frames: int = 4) -> Optional[bool]:
-    """Sample `num_frames` evenly-spaced frames from the video and return
-    True if ANY of them contains hard-reject NSFW content (short-circuits on
-    first hit), False if all sampled frames are clean, or None if the gate
-    is unavailable or the video couldn't be opened."""
-    detector = _get_detector()
-    if detector is None:
-        return None
-
-    from app.services.video import _open_video_clip_quietly
-
-    clip = None
-    try:
-        clip = _open_video_clip_quietly(video_path)
-        duration = clip.duration
-        if not duration or duration <= 0:
-            return None
-
-        num_frames = max(1, num_frames)
-        for i in range(num_frames):
-            t = duration * (i + 0.5) / num_frames
-            frame = clip.get_frame(min(t, max(duration - 0.01, 0.0)))
-            frame_bytes = _frame_to_jpeg_bytes(frame)
-            if frame_bytes and _is_nsfw_detections(detector.detect(frame_bytes)):
-                return True
-        return False
-    except Exception as exc:
-        logger.debug(f"NSFW video scan failed: {video_path} => {exc}")
-        return None
-    finally:
-        if clip is not None:
-            try:
-                clip.close()
-            except Exception:
-                pass
-
-
 def _frame_to_jpeg_bytes(frame) -> bytes:
     from PIL import Image
 
@@ -210,9 +173,9 @@ def sample_frame_bytes(video_path: str, num_frames: int = 4) -> List[bytes]:
 
 
 def is_nsfw_frames(frames_bytes: List[bytes]) -> Optional[bool]:
-    """Like is_nsfw_video, but operates on already-extracted frame bytes
-    (see sample_frame_bytes) so the NSFW gate and relevance scoring can
-    share a single frame-extraction pass."""
+    """Scan already-extracted frame bytes (see sample_frame_bytes).
+    True if any frame contains hard-reject NSFW content, False if all clean,
+    None if the gate is unavailable or decoding failed."""
     detector = _get_detector()
     if detector is None:
         return None

@@ -25,10 +25,16 @@ _HTTP_TIMEOUT_IMAGE = (30, 120)     # full-size image downloads
 _HTTP_TIMEOUT_MEDIA = (60, 240)     # video/audio downloads
 
 
+_TLS_VERIFY = None  # cached on first call; config never changes at runtime
+
+
 def _get_tls_verify() -> bool:
     # 默认开启 TLS 证书校验，防止素材搜索和下载过程被中间人篡改。
     # 仅在企业代理、自签证书等明确需要的场景下，允许用户通过
     # `config.toml` 显式设置 `tls_verify = false` 临时关闭。
+    global _TLS_VERIFY
+    if _TLS_VERIFY is not None:
+        return _TLS_VERIFY
     tls_verify = config.app.get("tls_verify", True)
     if isinstance(tls_verify, str):
         tls_verify = tls_verify.strip().lower() not in ("0", "false", "no", "off")
@@ -39,7 +45,8 @@ def _get_tls_verify() -> bool:
             "Only use this in trusted proxy environments."
         )
 
-    return bool(tls_verify)
+    _TLS_VERIFY = bool(tls_verify)
+    return _TLS_VERIFY
 
 
 def get_api_key(cfg_key: str):
@@ -830,7 +837,6 @@ def download_image(
     source_order: List[str] = None,
     save_dir: str = "",
     used_urls: set = None,
-    video_topic: str = "",
     caption_prompt: str = "",
     recent_embeddings=None,
     dedup_threshold: float = 0.92,
@@ -841,34 +847,32 @@ def download_image(
     providers and terms are exhausted.
 
     source_order: provider names to try in order.  Defaults to
-        ["pexels", "pixabay", "unsplash", "wikimedia"].
+        ["duckduckgo", "wikimedia", "pexels", "pixabay", "unsplash"].
 
     used_urls: if provided, mutated in-place with the chosen image's source
         URL so subsequent calls across the run won't reuse the same image.
-        Anything already in
-        used_urls is skipped entirely -- if every candidate across all terms
-        and providers has already been used, this returns '' rather than
-        reusing one (the caller falls back to a different media type).
+        Anything already in used_urls is skipped entirely -- if every
+        candidate across all terms and providers has already been used, this
+        returns '' rather than reusing one (the caller falls back to a
+        different media type).
 
     Every downloaded candidate (regardless of relevance settings) is passed
     through the NSFW pixel gate (app.services.nsfw); a hard-rejected
     candidate is deleted and never claimed/used or considered for the
     relevance fallback.
 
-    caption_prompt / video_topic: if either is set (and the CLIP relevance
-        model is available, and RELEVANCE_LOG_ONLY is not set), candidates
-        are downloaded and scored against `caption_prompt` (falling back to
-        `search_term + video_topic` if caption_prompt is empty); the first
-        one per term that beats the junk anchors by `relevance_margin` is
-        used. If nothing clears the margin, the best-scoring candidate seen
-        across all terms is used instead -- relevance filtering never
-        reduces the candidate pool to zero.
+    caption_prompt: if set (and the CLIP relevance model is available, and
+        RELEVANCE_LOG_ONLY is not set), candidates are downloaded and scored
+        against this prompt; the first one per term that beats the junk
+        anchors by `relevance_margin` is used. If nothing clears the margin,
+        the best-scoring candidate seen across all terms is used instead --
+        relevance filtering never reduces the candidate pool to zero.
     """
     if source_order is None:
         source_order = _DEFAULT_IMAGE_SOURCE_ORDER
 
     use_relevance = (
-        bool(caption_prompt or video_topic)
+        bool(caption_prompt)
         and relevance.is_available()
         and not relevance.is_log_only()
     )
@@ -923,7 +927,7 @@ def download_image(
         for term in search_terms:
             candidates = _gather_urls(term)
             iter_candidates = candidates if not use_relevance else candidates[:_CANDIDATES_PER_TERM]
-            prompt = caption_prompt or relevance.build_prompt(term, video_topic)
+            prompt = caption_prompt or term
 
             for provider, url in iter_candidates:
                 local = save_image(url, save_dir)
@@ -1002,8 +1006,9 @@ def search_bgm_pixabay(search_term: str, n: int = 3) -> List[str]:
     Uses the same pixabay_api_keys already configured in config.toml.
     Returns a list of MP3 download URLs.
     """
-    api_key = get_api_key("pixabay_api_keys")
-    if not api_key:
+    try:
+        api_key = get_api_key("pixabay_api_keys")
+    except ValueError:
         logger.debug("pixabay_api_keys not configured, skipping Pixabay BGM search")
         return []
     params = {

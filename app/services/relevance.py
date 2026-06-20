@@ -225,22 +225,39 @@ def score(prompt: str, image_bytes: bytes) -> Optional[float]:
         return None
 
 
-def _max_junk_score(image_bytes: bytes) -> Optional[float]:
-    junk_scores = [score(anchor, image_bytes) for anchor in _JUNK_ANCHORS]
-    junk_scores = [s for s in junk_scores if s is not None]
-    return max(junk_scores) if junk_scores else None
-
-
 def passes_margin(prompt: str, image_bytes: bytes, margin: float) -> Optional[bool]:
     """True if `prompt`'s score beats the worst _JUNK_ANCHORS score by at
-    least `margin`. None if scoring is unavailable (graceful no-op)."""
-    caption_score = score(prompt, image_bytes)
+    least `margin`. None if scoring is unavailable (graceful no-op).
+
+    Extracts the image embedding once and reuses it for all comparisons
+    (prompt + 4 junk anchors) so the image is decoded and ONNX-inferred
+    only a single time instead of 5×.
+    """
+    model = _get_model()
+    if model is None or not image_bytes:
+        return None
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            image_emb = _embed_image(model, img)[0]
+    except Exception as exc:
+        logger.debug(f"relevance scoring failed: {exc}")
+        return None
+
+    def _sim(text: str) -> Optional[float]:
+        try:
+            return _cosine(image_emb, _text_embedding(model, text))
+        except Exception:
+            return None
+
+    caption_score = _sim(prompt)
     if caption_score is None:
         return None
-    junk_score = _max_junk_score(image_bytes)
-    if junk_score is None:
+    junk_scores = [s for s in (_sim(a) for a in _JUNK_ANCHORS) if s is not None]
+    if not junk_scores:
         return None
-    return (caption_score - junk_score) >= margin
+    return (caption_score - max(junk_scores)) >= margin
 
 
 def score_frames(prompt: str, frames_bytes: List[bytes], pool: str = "mean") -> Optional[float]:
@@ -259,15 +276,50 @@ def passes_margin_frames(
     prompt: str, frames_bytes: List[bytes], margin: float, pool: str = "mean"
 ) -> Optional[bool]:
     """Frame-pooled analog of passes_margin: pools `prompt` and each junk
-    anchor's per-frame scores with `pool`, then applies the margin."""
-    caption_score = score_frames(prompt, frames_bytes, pool=pool)
+    anchor's per-frame scores with `pool`, then applies the margin.
+
+    Embeds all frames once and reuses the embeddings for every text
+    comparison (prompt + 4 junk anchors), so each frame is decoded and
+    ONNX-inferred only a single time instead of 5×.
+    """
+    model = _get_model()
+    if model is None or not frames_bytes:
+        return None
+
+    frame_embs = []
+    try:
+        from PIL import Image
+
+        for fb in frames_bytes:
+            try:
+                with Image.open(io.BytesIO(fb)) as img:
+                    frame_embs.append(_embed_image(model, img)[0])
+            except Exception as exc:
+                logger.debug(f"frame embed failed: {exc}")
+    except ImportError:
+        return None
+    if not frame_embs:
+        return None
+
+    def _pool(text: str) -> Optional[float]:
+        try:
+            t_emb = _text_embedding(model, text)
+        except Exception:
+            return None
+        sims = []
+        for f_emb in frame_embs:
+            try:
+                sims.append(_cosine(f_emb, t_emb))
+            except Exception:
+                pass
+        if not sims:
+            return None
+        return max(sims) if pool == "max" else sum(sims) / len(sims)
+
+    caption_score = _pool(prompt)
     if caption_score is None:
         return None
-    junk_pooled = []
-    for anchor in _JUNK_ANCHORS:
-        s = score_frames(anchor, frames_bytes, pool=pool)
-        if s is not None:
-            junk_pooled.append(s)
+    junk_pooled = [s for s in (_pool(a) for a in _JUNK_ANCHORS) if s is not None]
     if not junk_pooled:
         return None
     return (caption_score - max(junk_pooled)) >= margin

@@ -12,7 +12,6 @@ from typing import Union
 import edge_tts
 from edge_tts import SubMaker
 from loguru import logger
-from moviepy.audio.io.AudioFileClip import AudioFileClip
 
 from app.config import config
 from app.utils import utils
@@ -39,8 +38,9 @@ def estimate_no_voice_duration(text: str) -> float:
         return 3.0
 
     cjk_chars = len(re.findall(r"[一-鿿]", normalized_text))
-    words = len(re.findall(r"[A-Za-z0-9]+", normalized_text))
-    ascii_word_chars = sum(len(word) for word in re.findall(r"[A-Za-z0-9]+", normalized_text))
+    _ascii_words = re.findall(r"[A-Za-z0-9]+", normalized_text)
+    words = len(_ascii_words)
+    ascii_word_chars = sum(len(w) for w in _ascii_words)
     other_text_chars = 0
     for char in normalized_text:
         category = unicodedata.category(char)
@@ -578,13 +578,7 @@ def _get_audio_duration_from_mp3(mp3_file: str) -> float:
     if not os.path.exists(mp3_file):
         logger.error(f"MP3 file does not exist: {mp3_file}")
         return 0.0
-
-    try:
-        with AudioFileClip(mp3_file) as audio:
-            return audio.duration
-    except Exception as e:
-        logger.error(f"Failed to get audio duration from MP3: {str(e)}")
-        return 0.0
+    return _get_mp3_duration_seconds(mp3_file)
 
 
 def get_audio_duration(target: Union[str, SubMaker]) -> float:
