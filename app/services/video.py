@@ -659,6 +659,12 @@ def _render_ken_burns_ffmpeg(
     FFmpeg-native Ken Burns via scale+overlay with eval=frame.
     Floating-point per-frame sizing avoids the integer-rounding staircase
     that makes MoviePy's PIL-resize variant look jittery.
+
+    Speed trick: the source image is pre-resized (once, in PIL) to the
+    maximum zoom size before handing it to FFmpeg. This keeps the eval=frame
+    scale operations small — ~1.26x real-time instead of ~4.5x real-time
+    when scaling from high-resolution originals (e.g. 5000px phone photos).
+
     Returns output_path on success, '' on failure.
     """
     import tempfile
@@ -677,16 +683,31 @@ def _render_ken_burns_ffmpeg(
     fit_w = src_w * fit_scale
     fit_h = src_h * fit_scale
 
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_bg:
-        bg_path = tmp_bg.name
-    _PILImage.fromarray(bg_arr).save(bg_path)
+    # Pre-resize source to the maximum zoom size (+2 px buffer for even-rounding).
+    # FFmpeg scale with eval=frame then operates on this small intermediate image
+    # rather than the full-res original — ~3-4x faster per-frame.
+    max_w = int(fit_w * zoom_end) + 2
+    max_h = int(fit_h * zoom_end) + 2
+    pre_resized = img.resize((max_w, max_h), _PILImage.LANCZOS)
 
+    tmp_pre = tmp_bg = None
     try:
-        # trunc(x/2)*2 keeps dimensions even (required by H.264).
-        # t is the current frame time in seconds inside the filter graph.
-        zoom_expr = f"({zoom_start}+({zoom_end}-{zoom_start})*t/{duration})"
-        scale_w = f"trunc({fit_w}*{zoom_expr}/2)*2"
-        scale_h = f"trunc({fit_h}*{zoom_expr}/2)*2"
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            tmp_pre = f.name
+        pre_resized.save(tmp_pre)
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            tmp_bg = f.name
+        _PILImage.fromarray(bg_arr).save(tmp_bg)
+
+        # Scale range expressed as fractions of the pre-resized image dimensions
+        # so the scale filter only applies small adjustments on a small image.
+        scale_min = (fit_w * zoom_start) / max_w
+        scale_max = (fit_w * zoom_end) / max_w
+        zoom_expr = f"({scale_min}+({scale_max}-{scale_min})*t/{duration})"
+        scale_w = f"trunc({max_w}*{zoom_expr}/2)*2"
+        scale_h = f"trunc({max_h}*{zoom_expr}/2)*2"
+
         filter_complex = (
             f"[0:v]scale=w='{scale_w}':h='{scale_h}':eval=frame,"
             f"setpts=PTS-STARTPTS[fg];"
@@ -697,8 +718,8 @@ def _render_ken_burns_ffmpeg(
             # -f image2 forces the image2 demuxer so -loop works for both .jpg
             # and .jpeg extensions (FFmpeg 8 picks a different demuxer for .jpeg
             # that does not support -loop without explicit format override).
-            "-f", "image2", "-loop", "1", "-t", str(duration), "-i", image_path,
-            "-f", "image2", "-loop", "1", "-t", str(duration), "-i", bg_path,
+            "-f", "image2", "-loop", "1", "-t", str(duration), "-i", tmp_pre,
+            "-f", "image2", "-loop", "1", "-t", str(duration), "-i", tmp_bg,
             "-filter_complex", filter_complex,
             "-t", str(duration),
             "-r", str(fps),
@@ -707,15 +728,17 @@ def _render_ken_burns_ffmpeg(
             "-threads", str(threads),
             output_path,
         ]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if proc.returncode != 0:
             logger.warning(f"FFmpeg Ken Burns stderr: {proc.stderr[-600:]}")
             return ""
     finally:
-        try:
-            os.remove(bg_path)
-        except OSError:
-            pass
+        for p in (tmp_pre, tmp_bg):
+            if p:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
 
     return output_path if os.path.exists(output_path) else ""
 
