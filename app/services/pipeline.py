@@ -314,6 +314,27 @@ def _fetch_video_clip(
     margin = float(config.app.get("relevance_margin", 0.02))
     use_relevance = relevance.is_available() and not relevance.is_log_only()
     num_frames = max(nsfw_frame_samples, relevance_frame_samples)
+    coverr_enabled = bool(config.app.get("coverr_enabled", True))
+    motion_filter_enabled = bool(config.app.get("motion_filter_enabled", True))
+    motion_min_score = float(config.app.get("motion_min_score", 0.04))
+
+    def _get_rung_results(term: str) -> list:
+        """Fetch candidates for one ladder rung from primary source + Coverr."""
+        primary = search_fn(
+            search_term=term,
+            minimum_duration=min_duration,
+            video_aspect=video_aspect,
+            prompt=caption_prompt,
+        )
+        if coverr_enabled:
+            coverr = material.search_videos_coverr(
+                search_term=term,
+                minimum_duration=min_duration,
+                video_aspect=video_aspect,
+                prompt=caption_prompt,
+            )
+            return primary + coverr
+        return primary
 
     # search_terms is a subject-anchored query ladder: each entry is
     # "{visual_concept} {video_topic}", specific concept first and
@@ -327,6 +348,12 @@ def _fetch_video_clip(
     term_results: List[Optional[list]] = [None] * len(search_terms)
     term_pos = [0] * len(search_terms)
 
+    # Dedup fallback: if every candidate that passes NSFW+relevance is rejected
+    # by the dedup gate, we save the first one rather than discarding it, so the
+    # slot can still be filled instead of coming back empty.
+    _dedup_fallback_tmp = os.path.join(clips_dir, f"clip-{clip_idx:04d}-dfb.mp4")
+    dedup_fallback_emb = None
+
     attempts = 0
     while attempts < max_attempts:
         progressed = False
@@ -334,12 +361,7 @@ def _fetch_video_clip(
             if attempts >= max_attempts:
                 break
             if term_results[t_idx] is None:
-                term_results[t_idx] = search_fn(
-                    search_term=term,
-                    minimum_duration=min_duration,
-                    video_aspect=video_aspect,
-                    prompt=caption_prompt,
-                )
+                term_results[t_idx] = _get_rung_results(term)
             items = term_results[t_idx]
             pos = term_pos[t_idx]
             while pos < len(items) and items[pos].url in used_urls:
@@ -388,6 +410,34 @@ def _fetch_video_clip(
                     pass
                 continue
 
+            # Motion gate — reject static clips (photographs exported as MP4,
+            # frozen zooms) before spending a relevance or dedup check on them.
+            if motion_filter_enabled and len(frames) >= 2:
+                try:
+                    import io
+                    import numpy as np
+                    from PIL import Image as _PILImage
+                    arrays = [
+                        np.array(_PILImage.open(io.BytesIO(fb)).convert("RGB"), dtype=float)
+                        for fb in frames
+                    ]
+                    max_diff = max(
+                        float(np.mean(np.abs(arrays[i] - arrays[i - 1]))) / 255.0
+                        for i in range(1, len(arrays))
+                    )
+                    if max_diff < motion_min_score:
+                        logger.info(
+                            f"clip {clip_idx}: rejected static clip "
+                            f"(max_frame_diff={max_diff:.3f} < {motion_min_score}): {candidate.url}"
+                        )
+                        try:
+                            os.remove(out_path)
+                        except Exception:
+                            pass
+                        continue
+                except Exception as _me:
+                    logger.debug(f"motion check skipped: {_me}")
+
             if use_relevance:
                 margin_ok = relevance.passes_margin_frames(
                     caption_prompt, frames, margin, pool=relevance_pool
@@ -409,17 +459,53 @@ def _fetch_video_clip(
                         logger.info(
                             f"clip {clip_idx}: rejected near-duplicate video candidate: {candidate.url}"
                         )
+                        # Save first dedup-rejected clip as last-resort fallback.
+                        if not os.path.exists(_dedup_fallback_tmp):
+                            try:
+                                os.rename(out_path, _dedup_fallback_tmp)
+                                dedup_fallback_emb = dedup_emb
+                            except Exception:
+                                try:
+                                    os.remove(out_path)
+                                except Exception:
+                                    pass
+                        else:
+                            try:
+                                os.remove(out_path)
+                            except Exception:
+                                pass
+                        continue
+                    # Accepted — clean up any saved fallback.
+                    if os.path.exists(_dedup_fallback_tmp):
                         try:
-                            os.remove(out_path)
+                            os.remove(_dedup_fallback_tmp)
                         except Exception:
                             pass
-                        continue
                     recent_embeddings.append(dedup_emb)
 
             return out_path
 
         if not progressed:
             break
+
+    # Use the dedup fallback if every candidate that passed NSFW+relevance
+    # was rejected only because of visual similarity to recent shots.
+    if os.path.exists(_dedup_fallback_tmp):
+        try:
+            os.rename(_dedup_fallback_tmp, out_path)
+            logger.warning(
+                f"clip {clip_idx}: all candidates were near-duplicates; "
+                f"using best-passing dedup fallback"
+            )
+            if dedup_fallback_emb is not None and recent_embeddings is not None:
+                recent_embeddings.append(dedup_fallback_emb)
+            return out_path
+        except Exception as _fe:
+            logger.debug(f"dedup fallback rename failed: {_fe}")
+            try:
+                os.remove(_dedup_fallback_tmp)
+            except Exception:
+                pass
 
     logger.warning(
         f"clip {clip_idx}: no video candidate passed verification for "

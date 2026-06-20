@@ -109,7 +109,7 @@ def _download_bytes(url: str) -> bytes:
         return b""
 
 
-_MAX_RERANK_CANDIDATES = 12
+_MAX_RERANK_CANDIDATES = 25
 
 
 def _rerank_by_thumbnail(
@@ -280,6 +280,91 @@ def search_videos_pixabay(
     return []
 
 
+def search_videos_coverr(
+    search_term: str,
+    minimum_duration: int,
+    video_aspect: VideoAspect = VideoAspect.portrait,
+    prompt: str = "",
+) -> List[MaterialInfo]:
+    """Search Coverr for free cinematic B-roll (no API key required for the free tier).
+
+    Coverr's catalogue is especially strong for nature, lifestyle, architecture,
+    and abstract/thematic footage — useful as a supplemental source when
+    Pexels/Pixabay return thin results for unusual concepts.
+    """
+    if not config.app.get("coverr_enabled", True):
+        return []
+
+    # Coverr requires an API key even on the free tier (register at coverr.co).
+    # Without one the request returns 401, so skip silently rather than logging
+    # an error every clip.
+    coverr_key = config.app.get("coverr_api_key", "").strip()
+    if not coverr_key:
+        return []
+
+    aspect = VideoAspect(video_aspect)
+    video_width, video_height = aspect.to_resolution()
+
+    params = {"keywords": search_term, "page": 1, "size": 20}
+    api_url = f"https://api.coverr.co/videos?{urlencode(params)}"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Authorization": f"Bearer {coverr_key}",
+    }
+
+    logger.info(f"searching Coverr: {api_url}")
+    try:
+        response = _api_get_json(api_url, headers=headers)
+        video_items = []
+        hits = response.get("hits", [])
+        target_pixels = video_width * video_height
+
+        for hit in hits:
+            duration = int(hit.get("duration") or 0)
+            if duration < minimum_duration:
+                continue
+
+            # Try known field names for the direct MP4 URL.
+            # If none contain ".mp4", attempt to construct from slug.
+            video_url = ""
+            for field in ("mp4_url", "download_url", "url"):
+                candidate_url = hit.get(field, "")
+                if candidate_url and ".mp4" in candidate_url:
+                    video_url = candidate_url
+                    break
+            if not video_url:
+                slug = hit.get("slug") or hit.get("id", "")
+                if slug:
+                    video_url = f"https://media.coverr.co/videos/{slug}.mp4"
+
+            if not video_url:
+                continue
+
+            w = int(hit.get("width") or 0)
+            h = int(hit.get("height") or 0)
+            if w > 0 and h > 0:
+                pixels = w * h
+                # Skip clips that are much smaller than the target resolution.
+                if pixels < target_pixels // 4:
+                    continue
+
+            item = MaterialInfo()
+            item.provider = "coverr"
+            item.url = video_url
+            item.duration = duration
+            item.thumbnail = hit.get("thumbnail") or hit.get("preview") or ""
+            video_items.append(item)
+
+        return _rerank_by_thumbnail(video_items, prompt, kind="video")
+    except Exception as e:
+        logger.error(f"Coverr video search failed: {e}")
+
+    return []
+
+
 def save_video(video_url: str, save_dir: str = "") -> str:
     if not save_dir:
         save_dir = utils.storage_dir("cache_videos")
@@ -429,18 +514,43 @@ def search_images_unsplash(search_term: str, n: int = 5) -> List[str]:
 # Stock-photo libraries whose public preview images are almost always
 # heavily watermarked. DDG draws from the open web and can surface these.
 _WATERMARKED_IMAGE_DOMAINS = {
+    # Major stock photo agencies
     "shutterstock.com", "istockphoto.com", "gettyimages.com", "alamy.com",
     "depositphotos.com", "123rf.com", "dreamstime.com", "stock.adobe.com",
     "bigstockphoto.com", "canstockphoto.com", "vectorstock.com",
     "fotolia.com", "stocksy.com",
+    # Getty family brands
+    "wireimage.com", "filmmagic.com", "hultonarchive.com",
+    # Other stock agencies
+    "pond5.com", "dissolve.com", "offset.com", "picfair.com",
+    "agefotostock.com", "superstock.com", "masterfile.com",
+    "bridgemanimages.com", "imagebroker.com", "robertharding.com",
+    "mauritiusimages.com", "eyeem.com", "pixta.net", "yayimages.com",
+    "vecteezy.com", "freepik.com",
 }
+
+# URL path fragments that indicate a watermarked comp/preview image.
+# Getty and Alamy use /comp/, many agencies use /preview/ or /wm/.
+_WATERMARKED_PATH_FRAGMENTS = {"/comp/", "/preview/", "/watermark/", "/wm/"}
 
 
 def _is_watermarked_source(url: str) -> bool:
     try:
-        host = urlparse(url).netloc.lower().split(":")[0]
+        parsed = urlparse(url)
+        host = parsed.netloc.lower().split(":")[0]
+        path = parsed.path.lower()
     except Exception:
         return False
+    if any(host == d or host.endswith("." + d) for d in _WATERMARKED_IMAGE_DOMAINS):
+        return True
+    return any(frag in path for frag in _WATERMARKED_PATH_FRAGMENTS)
+
+
+def _is_watermarked_domain(domain: str) -> bool:
+    """Check a bare domain string (e.g. Serper's 'domain' field or DDG's 'source')."""
+    if not domain:
+        return False
+    host = domain.lower().split(":")[0].strip("/")
     return any(host == d or host.endswith("." + d) for d in _WATERMARKED_IMAGE_DOMAINS)
 
 
@@ -521,7 +631,7 @@ def search_images_ddg(search_term: str, n: int = 5) -> List[str]:
         url = r.get("image")
         if not url:
             continue
-        if _is_watermarked_source(url):
+        if _is_watermarked_source(url) or _is_watermarked_domain(r.get("source", "")):
             continue
         if _is_nsfw_result(r):
             logger.info(f"skipping likely NSFW image result: {url}")
@@ -576,7 +686,7 @@ def search_images_serper(search_term: str, n: int = 5) -> List[str]:
             "title": item.get("title", ""),
             "source": item.get("domain", ""),
         }
-        if _is_watermarked_source(url):
+        if _is_watermarked_source(url) or _is_watermarked_domain(item.get("domain", "")):
             continue
         if _is_nsfw_result(result):
             logger.info(f"skipping likely NSFW image result: {url}")

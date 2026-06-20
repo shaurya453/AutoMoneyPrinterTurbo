@@ -131,6 +131,32 @@ dedup_similarity_threshold = 0.92
 dedup_lookback_window = 8
 
 # ---------------------------------------------------------------------------
+# Coverr — supplemental cinematic B-roll source
+# Strongest for nature, lifestyle, architecture, and abstract themes.
+# Coverr results are appended after Pexels/Pixabay for each ladder rung,
+# so they're only tried when the primary source runs thin.
+# Requires an API key — register free at https://coverr.co/developers
+# Without a key the source is silently skipped (coverr_enabled has no effect).
+# ---------------------------------------------------------------------------
+coverr_enabled = true
+
+# API key from coverr.co/developers (required even for free tier).
+# coverr_api_key = "your_key_here"
+
+# ---------------------------------------------------------------------------
+# Motion score gate — rejects static "video" clips
+# Clips where no adjacent-frame pair differs by more than motion_min_score
+# (fraction of full-scale, 0–1) are rejected before relevance or dedup
+# checks.  This eliminates photographs exported as MP4 and near-frozen zooms
+# that look like a broken slideshow in the final video.
+# ---------------------------------------------------------------------------
+motion_filter_enabled = true
+
+# Maximum frame-to-frame difference below which a clip is considered static.
+# 0.03–0.05 rejects near-frozen clips without discarding slow pans.
+motion_min_score = 0.04
+
+# ---------------------------------------------------------------------------
 # Background music — online fetch
 # ---------------------------------------------------------------------------
 
