@@ -671,9 +671,14 @@ def _fetch_clip(
     if fallback_name == "video":
         result = _fetch_video_clip(*args_video, **dedup_kw)
     else:
+        # For named_entity videos, broll image fallbacks also route through
+        # the named-track source order (Serper first) — generic broll image
+        # sources (DuckDuckGo, Unsplash, etc.) won't have the specific entity
+        # and would return unrelated content just as badly as generic video did.
+        use_named_order = content_track == "named" or video_type == "named_entity"
         result = _fetch_image_clip(
             *args_image,
-            source_order=(named_source_order if content_track == "named" else None),
+            source_order=(named_source_order if use_named_order else None),
             **dedup_kw,
         )
     if result:
@@ -693,7 +698,8 @@ def _fetch_clip(
             if video_fb:
                 logger.info(f"clip {clip_idx}: used topic-wide fallback concepts {extra_concepts[:3]}")
                 return video_fb, False
-            image_fb = _fetch_image_clip(*args_image_fb, source_order=None, **dedup_kw)
+            fb_named_order = named_source_order if video_type == "named_entity" else None
+            image_fb = _fetch_image_clip(*args_image_fb, source_order=fb_named_order, **dedup_kw)
             if image_fb:
                 logger.info(f"clip {clip_idx}: used topic-wide fallback concepts {extra_concepts[:3]}")
                 return image_fb, True
@@ -849,10 +855,12 @@ def start(job_path: str) -> Optional[dict]:
     total_sentences = len(timings)
     # Video sentences: download multiple ~4-second clips to cover the sentence
     # duration without repeating footage.
-    # Image sentences: one Ken Burns clip for the full sentence duration —
-    # multiple clips would show the same cached image repeatedly.
+    # Image sentences: capped at _IMAGE_CLIP_MAX seconds each — long sentences
+    # split into multiple clips so a single still never holds for the full
+    # narration. Each sub-clip fetches a different image (used_urls dedupes).
     _CLIP_TARGET = 4.0
     _MIN_VISUAL_DUR = 3.0  # absolute floor for any single clip's duration
+    _IMAGE_CLIP_MAX = 7.0  # max seconds per individual Ken Burns image clip
 
     # ---- Pass 1: plan per-sentence clip durations using absolute resync.
     #
@@ -879,8 +887,17 @@ def start(job_path: str) -> Optional[dict]:
             target_end_k = max(audio_duration, start_k)
         raw_total = target_end_k - start_k
 
-        if is_image or sent_audio_dur <= 0:
+        if sent_audio_dur <= 0:
             num_clips = 1
+        elif is_image:
+            # Cap each image slot so long sentences show multiple images
+            # rather than freezing on a single still for the full duration.
+            if raw_total > _IMAGE_CLIP_MAX:
+                ideal = max(1, round(raw_total / _IMAGE_CLIP_MAX))
+                max_by_min = max(1, int(raw_total // _MIN_VISUAL_DUR))
+                num_clips = max(1, min(ideal, max_by_min))
+            else:
+                num_clips = 1
         else:
             basis = raw_total if raw_total > 0 else sent_audio_dur
             ideal_clips = max(1, round(basis / _CLIP_TARGET))
