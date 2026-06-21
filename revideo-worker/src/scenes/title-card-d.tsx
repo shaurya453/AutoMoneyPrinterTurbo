@@ -1,3 +1,4 @@
+import '../global.css';
 import {makeScene2D, Rect, Txt} from '@revideo/2d';
 import {all, chain, createRef, easeInOutCubic, easeOutCubic, tween, useScene, waitFor} from '@revideo/core';
 
@@ -14,12 +15,12 @@ export default makeScene2D('title-card-d', function* (view) {
 
   const hasSub = subtitle.length > 0;
 
-  const TITLE_Y  = hasSub ? -80 : -20;
-  const RULE_Y   = hasSub ? -8  : 36;
+  const TITLE_Y  = hasSub ? -90 : -22;
+  const RULE_Y   = hasSub ? -10  : 38;
   const RULE_W   = 320;
-  const SUB_Y    = hasSub ? 68  : 0;
-  const SLIDE_T  = 44;   // initial rightward offset for title
-  const SLIDE_S  = 30;   // initial rightward offset for subtitle
+  const SUB_Y    = hasSub ? 76  : 0;
+  const SLIDE_T  = 44;
+  const SLIDE_S  = 30;
 
   const containerRef = createRef<Rect>();
   const titleRef     = createRef<Txt>();
@@ -35,6 +36,7 @@ export default makeScene2D('title-card-d', function* (view) {
         y={TITLE_Y}
         fontSize={88}
         fontWeight={700}
+        fontFamily={'Inter, sans-serif'}
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
@@ -54,6 +56,7 @@ export default makeScene2D('title-card-d', function* (view) {
         y={SUB_Y}
         fontSize={38}
         fontWeight={300}
+        fontFamily={'Inter, sans-serif'}
         fill={'#a8a8a8'}
         opacity={0}
         letterSpacing={2}
@@ -67,18 +70,15 @@ export default makeScene2D('title-card-d', function* (view) {
   const ANIM_OUT = 0.35;
 
   yield* all(
-    // Title slides from right → centre + fades
     tween(0.55, v => {
       const t = easeOutCubic(v);
       titleRef().opacity(t);
       titleRef().x(SLIDE_T * (1 - t));
     }),
-    // Gold accent rule wipes from centre outward, delayed
     chain(
       waitFor(0.44),
       tween(0.38, v => ruleRef().width(easeInOutCubic(v) * RULE_W)),
     ),
-    // Subtitle slides from right → centre + fades, further delayed
     ...(hasSub
       ? [chain(
           waitFor(0.65),

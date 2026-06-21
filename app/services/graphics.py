@@ -26,7 +26,7 @@ _POOL_SIZES: dict = {
     "title_card":  4,
     "infographic": 4,
     "transition":  4,
-    "list":        2,
+    "list":        4,
 }
 
 # Named style → variant index mapping, per type.
@@ -52,7 +52,9 @@ STYLE_MAP: dict = {
     },
     "list": {
         "bullets":  0,   # coloured square bullets, slides from left
-        "numbered": 1,   # cyan number prefix, slides from right
+        "numbered": 1,   # cyan number prefix, drops from above
+        "cascade":  2,   # coloured bar sweep behind each row
+        "grid":     3,   # bordered card grid with accent number badges
     },
 }
 

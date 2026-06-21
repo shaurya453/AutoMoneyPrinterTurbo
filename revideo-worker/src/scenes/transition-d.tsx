@@ -1,10 +1,11 @@
+import '../global.css';
 import {makeScene2D, Rect, Txt} from '@revideo/2d';
 import {all, chain, createRef, easeInOutCubic, easeOutCubic, tween, useScene, waitFor} from '@revideo/core';
 
 // Variant D — Crosshair
-// A thin horizontal and vertical line simultaneously grow outward from the screen
-// centre, forming a crosshair grid. The section label materialises at the centre
-// once the lines settle. Clinical, precise — suits structural or analytical pivots.
+// Lines grow outward from centre at full opacity, then fade to a whisper (12%).
+// Text materialises on the now-dim grid — clearly legible, with the crosshair as
+// a textured background rather than a competing foreground element.
 
 export default makeScene2D('transition-d', function* (view) {
   const vars = useScene().variables;
@@ -13,8 +14,10 @@ export default makeScene2D('transition-d', function* (view) {
   const sublabel = String(vars.get('sublabel', '')());
   const duration = Number(vars.get('duration', 3.0)());
 
-  const LABEL_Y    = sublabel ? -48 : -24;
-  const SUBLABEL_Y = 30;
+  const hasSub = sublabel.length > 0;
+
+  const LABEL_Y    = hasSub ? -52 : -26;
+  const SUBLABEL_Y = 32;
 
   const containerRef = createRef<Rect>();
   const hRef         = createRef<Rect>();
@@ -24,17 +27,17 @@ export default makeScene2D('transition-d', function* (view) {
 
   view.add(
     <Rect ref={containerRef} width={1920} height={1080} fill={'#0c0c0c'} opacity={1}>
-      {/* Crosshair lines — rendered behind the label */}
-      <Rect ref={hRef} width={0}   height={2} fill={'#ffffff'} opacity={0.32} />
-      <Rect ref={vRef} width={2}   height={0} fill={'#ffffff'} opacity={0.32} />
+      {/* Crosshair lines — rendered behind the label, dimmed before text appears */}
+      <Rect ref={hRef} width={0}   height={2} fill={'#ffffff'} opacity={0} />
+      <Rect ref={vRef} width={2}   height={0} fill={'#ffffff'} opacity={0} />
 
-      {/* Section label and optional context */}
       <Txt
         ref={labelRef}
         text={label}
         y={LABEL_Y}
         fontSize={78}
         fontWeight={700}
+        fontFamily={'Inter, sans-serif'}
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
@@ -47,6 +50,7 @@ export default makeScene2D('transition-d', function* (view) {
         y={SUBLABEL_Y}
         fontSize={32}
         fontWeight={300}
+        fontFamily={'Inter, sans-serif'}
         fill={'#777777'}
         opacity={0}
         textAlign={'center'}
@@ -56,10 +60,9 @@ export default makeScene2D('transition-d', function* (view) {
     </Rect>,
   );
 
-  // ── Animation ─────────────────────────────────────────────────────────
-
-  // 1. Both lines expand from centre simultaneously; vertical has a slight delay
+  // Phase 1 — lines grow to full extent at high opacity
   yield* all(
+    tween(0.06, v => { hRef().opacity(0.78 * easeOutCubic(v)); vRef().opacity(0.78 * easeOutCubic(v)); }),
     tween(0.34, v => hRef().width(easeInOutCubic(v) * 1720)),
     chain(
       waitFor(0.06),
@@ -67,8 +70,14 @@ export default makeScene2D('transition-d', function* (view) {
     ),
   );
 
-  // 2. Label materialises; sublabel follows
-  if (sublabel) {
+  // Phase 2 — lines fade to near-invisible
+  yield* all(
+    tween(0.25, v => hRef().opacity(0.78 - 0.66 * easeInOutCubic(v))),  // 0.78 → 0.12
+    tween(0.25, v => vRef().opacity(0.78 - 0.66 * easeInOutCubic(v))),
+  );
+
+  // Phase 3 — text fades in on the dim grid
+  if (hasSub) {
     yield* all(
       tween(0.32, v => labelRef().opacity(easeOutCubic(v))),
       chain(waitFor(0.18), tween(0.28, v => subRef().opacity(easeOutCubic(v)))),
@@ -77,7 +86,7 @@ export default makeScene2D('transition-d', function* (view) {
     yield* tween(0.32, v => labelRef().opacity(easeOutCubic(v)));
   }
 
-  const animIn = 0.40 + 0.32 + (sublabel ? 0.28 : 0);
+  const animIn = 0.40 + 0.25 + 0.32 + (hasSub ? 0.18 : 0);
   yield* waitFor(Math.max(0, duration - animIn - 0.35));
   yield* tween(0.35, v => containerRef().opacity(1 - easeInOutCubic(v)));
 });

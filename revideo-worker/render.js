@@ -40,8 +40,10 @@ const VARIANT_POOL = {
     path.join(__dirname, 'src', 'projects', 'transition-d.ts'),   // D — crosshair
   ],
   list: [
-    path.join(__dirname, 'src', 'projects', 'list.ts'),           // A — bullet list
-    path.join(__dirname, 'src', 'projects', 'list-b.ts'),         // B — numbered list
+    path.join(__dirname, 'src', 'projects', 'list.ts'),           // A — bullet list (slides from left)
+    path.join(__dirname, 'src', 'projects', 'list-b.ts'),         // B — numbered list (drops from above)
+    path.join(__dirname, 'src', 'projects', 'list-c.ts'),         // C — cascade reveal (bar sweep)
+    path.join(__dirname, 'src', 'projects', 'list-d.ts'),         // D — card grid
   ],
 };
 

@@ -1,10 +1,11 @@
+import '../global.css';
 import {makeScene2D, Layout, Rect, Txt} from '@revideo/2d';
 import {all, chain, createRef, easeInOutCubic, easeOutCubic, tween, useScene, waitFor} from '@revideo/core';
 
-// Variant B — Numbered List
-// Items slide in from the right with a zero-padded cyan number prefix ("01.", "02."…).
-// The opposite slide direction and cooler palette make this visually distinct from
-// Variant A. Use when order matters — top-ranked items, chronological steps, etc.
+// Variant B — Numbered List (Drop-in)
+// Items drop in from above with a zero-padded number prefix ("01.", "02."…).
+// Motion direction (top-to-bottom drop) and dark blue-purple palette make this
+// visually distinct from Variant A (left slide, black background).
 
 export default makeScene2D('list-b', function* (view) {
   const vars = useScene().variables;
@@ -23,9 +24,10 @@ export default makeScene2D('list-b', function* (view) {
   const rowYs       = Array.from({length: n}, (_, i) => LIST_OFFSET - totalH / 2 + i * ROW_GAP);
   const TITLE_Y     = hasTitle ? rowYs[0] - ROW_GAP * 1.8 : 0;
 
-  const SLIDE_DX = 40;    // slides in from the right (positive initial x)
+  const LAYOUT_X = -50;
+  const DROP_DY  = 48;   // items start 48px ABOVE final position, drop down
   const STAGGER  = 0.22;
-  const ROW_DUR  = 0.45;
+  const ROW_DUR  = 0.50;
   const ANIM_OUT = 0.35;
 
   const containerRef = createRef<Rect>();
@@ -33,52 +35,51 @@ export default makeScene2D('list-b', function* (view) {
   const rowRefs      = Array.from({length: n}, () => createRef<Layout>());
 
   view.add(
-    <Rect ref={containerRef} width={1920} height={1080} fill={'#060610'} opacity={1}>
-      {/* Title */}
+    <Rect ref={containerRef} width={1920} height={1080} fill={'#060616'} opacity={1}>
       <Txt
         ref={titleRef}
         text={title}
         y={TITLE_Y}
         fontSize={52}
         fontWeight={700}
+        fontFamily={'Inter, sans-serif'}
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
         maxWidth={1600}
       />
 
-      {/* Numbered rows */}
       {Array.from({length: n}, (_, i) => (
         <Layout
           ref={rowRefs[i]}
           direction={'row'}
           alignItems={'center'}
-          gap={24}
-          width={1200}
-          x={SLIDE_DX}
-          y={rowYs[i]}
+          justifyContent={'start'}
+          gap={32}
+          x={LAYOUT_X}
+          y={rowYs[i] - DROP_DY}
           opacity={0}
         >
           <Txt
             text={String(i + 1).padStart(2, '0') + '.'}
-            fontSize={46}
+            fontSize={52}
             fontWeight={800}
+            fontFamily={'Inter, sans-serif'}
             fill={'#4fcef7'}
-            width={80}
+            width={88}
           />
           <Txt
             text={items[i]}
             fontSize={38}
             fontWeight={300}
+            fontFamily={'Inter, sans-serif'}
             fill={'#d8d8d8'}
-            maxWidth={1060}
+            width={1020}
           />
         </Layout>
       ))}
     </Rect>,
   );
-
-  // ── Animation ─────────────────────────────────────────────────────────
 
   const titleTime = hasTitle ? 0.40 + 0.15 : 0;
   if (hasTitle) {
@@ -86,7 +87,7 @@ export default makeScene2D('list-b', function* (view) {
     yield* waitFor(0.15);
   }
 
-  // Rows slide in from the right, staggered
+  // Items drop down from above into position, staggered
   yield* all(
     ...rowRefs.slice(0, n).map((rowRef, i) =>
       chain(
@@ -94,7 +95,7 @@ export default makeScene2D('list-b', function* (view) {
         tween(ROW_DUR, v => {
           const t = easeOutCubic(v);
           rowRef().opacity(t);
-          rowRef().x(SLIDE_DX * (1 - t));
+          rowRef().y(rowYs[i] - DROP_DY + DROP_DY * t);
         }),
       ),
     ),

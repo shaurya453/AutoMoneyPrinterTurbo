@@ -1,3 +1,4 @@
+import '../global.css';
 import {makeScene2D, Rect, Txt, Layout} from '@revideo/2d';
 import {all, createRef, easeInOutCubic, tween, useScene, waitFor} from '@revideo/core';
 
@@ -16,7 +17,7 @@ export default makeScene2D('title-card', function* (view) {
         direction={'column'}
         alignItems={'center'}
         justifyContent={'center'}
-        gap={48}
+        gap={56}
         width={'100%'}
         height={'100%'}
       >
@@ -25,6 +26,7 @@ export default makeScene2D('title-card', function* (view) {
           text={title as string}
           fontSize={88}
           fontWeight={700}
+          fontFamily={'Inter, sans-serif'}
           fill={'#ffffff'}
           opacity={0}
           textAlign={'center'}
@@ -35,6 +37,7 @@ export default makeScene2D('title-card', function* (view) {
           text={subtitle as string}
           fontSize={44}
           fontWeight={300}
+          fontFamily={'Inter, sans-serif'}
           fill={'#aaaaaa'}
           opacity={0}
           textAlign={'center'}
@@ -44,7 +47,6 @@ export default makeScene2D('title-card', function* (view) {
     </Rect>,
   );
 
-  // Fade in title (0.8s), brief pause, fade in subtitle (0.8s), hold remainder
   yield* tween(0.8, v => titleRef().opacity(easeInOutCubic(v)));
   yield* waitFor(0.4);
   if (subtitle) {

@@ -1,3 +1,4 @@
+import '../global.css';
 import {makeScene2D, Rect, Txt} from '@revideo/2d';
 import {all, chain, createRef, easeInOutCubic, easeOutCubic, tween, useScene, waitFor} from '@revideo/core';
 
@@ -22,20 +23,17 @@ export default makeScene2D('infographic-c', function* (view) {
   const n      = Math.min(labels.length, values.length);
   const maxVal = Math.max(...values.slice(0, n), 0.001);
 
-  // Layout — same horizontal spread as infographic-a
   const CHART_W     = 1580;
   const MAX_STEM_H  = 460;
-  const AXIS_Y      = 250;   // y of baseline (positive = below centre)
+  const AXIS_Y      = 250;
   const BAR_SLOT_W  = CHART_W / n;
   const STEM_W      = 5;
-  const DOT_D       = 36;    // dot diameter
+  const DOT_D       = 36;
 
-  const stemXs      = Array.from({length: n}, (_, i) => -CHART_W / 2 + BAR_SLOT_W * (i + 0.5));
-  const targetHs    = values.slice(0, n).map(v => (v / maxVal) * MAX_STEM_H);
-
-  // Dot centre y = top of finished stem – half dot; computed for each i
-  const dotYs  = targetHs.map(h => AXIS_Y - h - DOT_D / 2);
-  const valYs  = targetHs.map(h => AXIS_Y - h - DOT_D - 34);
+  const stemXs   = Array.from({length: n}, (_, i) => -CHART_W / 2 + BAR_SLOT_W * (i + 0.5));
+  const targetHs = values.slice(0, n).map(v => (v / maxVal) * MAX_STEM_H);
+  const dotYs    = targetHs.map(h => AXIS_Y - h - DOT_D / 2);
+  const valYs    = targetHs.map(h => AXIS_Y - h - DOT_D - 38);
 
   const formatVal = (v: number) => {
     const s = Number.isInteger(v) ? String(v) : v.toFixed(1);
@@ -46,7 +44,6 @@ export default makeScene2D('infographic-c', function* (view) {
   const STEM_DUR = 1.0;
   const DOT_DUR  = 0.28;
 
-  // Refs
   const titleRef = createRef<Txt>();
   const axisRef  = createRef<Rect>();
   const stemRefs = Array.from({length: n}, () => createRef<Rect>());
@@ -55,20 +52,18 @@ export default makeScene2D('infographic-c', function* (view) {
 
   view.add(
     <Rect width={1920} height={1080} fill={'#0a0a0a'}>
-      {/* Title */}
       <Txt
         ref={titleRef}
         text={title}
         y={-410}
-        fontSize={58}
+        fontSize={56}
         fontWeight={700}
+        fontFamily={'Inter, sans-serif'}
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
         maxWidth={1680}
       />
-
-      {/* Horizontal baseline */}
       <Rect
         ref={axisRef}
         width={CHART_W + 60}
@@ -78,21 +73,20 @@ export default makeScene2D('infographic-c', function* (view) {
         opacity={0}
       />
 
-      {/* Category labels */}
       {Array.from({length: n}, (_, i) => (
         <Txt
           text={labels[i]}
           x={stemXs[i]}
           y={AXIS_Y + 44}
-          fontSize={24}
+          fontSize={20}
           fontWeight={400}
+          fontFamily={'Inter, sans-serif'}
           fill={'#999999'}
           textAlign={'center'}
           maxWidth={BAR_SLOT_W - 12}
         />
       ))}
 
-      {/* Stems — start collapsed at baseline */}
       {Array.from({length: n}, (_, i) => (
         <Rect
           ref={stemRefs[i]}
@@ -105,7 +99,6 @@ export default makeScene2D('infographic-c', function* (view) {
         />
       ))}
 
-      {/* Dots — appear at stem tip with spring overshoot */}
       {Array.from({length: n}, (_, i) => (
         <Rect
           ref={dotRefs[i]}
@@ -118,39 +111,36 @@ export default makeScene2D('infographic-c', function* (view) {
         />
       ))}
 
-      {/* Value labels — above dots */}
       {Array.from({length: n}, (_, i) => (
         <Txt
           ref={valRefs[i]}
           text={formatVal(values[i])}
           x={stemXs[i]}
           y={valYs[i]}
-          fontSize={26}
+          fontSize={22}
           fontWeight={700}
+          fontFamily={'Inter, sans-serif'}
           fill={'#ffffff'}
           opacity={0}
           textAlign={'center'}
+          maxWidth={BAR_SLOT_W - 16}
         />
       ))}
     </Rect>,
   );
 
-  // ── Animation ─────────────────────────────────────────────────────────
   yield* tween(0.55, v => titleRef().opacity(easeInOutCubic(v)));
   yield* tween(0.22, v => axisRef().opacity(easeInOutCubic(v)));
 
-  // Stems grow upward (top pinned at baseline), then dots pop in — staggered
   yield* all(
     ...stemRefs.map((stemRef, i) =>
       chain(
         waitFor(i * STAGGER),
-        // Stem grows upward — centre y moves so top stays at AXIS_Y
         tween(STEM_DUR, v => {
           const h = easeInOutCubic(v) * targetHs[i];
           stemRef().height(h);
           stemRef().y(AXIS_Y - h / 2);
         }),
-        // Dot pops in at stem tip with slight overshoot
         tween(DOT_DUR, v => {
           const spring = v < 0.65
             ? (v / 0.65) * 1.14
@@ -164,7 +154,6 @@ export default makeScene2D('infographic-c', function* (view) {
     ),
   );
 
-  // Value labels fade in after all lollipops are done
   yield* all(...valRefs.map(ref => tween(0.35, v => ref().opacity(easeOutCubic(v)))));
 
   const animUsed = 0.55 + 0.22 + (n - 1) * STAGGER + STEM_DUR + DOT_DUR + 0.35;

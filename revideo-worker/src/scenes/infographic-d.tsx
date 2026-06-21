@@ -1,11 +1,10 @@
+import '../global.css';
 import {makeScene2D, Rect, Txt} from '@revideo/2d';
 import {all, chain, createRef, easeInOutCubic, easeOutCubic, tween, useScene, waitFor} from '@revideo/core';
 
 // Variant D — Number Callouts
 // Each data point is presented as one large, boldly-coloured number that counts up
-// from zero, with the category label sitting beneath it. No axes, no bars — the
-// emphasis is on the magnitude of each individual figure rather than comparison.
-// Works best for 2–4 high-impact statistics read aloud by the narrator.
+// from zero, with the category label sitting beneath it.
 
 const COLORS = [
   '#4f8ef7', '#f7964f', '#4fd1a0', '#f74f7e',
@@ -27,21 +26,18 @@ export default makeScene2D('infographic-d', function* (view) {
   const SLOT_W  = 1600 / n;
   const SLOT_XS = Array.from({length: n}, (_, i) => -800 + SLOT_W * (i + 0.5));
 
-  // Vertical anchors
   const NUM_Y   = -20;
   const UNIT_Y  =  80;
-  const LABEL_Y = 116;
+  const LABEL_Y = 120;
 
   const COUNT_DUR = 1.0;
   const STAGGER   = 0.18;
 
-  // Format the counted/final number for display
   const formatCount = (v: number, target: number): string => {
     if (Number.isInteger(target)) return String(Math.round(v));
     return v.toFixed(1);
   };
 
-  // Refs
   const titleRef = createRef<Txt>();
   const divRef   = createRef<Rect>();
   const numRefs  = Array.from({length: n}, () => createRef<Txt>());
@@ -50,20 +46,18 @@ export default makeScene2D('infographic-d', function* (view) {
 
   view.add(
     <Rect width={1920} height={1080} fill={'#0a0a0a'}>
-      {/* Title */}
       <Txt
         ref={titleRef}
         text={title}
         y={-400}
         fontSize={52}
         fontWeight={700}
+        fontFamily={'Inter, sans-serif'}
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
         maxWidth={1680}
       />
-
-      {/* Thin divider below title */}
       <Rect
         ref={divRef}
         width={0}
@@ -72,7 +66,6 @@ export default makeScene2D('infographic-d', function* (view) {
         y={-320}
       />
 
-      {/* Large counted numbers */}
       {Array.from({length: n}, (_, i) => (
         <Txt
           ref={numRefs[i]}
@@ -81,13 +74,13 @@ export default makeScene2D('infographic-d', function* (view) {
           y={NUM_Y}
           fontSize={118}
           fontWeight={800}
+          fontFamily={'Inter, sans-serif'}
           fill={COLORS[i % COLORS.length]}
           opacity={0}
           textAlign={'center'}
         />
       ))}
 
-      {/* Unit labels (shown only when unit is non-empty) */}
       {Array.from({length: n}, (_, i) => (
         <Txt
           ref={unitRefs[i]}
@@ -96,21 +89,22 @@ export default makeScene2D('infographic-d', function* (view) {
           y={UNIT_Y}
           fontSize={26}
           fontWeight={300}
+          fontFamily={'Inter, sans-serif'}
           fill={'#666666'}
           opacity={0}
           textAlign={'center'}
         />
       ))}
 
-      {/* Category labels */}
       {Array.from({length: n}, (_, i) => (
         <Txt
           ref={lblRefs[i]}
           text={labels[i]}
           x={SLOT_XS[i]}
           y={LABEL_Y}
-          fontSize={28}
+          fontSize={26}
           fontWeight={400}
+          fontFamily={'Inter, sans-serif'}
           fill={'#888888'}
           opacity={0}
           textAlign={'center'}
@@ -120,13 +114,9 @@ export default makeScene2D('infographic-d', function* (view) {
     </Rect>,
   );
 
-  // ── Animation ─────────────────────────────────────────────────────────
-
-  // 1. Title + divider
   yield* tween(0.4, v => titleRef().opacity(easeInOutCubic(v)));
   yield* tween(0.25, v => divRef().width(easeInOutCubic(v) * 1600));
 
-  // 2. Numbers count up, staggered — fade in fast at the start of each tween
   yield* all(
     ...numRefs.map((numRef, i) =>
       chain(
@@ -139,7 +129,6 @@ export default makeScene2D('infographic-d', function* (view) {
     ),
   );
 
-  // 3. Labels and units fade in together
   yield* all(
     ...lblRefs.map(ref => tween(0.3, v => ref().opacity(easeOutCubic(v)))),
     ...(unit ? unitRefs.map(ref => tween(0.3, v => ref().opacity(easeOutCubic(v)))) : []),

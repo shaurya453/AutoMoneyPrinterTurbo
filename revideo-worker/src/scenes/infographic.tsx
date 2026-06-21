@@ -1,3 +1,4 @@
+import '../global.css';
 import {makeScene2D, Rect, Txt} from '@revideo/2d';
 import {
   all,
@@ -10,14 +11,8 @@ import {
 } from '@revideo/core';
 
 const COLORS = [
-  '#4f8ef7', // blue
-  '#f7964f', // orange
-  '#4fd1a0', // green
-  '#f74f7e', // pink
-  '#b44ff7', // purple
-  '#f7e14f', // yellow
-  '#4fcef7', // cyan
-  '#f74fb3', // magenta
+  '#4f8ef7', '#f7964f', '#4fd1a0', '#f74f7e',
+  '#b44ff7', '#f7e14f', '#4fcef7', '#f74fb3',
 ];
 
 export default makeScene2D('infographic', function* (view) {
@@ -29,17 +24,15 @@ export default makeScene2D('infographic', function* (view) {
   const unit = String(vars.get('unit', '')());
   const duration = Number(vars.get('duration', 8)());
 
-  // Coerce to numbers in case JSON passes strings
   const values = rawValues.map(Number);
   const n = Math.min(labels.length, values.length);
   const maxVal = Math.max(...values.slice(0, n), 0.001);
 
-  // Layout constants (canvas is 1920 × 1080, origin at center)
-  const CHART_W = 1600;
-  const MAX_BAR_H = 500;
-  const AXIS_Y = 260; // y-coordinate of the axis line (bottom of bars)
+  const CHART_W = 1580;
+  const MAX_BAR_H = 480;
+  const AXIS_Y = 250;
   const BAR_SLOT_W = CHART_W / n;
-  const BAR_W = Math.min(BAR_SLOT_W * 0.55, 190);
+  const BAR_W = Math.min(BAR_SLOT_W * 0.55, 180);
   const STAGGER = 0.12;
   const BAR_DUR = 1.3;
 
@@ -51,7 +44,23 @@ export default makeScene2D('infographic', function* (view) {
     return unit ? `${s} ${unit}` : s;
   };
 
-  // Refs for animated elements
+  // Base value label y positions (above each bar tip)
+  const baseValYs = targetHeights.map(h => AXIS_Y - h - 48);
+
+  // Anti-collision: if two adjacent labels (sorted by height desc) are within 38px
+  // vertically, alternate them up/down by 18px.
+  const valYs = [...baseValYs];
+  const sortedIdx = Array.from({length: n}, (_, i) => i)
+    .sort((a, b) => targetHeights[b] - targetHeights[a]);
+  for (let k = 0; k < sortedIdx.length - 1; k++) {
+    const a = sortedIdx[k];
+    const b = sortedIdx[k + 1];
+    if (Math.abs(valYs[a] - valYs[b]) < 38) {
+      valYs[a] -= 18;
+      valYs[b] += 18;
+    }
+  }
+
   const titleRef = createRef<Txt>();
   const axisRef = createRef<Rect>();
   const barRefs = Array.from({length: n}, () => createRef<Rect>());
@@ -59,20 +68,18 @@ export default makeScene2D('infographic', function* (view) {
 
   view.add(
     <Rect width={1920} height={1080} fill={'#0a0a0a'}>
-      {/* Title */}
       <Txt
         ref={titleRef}
         text={title}
         y={-420}
-        fontSize={58}
+        fontSize={56}
         fontWeight={700}
+        fontFamily={'Inter, sans-serif'}
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
         maxWidth={1680}
       />
-
-      {/* Horizontal axis */}
       <Rect
         ref={axisRef}
         width={CHART_W + 60}
@@ -82,21 +89,22 @@ export default makeScene2D('infographic', function* (view) {
         opacity={0}
       />
 
-      {/* Category labels — static, visible from start */}
+      {/* Category labels */}
       {Array.from({length: n}, (_, i) => (
         <Txt
           text={labels[i]}
           x={barXs[i]}
-          y={AXIS_Y + 46}
-          fontSize={24}
+          y={AXIS_Y + 44}
+          fontSize={20}
           fontWeight={400}
+          fontFamily={'Inter, sans-serif'}
           fill={'#999999'}
           textAlign={'center'}
           maxWidth={BAR_SLOT_W - 12}
         />
       ))}
 
-      {/* Bars — start at height 0, animated to target */}
+      {/* Bars */}
       {Array.from({length: n}, (_, i) => (
         <Rect
           ref={barRefs[i]}
@@ -109,32 +117,28 @@ export default makeScene2D('infographic', function* (view) {
         />
       ))}
 
-      {/* Value labels — positioned at final heights, revealed after bars grow */}
+      {/* Value labels — constrained to bar slot width to prevent overflow */}
       {Array.from({length: n}, (_, i) => (
         <Txt
           ref={valRefs[i]}
           text={formatVal(values[i])}
           x={barXs[i]}
-          y={AXIS_Y - targetHeights[i] - 38}
-          fontSize={28}
+          y={valYs[i]}
+          fontSize={22}
           fontWeight={700}
+          fontFamily={'Inter, sans-serif'}
           fill={'#ffffff'}
           opacity={0}
           textAlign={'center'}
+          maxWidth={BAR_SLOT_W - 20}
         />
       ))}
     </Rect>,
   );
 
-  // ── Animation sequence ──────────────────────────────────────────────
-
-  // 1. Title fades in
   yield* tween(0.6, v => titleRef().opacity(easeInOutCubic(v)));
-
-  // 2. Axis draws in
   yield* tween(0.25, v => axisRef().opacity(easeInOutCubic(v)));
 
-  // 3. Bars grow from the axis upward, staggered
   yield* all(
     ...barRefs.map((barRef, i) =>
       chain(
@@ -148,10 +152,8 @@ export default makeScene2D('infographic', function* (view) {
     ),
   );
 
-  // 4. Value labels all fade in together
   yield* all(...valRefs.map(ref => tween(0.4, v => ref().opacity(easeInOutCubic(v)))));
 
-  // 5. Hold for the remainder of the requested duration
   const animUsed = 0.6 + 0.25 + (n - 1) * STAGGER + BAR_DUR + 0.4;
   yield* waitFor(Math.max(0, duration - animUsed));
 });

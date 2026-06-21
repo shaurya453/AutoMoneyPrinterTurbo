@@ -1,3 +1,4 @@
+import '../global.css';
 import {makeScene2D, Rect, Txt} from '@revideo/2d';
 import {all, chain, createRef, easeInOutCubic, easeOutCubic, tween, useScene, waitFor} from '@revideo/core';
 
@@ -13,12 +14,12 @@ export default makeScene2D('title-card-b', function* (view) {
 
   const hasSub = subtitle.length > 0;
 
-  // Final resting positions
-  const TITLE_Y    = hasSub ? -92 : -32;
-  const TITLE_Y_0  = TITLE_Y + 48;   // starts below, slides up
-  const RULE_Y     = hasSub ? -12 : 36;
+  // Final resting positions — more vertical breathing room
+  const TITLE_Y    = hasSub ? -120 : -40;
+  const TITLE_Y_0  = TITLE_Y + 64;   // starts below, slides up
+  const RULE_Y     = hasSub ? -22 : 48;
   const RULE_MAX_W = 500;
-  const SUB_Y      = hasSub ? 62 : 0;
+  const SUB_Y      = hasSub ? 80 : 0;
 
   const containerRef = createRef<Rect>();
   const titleRef     = createRef<Txt>();
@@ -33,6 +34,7 @@ export default makeScene2D('title-card-b', function* (view) {
         y={TITLE_Y_0}
         fontSize={86}
         fontWeight={700}
+        fontFamily={'Inter, sans-serif'}
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
@@ -52,6 +54,7 @@ export default makeScene2D('title-card-b', function* (view) {
         y={SUB_Y}
         fontSize={36}
         fontWeight={300}
+        fontFamily={'Inter, sans-serif'}
         fill={'#aaaaaa'}
         opacity={0}
         letterSpacing={3}
@@ -61,25 +64,21 @@ export default makeScene2D('title-card-b', function* (view) {
     </Rect>,
   );
 
-  // ── Animation in ──────────────────────────────────────────────────────
-  const ANIM_IN  = 1.35;
+  const ANIM_IN  = 1.40;
   const ANIM_OUT = 0.40;
 
   yield* all(
-    // Title glides up + fades in
     tween(0.70, v => {
       const t = easeOutCubic(v);
       titleRef().opacity(t);
       titleRef().y(TITLE_Y_0 + (TITLE_Y - TITLE_Y_0) * t);
     }),
-    // Rule wipes from centre outward, slight delay
     chain(
       waitFor(0.30),
       tween(0.52, v => ruleRef().width(easeInOutCubic(v) * RULE_MAX_W)),
     ),
-    // Subtitle fades in after rule appears
     ...(hasSub
-      ? [chain(waitFor(0.82), tween(0.53, v => subRef().opacity(easeOutCubic(v))))]
+      ? [chain(waitFor(0.88), tween(0.53, v => subRef().opacity(easeOutCubic(v))))]
       : []),
   );
 
