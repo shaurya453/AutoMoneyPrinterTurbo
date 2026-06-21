@@ -69,19 +69,58 @@ One sentence describing the shot — used by the CLIP relevance filter to rank a
 
 ### `content_track`
 
-- **`"named"`** — `visual_concepts[0]` names a specific identifiable entity (product/brand, person, landmark, historical event). Routes to Google Images (Serper) first. `media_type` is ignored for the primary fetch.
-- **`"broll"`** — generic scene, action, or category. Routes to stock video/image sources.
+- **`"named"`** — `visual_concepts[0]` is a specific, uniquely identifiable entity that has a real-world name. Routes to Google Images (Serper) first. `media_type` is ignored for the primary fetch.
+- **`"broll"`** — generic scene, action, category, or location type. Routes to stock video/image sources.
 - **`"graphic"`** — animated motion-graphic segment (see Graphic Cues below).
 
-**Decision rule:** if `visual_concepts[0]` is a *specific named thing*, use `"named"`. If it's a *category or scene*, use `"broll"`.
+**Decision rule:** if `visual_concepts[0]` is a *specific named thing that could be searched by name and return the right result*, use `"named"`. If it's a *category, scene, or general location type*, use `"broll"`.
+
+#### Named entity types — use `"named"` for these
+
+| Category | Examples | `visual_concepts[0]` pattern |
+|---|---|---|
+| **Person** | Elon Musk, Marie Curie, Steve Jobs, Barack Obama | `"<Full Name> portrait"` or `"<Full Name> speaking"` |
+| **Branded product / SKU** | iPhone 15 Pro, Kellogg's Corn Flakes, Nike Air Max | `"<product name>"` |
+| **Company / brand** | Tesla, Apple, NASA, OpenAI | `"<company> logo"` or `"<company> headquarters"` |
+| **Specific vehicle model** | SR-71 Blackbird, Ford Mustang GT500, Space Shuttle Challenger | `"<vehicle name>"` |
+| **Named aircraft / ship / spacecraft** | USS Enterprise, Titanic, Apollo 11 lunar module | `"<craft name>"` |
+| **Named building / structure** | Eiffel Tower, Burj Khalifa, Empire State Building | `"<building name>"` |
+| **Named location / landmark** | Times Square, Grand Canyon, Chernobyl exclusion zone | `"<landmark name>"` |
+| **Named country / city (when identity matters)** | Tokyo skyline, Vatican City, Silicon Valley campus | `"<place name> skyline"` or `"<place name> aerial"` |
+| **Historical event** | Apollo 11 moon landing, D-Day Normandy, Berlin Wall fall | `"<event name> photograph"` or `"<event name> footage"` |
+| **Named document / law / report** | Magna Carta, Declaration of Independence, GDPR regulation | `"<document name>"` |
+| **Named film / book / album / game** | Titanic 1997 film poster, Dark Side of the Moon album cover | `"<title> <medium>"` |
+| **Named scientific concept with a known diagram** | DNA double helix diagram, Periodic Table of Elements | `"<concept> diagram"` |
+| **Named organism (species with a common image)** | Giant Panda, Blue Whale, Great White Shark | `"<species name>"` — NOT combined with a commercial object |
+| **Named artwork / photograph** | Mona Lisa painting, Earthrise NASA photograph | `"<artwork name> <artist/source>"` |
+| **Logo / flag / emblem** | NASA logo, US flag, United Nations emblem | `"<entity> logo"` or `"<entity> flag"` |
+
+#### When to stay on `"broll"` instead
+
+| Scenario | Why `"broll"` | Example |
+|---|---|---|
+| Generic location type | Not a named place — no unique image exists | `"busy city street"`, `"hospital corridor"` |
+| Named place as backdrop / atmosphere | Serper returns watermarked editorial photos; b-roll reads more naturally | `"modern office interior"` instead of `"Google office"` |
+| Generic action involving a named thing | The action matters, not the specific entity | `"scientist examining sample"` not `"Marie Curie in lab"` (unless the script explicitly invokes her) |
+| Any company's generic product category | Use category b-roll unless the specific brand is being named | `"electric car charging"` instead of `"Tesla charging"` when script says "an EV" |
+| Named person doing a generic action | Only use `"named"` when their face/identity is the point | `"person giving keynote speech"` unless the speaker is the story |
+
+#### Named entity examples
 
 | Sentence | `visual_concepts[0]` | `content_track` |
 |---|---|---|
-| "I bought a box of Kellogg's Chocos" | `"Chocos cereal box"` | `"named"` |
+| "Elon Musk unveiled the Cybertruck" | `"Elon Musk portrait"` | `"named"` |
+| "Tesla dominates EV sales" | `"Tesla logo"` | `"named"` |
+| "The SR-71 flew at Mach 3.2" | `"SR-71 Blackbird aircraft"` | `"named"` |
+| "Apollo 11 touched down on the moon" | `"Apollo 11 moon landing photograph"` | `"named"` |
+| "The Eiffel Tower was built in 1889" | `"Eiffel Tower Paris"` | `"named"` |
+| "Raphaël Dubois discovered luciferase" | `"Raphaël Dubois scientist portrait"` | `"named"` |
 | "I walked through the freezer aisle" | `"frozen food aisle"` | `"broll"` |
-| "Elon Musk took the stage" | `"Elon Musk portrait"` | `"named"` |
+| "Cars lined up for miles" | `"cars in traffic jam"` | `"broll"` |
+| "A scientist worked late into the night" | `"scientist in lab at night"` | `"broll"` |
+| "The ship disappeared beneath the waves" | `"ship sinking ocean"` | `"broll"` |
 
-Don't overuse `"named"` — it spends a Serper API call. Most sentences should be `"broll"`. For `named_entity` videos, use `"named"` only when the actual entity must be literally visible; use `"broll"` for atmosphere and background shots.
+Don't overuse `"named"` — it spends a Serper API call. Most sentences (70–80%) should be `"broll"`. For `named_entity` videos, use `"named"` only when the actual entity must be literally visible; use `"broll"` for atmosphere and background shots.
 
 ### Graphic Cues
 
