@@ -15,7 +15,7 @@ from typing import Optional
 from loguru import logger
 
 _WORKER_DIR = os.path.normpath(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "revideo-worker")
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "revideo-worker")
 )
 _RENDER_JS = os.path.join(_WORKER_DIR, "render.js")
 
