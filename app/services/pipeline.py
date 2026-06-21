@@ -847,16 +847,35 @@ def start(job_path: str) -> Optional[dict]:
     # 2. Sentence timestamps via faster-whisper                           #
     # ------------------------------------------------------------------ #
     logger.info("aligning sentences with faster-whisper")
+
+    # Graphic sentences have no spoken text — exclude them from Whisper alignment,
+    # then re-insert with placeholder timestamps so the rest of the pipeline is unaffected.
+    _graphic_idxs: set = {i for i, s in enumerate(sentences) if s.get("content_track") == "graphic"}
+    _narration_sents = [s for i, s in enumerate(sentences) if i not in _graphic_idxs]
+
     word_timings: List[Tuple[str, float, float]] = []
     if os.environ.get("SKIP_WHISPER") == "1":
         logger.info("SKIP_WHISPER=1 → using uniform distribution for timings")
-        timings = _uniform_timestamps(sentences, audio_duration)
+        _narration_timings = _uniform_timestamps(_narration_sents, audio_duration)
     else:
         try:
-            timings, word_timings = _get_sentence_timestamps(audio_file, sentences)
+            _narration_timings, word_timings = _get_sentence_timestamps(audio_file, _narration_sents)
         except Exception as exc:
             logger.warning(f"whisper failed ({exc}), falling back to uniform distribution")
-            timings = _uniform_timestamps(sentences, audio_duration)
+            _narration_timings = _uniform_timestamps(_narration_sents, audio_duration)
+
+    # Re-merge graphic sentences back at their original positions with (0.0, 0.0) placeholders.
+    # Pass 1 below overrides their duration from sent["duration"].
+    timings = []
+    _narration_iter = iter(_narration_timings)
+    for _i, _s in enumerate(sentences):
+        if _i in _graphic_idxs:
+            timings.append((_s, 0.0, 0.0))
+        else:
+            try:
+                timings.append(next(_narration_iter))
+            except StopIteration:
+                timings.append((_s, audio_duration, audio_duration))
 
     # ------------------------------------------------------------------ #
     # 3. Per-sentence clip download + trim                                #
@@ -869,6 +888,17 @@ def start(job_path: str) -> Optional[dict]:
     ordered_clips: List[str] = []
     used_urls: set = set()  # tracks clip URLs used this run to prevent reuse
     total_sentences = len(timings)
+
+    # Warn early if a graphic sentence is at the very start or end — combine_videos
+    # fills only to audio_duration, so end-positioned graphics are silently dropped;
+    # start-positioned graphics consume visual time before any narration begins.
+    if timings and timings[0][0].get("content_track") == "graphic":
+        logger.warning("graphic sentence at position 0 — it will consume visual time before narration begins")
+    if timings and timings[-1][0].get("content_track") == "graphic":
+        logger.warning(
+            f"graphic sentence at position {len(timings)-1} (last) — "
+            "combine_videos fills to audio_duration; this clip will likely be dropped"
+        )
     # Video sentences: download multiple ~4-second clips to cover the sentence
     # duration without repeating footage.
     # Image sentences: capped at _IMAGE_CLIP_MAX seconds each — long sentences
@@ -925,6 +955,13 @@ def start(job_path: str) -> Optional[dict]:
         durations = [total / num_clips] * num_clips
         cum_end = start_k + total
 
+        # Graphic clips use their explicit duration, not the Whisper-derived window.
+        if sent.get("content_track") == "graphic":
+            total = float(sent.get("duration", 5.0))
+            durations = [total]
+            is_image = False
+            cum_end = start_k + total
+
         clip_plans.append({
             "sent": sent,
             "is_image": is_image,
@@ -970,13 +1007,41 @@ def start(job_path: str) -> Optional[dict]:
         sent = plan["sent"]
         durations = plan["durations"]
         is_image = plan["is_image"]
-        preview = sent["text"][:60] + ("…" if len(sent["text"]) > 60 else "")
+        preview = (sent.get("text") or sent.get("graphic_type", "graphic"))[:60]
         logger.info(
             f"[{idx+1}/{total_sentences}] {plan['sent_audio_dur']:.2f}s audio → "
             f"{len(durations)} clip(s) {'(image)' if is_image else ''} — {preview}"
         )
 
         got_any = False
+
+        # Graphic sentences are rendered by Revideo, not fetched from stock sources.
+        if sent.get("content_track") == "graphic":
+            from app.services import graphics as _graphics
+            gfx_dur = durations[0]
+            gfx_path = os.path.join(clips_dir, f"clip-{clip_counter:04d}.mp4")
+            clip_counter += 1
+            w, h = video_aspect.to_resolution()
+            rendered = _graphics.render_graphic_clip(
+                graphic_type=sent.get("graphic_type", "title_card"),
+                out_path=gfx_path,
+                duration=gfx_dur,
+                width=w,
+                height=h,
+                fps=30,
+                variables=sent.get("variables", {}),
+            )
+            if rendered:
+                ordered_clips.append(rendered)
+                got_any = True
+                obtained_duration += gfx_dur
+                video_clip_count += 1
+            else:
+                logger.warning(f"sentence {idx+1}: graphic render failed — skipping")
+            if not got_any:
+                logger.warning(f"sentence {idx+1}: skipping — no clip available")
+            continue
+
         for clip_duration in durations:
             is_image_override = None
             if is_image and sent.get("content_track", "broll") != "named":
@@ -1071,7 +1136,7 @@ def start(job_path: str) -> Optional[dict]:
             logger.warning(
                 f"gap-fill exhausted after {attempts} attempts — still "
                 f"{audio_duration - obtained_duration:.2f}s short; the outro "
-                f"freeze-frame will cover the remainder without repeating footage"
+                f"outro loop will cover the remainder without repeating footage"
             )
         else:
             logger.info(f"gap-fill complete: {obtained_duration:.2f}s obtained")
@@ -1116,62 +1181,49 @@ def start(job_path: str) -> Optional[dict]:
     except Exception:
         combined_duration = 0.0
 
-    # combine_videos() may overshoot audio_duration when clip count exceeds the
-    # xfade limit (40 clips) and falls back to plain concat — the assumed crossfade
-    # overlap never materialises so combined ends up longer than expected.
-    # Trim it back to audio_duration before the outro step so the final video
-    # does not play silent footage after the narration ends.
-    if combined_duration > audio_duration + 0.5:
+    outro_tail = 2.0
+    target_duration = audio_duration + outro_tail
+    _ENC = ["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-r", "30", "-threads", "4"]
+
+    # Trim if the combined video overshoots audio + outro buffer.  Keep the
+    # extra outro_tail seconds of real footage so the fade-out plays on live
+    # content rather than a frozen frame.
+    if combined_duration > target_duration + 0.5:
         logger.info(
-            f"combined ({combined_duration:.2f}s) overshoots audio ({audio_duration:.2f}s); trimming"
+            f"combined ({combined_duration:.2f}s) overshoots target ({target_duration:.2f}s); trimming"
         )
-        _ENC_TRIM = ["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-r", "30", "-threads", "4"]
         trimmed_path = os.path.join(temp_dir, "combined_trimmed.mp4")
         try:
             subprocess.run(
                 [
                     "ffmpeg", "-y", "-loglevel", "error",
                     "-i", combined_path,
-                    "-t", f"{audio_duration:.3f}",
-                    *_ENC_TRIM, "-an", trimmed_path,
+                    "-t", f"{target_duration:.3f}",
+                    *_ENC, "-an", trimmed_path,
                 ],
                 check=True, capture_output=True, timeout=300,
             )
             if os.path.exists(trimmed_path):
                 os.replace(trimmed_path, combined_path)
-                combined_duration = audio_duration
+                combined_duration = target_duration
         except Exception as exc:
-            logger.warning(f"trim overshoot failed ({exc}); proceeding with overshooted combined")
+            logger.warning(f"trim failed ({exc}); proceeding with overshooted combined")
 
-    # Extend the combined video with a freeze of the last frame so the ending
-    # has a clean hold before the FadeOut in generate_video.  The outro covers
-    # any remaining gap to fill the full VO, plus a 2 s tail that will fade to
-    # black in generate_video (FadeOut 1.5 s).
-    outro_tail = 2.0
-    needed_extra = max(outro_tail, audio_duration - combined_duration + outro_tail)
     extended_path = os.path.join(temp_dir, "extended.mp4")
-    outro_path = os.path.join(temp_dir, "outro.mp4")
-    _ENC = ["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-r", "30", "-threads", "4"]
-    # PRIMARY: freeze last frame via tpad — no loop restart, no stutter.
-    try:
-        subprocess.run(
-            [
-                "ffmpeg", "-y", "-loglevel", "error",
-                "-i", combined_path,
-                "-vf", f"tpad=stop_mode=clone:stop_duration={needed_extra:.3f}",
-                *_ENC, "-an", extended_path,
-            ],
-            check=True, capture_output=True, timeout=300,
-        )
+    needed_extra = target_duration - combined_duration
+
+    if needed_extra <= 0.05:
+        # Combined already covers audio + outro tail with real footage.
+        extended_path = combined_path
         logger.info(
-            f"outro: freeze-frame {needed_extra:.2f}s → "
-            f"extended={combined_duration + needed_extra:.2f}s (audio={audio_duration}s)"
+            f"outro: combined ({combined_duration:.2f}s) covers audio+tail ({target_duration:.2f}s) — no extension needed"
         )
-    except Exception as exc:
-        logger.warning(f"outro tpad failed ({exc}), falling back to last-clip loop")
-        # FALLBACK: loop the last clip.
+    else:
+        # Gap to fill: loop the last clip so the outro plays live footage
+        # rather than a frozen frame, then fade to black in generate_video.
+        outro_path = os.path.join(temp_dir, "outro.mp4")
+        last_clip = ordered_clips[-1]
         try:
-            last_clip = ordered_clips[-1]
             subprocess.run(
                 [
                     "ffmpeg", "-y", "-loglevel", "error",
@@ -1193,7 +1245,12 @@ def start(job_path: str) -> Optional[dict]:
                 ],
                 check=True, capture_output=True, timeout=300,
             )
-        except Exception:
+            logger.info(
+                f"outro: looped last clip {needed_extra:.2f}s → "
+                f"extended={combined_duration + needed_extra:.2f}s (audio={audio_duration}s)"
+            )
+        except Exception as exc:
+            logger.warning(f"outro loop failed ({exc}), using combined as-is")
             extended_path = combined_path
 
     # ------------------------------------------------------------------ #

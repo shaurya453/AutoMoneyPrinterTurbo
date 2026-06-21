@@ -238,8 +238,9 @@ Named-entity queries always anchor to the subject — variety comes from differe
 
 ### `content_track`
 
-Every sentence has a `content_track`: `"named"` or `"broll"` (default
-`"broll"` if omitted).
+Every sentence has a `content_track`: `"named"`, `"broll"` (default
+`"broll"` if omitted), or `"graphic"` (animated motion-graphic segment —
+see [Graphic Cues](#graphic-cues-content_track-graphic) below).
 
 - **`"named"`** — this sentence's `visual_concepts[0]` names a **specific,
   identifiable entity**: a named product/brand/SKU, a named person, a named
@@ -293,6 +294,141 @@ where any similar footage communicates the idea equally well.
 | `named_entity` (Ferrari 250 GTO) | "the factory workshop smelled of oil and metal" | any vintage workshop | `"broll"` |
 | `thematic` | "I bought a box of Kellogg's Chocos" | the specific product box | `"named"` |
 | `thematic` | "I walked through the freezer aisle" | any freezer aisle | `"broll"` |
+
+### Graphic Cues (`content_track: "graphic"`)
+
+A third `content_track` value marks a sentence slot as a **full-frame animated graphic** rendered by the pipeline's motion-graphics engine. Unlike `"broll"` and `"named"` sentences, graphic sentences:
+
+- Have **no narration** — `text` is empty (`""`), and the slot corresponds to nothing in `video_script`
+- Are **pre-planned by you** at enrichment time — you decide where graphic moments belong in the clip sequence
+- Produce a self-contained MP4 clip (title card, section divider, etc.) that slots into the clip list exactly like any footage clip
+
+**Required fields:**
+
+| Field | Value |
+|---|---|
+| `text` | `""` — empty string, no narration for this slot |
+| `content_track` | `"graphic"` |
+| `graphic_type` | which scene to render — see table below |
+| `duration` | clip length in seconds as a float |
+| `variables` | key/value object specific to the `graphic_type` |
+
+**DO NOT** include the graphic slot's content in `video_script`. `video_script` is the narration text only — graphic slots are purely visual and carry no spoken words.
+
+**Current `graphic_type` values:**
+
+| `graphic_type` | What it renders | Required `variables` | Optional `variables` |
+|---|---|---|---|
+| `"title_card"` | Animated title + subtitle fade-in on a dark background | `title` (string) | `subtitle` (string) |
+| `"infographic"` | Animated bar chart with staggered bar growth and value labels | `title` (string), `labels` (string[]), `values` (number[]) | `unit` (string — appended after each value, e.g. `"%"`, `"Gt"`, `"B"`) |
+| `"transition"` | Section divider: accent line grows then section label fades in, full scene fades out | `label` (string) | `sublabel` (string) |
+
+**Duration guidance:**
+
+| `graphic_type` | Recommended duration |
+|---|---|
+| `"title_card"` | 4–7 seconds (`5.0` is a safe default) |
+| `"infographic"` | 8–12 seconds — bars animate for ~2.5s, then hold; `10.0` works well for 4–6 bars |
+| `"transition"` | 2.5–4 seconds — scene animates in (~0.75s), holds, then fades out (0.35s). `3.0` is the default. |
+
+**When to insert a graphic cue:**
+
+| Trigger | `graphic_type` | Rule |
+|---|---|---|
+| A sentence states a single powerful, quotable fact | `"title_card"` | The claim becomes the `title` variable (≤10 words). Insert immediately **before** that sentence. **Never at the start or end of the video.** |
+| A sentence compares ≥2 entities with specific numbers or percentages | `"infographic"` | Extract the comparison as `labels`/`values`. Insert immediately **before** that sentence. |
+| The script has a major section break — shift in time, location, or narrative phase | `"transition"` | `label` is the section name (≤4 words: `"Chapter Two"`, `"2019"`, `"The Aftermath"`). `sublabel` adds context (≤6 words: `"Five years later"`, `"London, UK"`). Insert immediately **before** the first sentence of the new section. |
+
+**Do not add a title card at the opening of the video.** Title cards exist to visually stress a specific mid-video claim — not as an intro slate. An opening title card will be rejected by the review pass.
+
+**Placement:** insert the graphic entry immediately before the corresponding narration sentence in the `sentences` array. The graphic plays while the narrator is making that point; the regular broll for that sentence follows directly after.
+
+**Budget:** 0–2 graphic entries per video. A video with 3+ graphics feels like a slide deck. If you find yourself wanting many, use 0 instead — only add one if it is clearly the single most impactful moment in the script.
+
+**Example — title card stressing a key claim:**
+
+```jsonc
+// Sentence: "For the first time in history, fewer than 700 million people live in extreme poverty."
+// → Title card immediately before it:
+{
+  "text": "",
+  "content_track": "graphic",
+  "graphic_type": "title_card",
+  "duration": 5.0,
+  "variables": {
+    "title": "Under 700 million in extreme poverty",
+    "subtitle": "A historic first"
+  }
+},
+{
+  "text": "For the first time in history, fewer than 700 million people live in extreme poverty.",
+  "content_track": "broll",
+  "media_type": "video",
+  ...
+}
+```
+
+**Example — bar chart infographic (comparative data):**
+
+```jsonc
+{
+  "text": "",
+  "content_track": "graphic",
+  "graphic_type": "infographic",
+  "duration": 10.0,
+  "variables": {
+    "title": "Top CO₂ Emitters (2022)",
+    "labels": ["China", "USA", "India", "Russia", "Japan"],
+    "values": [10.1, 4.5, 2.7, 1.8, 1.1],
+    "unit": "Gt"
+  }
+}
+```
+
+**Example — section transition:**
+
+```jsonc
+// The script shifts from "The Rise" section to "The Collapse" section.
+// → Insert immediately before the first sentence of the new section:
+{
+  "text": "",
+  "content_track": "graphic",
+  "graphic_type": "transition",
+  "duration": 3.0,
+  "variables": {
+    "label": "The Collapse",
+    "sublabel": "2008"
+  }
+},
+{
+  "text": "Within months, the market had lost half its value.",
+  "content_track": "broll",
+  ...
+}
+```
+
+**Transition label guidelines:**
+- `label`: section name or time marker, ≤4 words, title case (`"Chapter Two"`, `"The Aftermath"`, `"2019"`)
+- `sublabel`: brief context ≤6 words, lower case (`"five years later"`, `"London, UK"`, `"the turning point"`) — or omit entirely
+- Use a transition only when the narrative clearly pivots; not for every paragraph break
+
+**Infographic data guidelines:**
+- **2–8 bars** — fewer than 2 is not a chart; more than 8 becomes too cramped to read on screen
+- `labels` and `values` must be the same length
+- `values` must be positive numbers — the tallest bar always fills the full chart height; other bars scale proportionally
+- `unit` is optional — leave blank for dimensionless counts (`"unit": ""`) or include a short SI unit (`"Gt"`, `"%"`, `"B"`, `"k"`)
+- The `title` should name the metric AND the year/scope, e.g. `"Global EV Sales (M units, 2023)"` not just `"EV Sales"`
+
+**Review checklist for graphic cues:**
+- Is `text` empty for every graphic entry? (Must not be copied from the narration)
+- Is every graphic entry placed immediately **before** its corresponding narration sentence — not at the start or end of the video?
+- `title_card`: Does `title` capture the specific claim in ≤10 words? Is it a genuinely quotable standalone fact, not just "an interesting sentence"?
+- `infographic`: Are `labels` and `values` arrays the same length? Do the numbers match exactly what the narrator says?
+- `transition`: Is `label` ≤4 words? Does a real narrative pivot exist here — not just a topic shift between sentences?
+- Is `duration` within the recommended range for the type?
+- Is the total count of graphic entries ≤3 for the whole video (combining all types)? If more, cut to the most impactful ones.
+
+---
 
 ### `motif_palette` and `assigned_motif` (thematic videos only)
 
@@ -437,6 +573,7 @@ automatically.
   ],
 
   "sentences": [
+    // ── Narration sentence (broll / named) ──────────────────────────────────
     {
       "text": "The sentence as it appears in the script.",
       "visual_concepts": ["concrete scene description", "broader local idea"],  // YOU write these — 1-3 subject-free local visual ideas, specific → broad, concrete and self-sufficient (see below)
@@ -551,25 +688,28 @@ The path to `final.mp4` is printed as JSON to stdout on success.
 ## Pipeline Internals (for debugging)
 
 ```
-TTS (edge_tts)
+TTS (edge_tts) — only narration sentences (content_track ≠ "graphic")
   └─► audio.mp3
-        └─► faster-whisper (base, cpu) → per-sentence timestamps
+        └─► faster-whisper (base, cpu) → per-sentence timestamps (narration only)
               └─► for each sentence:
-                    ├─ build query ladder:
-                    │     named_entity: ["{concept} {topic}" for each concept] + [topic]
-                    │     thematic:     [concept, "{concept} {topic}" for each concept] + [topic]
+                    ├─ content_track = "graphic"
+                    │     → Revideo (Node.js, headless Chromium) renders animated MP4
+                    │     → clip placed directly in temp/clips/ — no NSFW/relevance checks
+                    │     └─ render fails → slot skipped
                     ├─ content_track = "named"
-                    │     → Google Images (Serper) → DuckDuckGo → Wikimedia → Pexels → Pixabay → Unsplash, per query ladder
+                    │     → build query ladder (always appends video_topic)
+                    │     → Google Images (Serper) → DuckDuckGo → Wikimedia → Pexels → Pixabay → Unsplash
                     │     → each candidate downloaded, NSFW-gated, relevance-margin checked
                     │     └─ nothing passes → fall back to video using the same query ladder (broll sources)
                     └─ content_track = "broll" (default)
+                          ├─ build query ladder (thematic: bare concept first; named_entity: topic always appended)
                           ├─ media_type = "video" → Pexels/Pixabay video search per query ladder
                           │     → each candidate downloaded, NSFW-gated, relevance-margin checked
                           │     └─ nothing passes → fall back to image (same query ladder, broll image sources)
                           └─ media_type = "image" → DuckDuckGo/Wikimedia/Pexels/Pixabay/Unsplash per query ladder
                                 → same NSFW + relevance-margin checks → Ken Burns render
                                 └─ nothing passes → fall back to video (same query ladder)
-                    (all directions dedupe against used_urls from earlier sentences;
+                    (broll/named: all directions dedupe against used_urls from earlier sentences;
                      accepted clips also checked against a CLIP-embedding deque
                      of the last N shots — near-duplicates rejected for variety;
                      if everything still fails, the topic-wide pool of every
@@ -644,3 +784,16 @@ never overrides it.
 - **Writing a vague or generic `visual_caption`** (e.g. `"a video clip"`, `"relevant footage"`) — it must describe a specific shot, or it can't distinguish good candidates from bad ones
 - **Treating `visual_caption` as a copy of `visual_concepts[0]`** — the caption describes the *shot* (composition, subject, setting), not a search query
 - **Leaving `bgm_search_term` blank on emotional content** — music significantly improves impact
+- **Including graphic slot text in `video_script`** — `video_script` is narration only; graphic sentences have `text: ""` and no corresponding spoken words
+- **Setting `text` to the title card's headline** — the `title` lives in `variables.title`, not in `text`; `text` must always be `""` for graphic sentences
+- **Adding a title card at the start of the video** — title cards are for stressing a specific mid-video claim, never for introducing the video
+- **Adding a title card at the end of the video** — same rule; the outro is handled by the pipeline's fade-out, not a graphic
+- **Adding a title card for a merely interesting sentence** — the bar is high: the claim must be quotable, specific, and impactful enough to warrant stopping the footage for 5 seconds. When in doubt, don't.
+- **Writing `subtitle` as a full sentence** — it should be a short tagline (3–6 words), not a description or summary
+- **Using an infographic for a single statistic** — one number does not need a bar chart; use a title card instead. Infographics are for comparisons (≥2 labeled values)
+- **Using a transition for every topic shift** — transitions are for major structural breaks (time jump, location change, narrative phase change), not for paragraph-level topic changes within a section
+- **Writing a transition `label` longer than 4 words** — it's a section marker, not a sentence; "The Long Road to Recovery" is too long, "The Recovery" is correct
+- **Adding a transition at the very start or end of the video** — same rule as title cards; the pipeline's own fade-in/fade-out handles the video edges
+- **`labels` and `values` arrays of different lengths** — the infographic renderer clips to `min(len(labels), len(values))`; mismatches are a data error, not a graceful fallback
+- **More than 8 bars in an infographic** — labels become too small to read; split into two separate infographic sentences if you have more categories
+- **Putting the statistic sentence in both `video_script` and as a graphic** — the graphic *replaces* the narration clip for that moment; it does NOT add new narration. Keep the statistic in `video_script` so the narrator reads it; the infographic just makes it visual. The graphic sentence has `text: ""` and belongs in `sentences` only, not `video_script`
