@@ -997,7 +997,7 @@ def start(job_path: str) -> Optional[dict]:
     # Soft cap on the fraction of clips that may come from still images —
     # backstops the enrichment agent's media_type choices regardless of how
     # well it followed AGENT_GUIDE.md's image-ratio guidance.
-    max_image_ratio = float(job.get("max_image_ratio", config.app.get("max_image_ratio", 0.25)))
+    max_image_ratio = float(job.get("max_image_ratio", config.app.get("max_image_ratio", 1.0)))
     image_clip_count = 0
     video_clip_count = 0
 

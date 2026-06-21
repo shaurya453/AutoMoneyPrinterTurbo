@@ -243,11 +243,7 @@ Add `"style": "<name>"` to request a specific variant. Unknown names fall back t
 
 ### `media_type`
 
-- **`video_type: "thematic"`** — default `"video"`. Keep images ≤25% of sentences.
-- **`video_type: "named_entity"`** — default `"image"`. Stock video rarely carries the specific entity.
-
-`media_type` is a preference — if the chosen type finds nothing, the pipeline retries with the other.
-`media_type` is ignored for `content_track: "named"` sentences (always image via Serper first).
+Per-sentence preference (`"video"` or `"image"`). If the preferred type finds nothing, the pipeline retries with the other. Ignored for `content_track: "named"` (always image via Serper first).
 
 | Use `"image"` for | Use `"video"` for |
 |---|---|
@@ -255,8 +251,23 @@ Add `"style": "<name>"` to request a specific variant. Unknown names fall back t
 | Named people (portraits) | Landmarks used as backdrop |
 | Logos, screenshots, documents | Generic action (walking, traffic) |
 | Maps, artworks, historical photos | Processes (manufacturing, surgery) |
+| Microscopy, diagrams, archival stills | Nature in motion, machinery, crowds |
 
 For places the narration is *set in or passing through*, use `"broll"` + `"video"` — a real storefront photo is usually watermarked; generic store interior video reads naturally as b-roll.
+
+### `max_image_ratio` (job root)
+
+Controls how much of the video can be still images. Set this at the job root based on content type — there is no pipeline-level cap; the agent's value is the only constraint.
+
+| Content type | `max_image_ratio` | Rationale |
+|---|---|---|
+| Historical / archival (events, people, eras) | `1.0` | Best material is photographs; video b-roll would be generic filler |
+| Scientific / nature documentary | `1.0` | Microscopy, diagrams, wildlife stills often beat generic b-roll |
+| General thematic / explainer | `0.6` | Mix of b-roll and stills; video keeps it dynamic |
+| Lifestyle / travel / action | `0.3` | Motion is the point; images feel static |
+| Named entity (product, brand, person) | `1.0` | Default is already image; Serper delivers them |
+
+These are starting points — adjust within a job if a particular section is unusually image-heavy or video-heavy. The ratio is enforced as a soft cap: when exceeded, the pipeline retries that clip as video before falling back to image.
 
 ---
 
@@ -268,6 +279,7 @@ For places the narration is *set in or passing through*, use `"broll"` + `"video
   "video_script": "Full narration only — no graphic text",
   "video_topic": "ultra-processed food industry",
   "video_type": "thematic",
+  "max_image_ratio": 0.6,                                 // set per content type — see media_type section
   "motif_palette": ["ATM machine cash withdrawal", ...],  // thematic only
 
   "sentences": [
@@ -338,7 +350,7 @@ Re-read the entire sentences list as a quality audit:
 - Does any `visual_concepts` entry repeat `video_topic`'s own words? It shouldn't.
 - Do `[1]`/`[2]` get progressively broader than `[0]`, or are they near-duplicates?
 - Is every specific named product/person/place marked `"named"`? Is every generic scene `"broll"`?
-- Are images ≤25% of total sentences? If over, revisit borderline calls.
+- Is `max_image_ratio` set at the job root and appropriate for the content type?
 - **Motif-rotation check**: are any two consecutive sentences assigned the same motif? Swap if so.
 - **Graphic review**: Pattern 1 has `text: ""` and `duration` set; Pattern 2 has real `text`, no `duration`, and `visual_concepts`/`visual_caption` set. Total ≤5 graphic entries.
 - **Chapter heading check**: scan `video_script` for lines that look like headings (all-caps, "CHAPTER", "PART", "SECTION", numbered acts). Each one must have `graphic_type: "title_card"` set (Pattern 2) on its sentence entry — it must remain in `video_script` and keep its `text` so TTS speaks it.
