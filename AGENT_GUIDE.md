@@ -295,55 +295,132 @@ where any similar footage communicates the idea equally well.
 | `thematic` | "I bought a box of Kellogg's Chocos" | the specific product box | `"named"` |
 | `thematic` | "I walked through the freezer aisle" | any freezer aisle | `"broll"` |
 
-### Graphic Cues (`content_track: "graphic"`)
+### Graphic Cues — two patterns
 
-A third `content_track` value marks a sentence slot as a **full-frame animated graphic** rendered by the pipeline's motion-graphics engine. Unlike `"broll"` and `"named"` sentences, graphic sentences:
+The pipeline can render full-frame animated graphics (title cards, infographics, transitions) in two distinct modes. Choose the right pattern for each use case.
 
-- Have **no narration** — `text` is empty (`""`), and the slot corresponds to nothing in `video_script`
-- Are **pre-planned by you** at enrichment time — you decide where graphic moments belong in the clip sequence
-- Produce a self-contained MP4 clip (title card, section divider, etc.) that slots into the clip list exactly like any footage clip
+---
+
+#### Pattern 1 — Structural graphic (silent, standalone)
+
+A dedicated sentence slot with **no narration**. The graphic plays in its own time window, not tied to any spoken sentence. Use for section dividers (`transition`) and for title cards / infographics that need to breathe on their own without a narrator speaking over them.
 
 **Required fields:**
 
 | Field | Value |
 |---|---|
-| `text` | `""` — empty string, no narration for this slot |
+| `text` | `""` — empty string; no narration for this slot |
 | `content_track` | `"graphic"` |
 | `graphic_type` | which scene to render — see table below |
 | `duration` | clip length in seconds as a float |
 | `variables` | key/value object specific to the `graphic_type` |
 
-**DO NOT** include the graphic slot's content in `video_script`. `video_script` is the narration text only — graphic slots are purely visual and carry no spoken words.
+**DO NOT** include the graphic slot's content in `video_script`. `video_script` is narration only — structural graphic slots have no spoken words.
 
-**Current `graphic_type` values:**
+---
+
+#### Pattern 2 — Narrated graphic (plays during VO)
+
+The graphic plays **as the visual for a narration sentence** — the narrator speaks continuously while the graphic is on screen. The graphic's duration is derived automatically from Whisper timestamps (the exact span of that sentence in the audio); you do **not** set a `duration` field.
+
+Use this when the graphic directly illustrates what the narrator is saying at that moment — an infographic that visualises the numbers the narrator is reciting, or a title card that frames the claim the narrator is stating.
+
+**Required fields:**
+
+| Field | Value |
+|---|---|
+| `text` | the narration sentence (non-empty, same as `video_script`) |
+| `content_track` | `"broll"` (or `"named"`) — normal routing |
+| `graphic_type` | which scene to render — see table below |
+| `variables` | key/value object specific to the `graphic_type` |
+| `visual_concepts` | still required — used as **footage fallback** if the render fails |
+| `visual_caption` | still required — footage fallback |
+
+**Do NOT set `duration`** for narrated graphics — the pipeline derives it from the sentence's Whisper timestamp span.
+
+If the Revideo render fails for any reason, the pipeline automatically falls back to fetching stock footage using `visual_concepts`, so the sentence always has a visual.
+
+**Example — infographic playing while the narrator recites the numbers:**
+
+```jsonc
+{
+  "text": "In 2023, China led the world with 8.1 million EVs sold, followed by Europe at 3.2 million and the US at 1.4 million.",
+  "content_track": "broll",
+  "graphic_type": "infographic",
+  "variables": {
+    "title": "Global EV Sales (M units, 2023)",
+    "labels": ["China", "Europe", "USA"],
+    "values": [8.1, 3.2, 1.4],
+    "unit": "M units"
+  },
+  "visual_concepts": ["electric vehicle factory production line", "EV assembly plant"],
+  "visual_caption": "rows of electric cars on a modern assembly line"
+}
+```
+
+**When to prefer Pattern 2 over Pattern 1:**
+- The sentence **is** the data — the narrator recites the numbers and the infographic shows them simultaneously. No need for a silent pre-graphic slot.
+- A title card underscores a claim the narrator is making right now, not a claim they are about to make.
+- You want the animation running **in sync with the VO**, not before or after it.
+
+**When to stick with Pattern 1:**
+- `transition` — section dividers always play in silence; they mark a structural break, not an illustrative moment.
+- Infographics or title cards that need more time than the sentence's audio span (e.g. complex charts that need 10 s but the sentence is only 6 s).
+- Any graphic that should appear before the narrator reaches that point.
+
+**Supported `graphic_type` values:**
 
 | `graphic_type` | What it renders | Required `variables` | Optional `variables` |
 |---|---|---|---|
-| `"title_card"` | Animated title + subtitle fade-in on a dark background | `title` (string) | `subtitle` (string) |
-| `"infographic"` | Animated bar chart with staggered bar growth and value labels | `title` (string), `labels` (string[]), `values` (number[]) | `unit` (string — appended after each value, e.g. `"%"`, `"Gt"`, `"B"`) |
-| `"transition"` | Section divider: accent line grows then section label fades in, full scene fades out | `label` (string) | `sublabel` (string) |
+| `"title_card"` | Animated title on a dark background | `title` (string, ≤10 words) | `subtitle` (string), `style` |
+| `"infographic"` | Animated chart with value labels | `title` (string), `labels` (string[]), `values` (number[]) | `unit` (string), `style` |
+| `"transition"` | Section divider that fades in and out | `label` (string, ≤4 words) | `sublabel` (string), `style` |
+| `"list"` | Bullet or numbered list of items | `items` (string[], 2–6 items) | `title` (string), `style` |
 
-**Duration guidance:**
+**Duration guidance (Pattern 1 only — Pattern 2 derives duration from Whisper):**
 
 | `graphic_type` | Recommended duration |
 |---|---|
-| `"title_card"` | 4–7 seconds (`5.0` is a safe default) |
-| `"infographic"` | 8–12 seconds — bars animate for ~2.5s, then hold; `10.0` works well for 4–6 bars |
-| `"transition"` | 2.5–4 seconds — scene animates in (~0.75s), holds, then fades out (0.35s). `3.0` is the default. |
+| `"title_card"` | 4–7 s (`5.0` default) |
+| `"infographic"` | 8–12 s — `10.0` works well for 4–6 bars; `8.0` for 2–3 |
+| `"transition"` | 2.5–4 s — `3.0` default |
+| `"list"` | 6 s for 2–3 items; 8 s for 4–5 items; 10 s for 6 items |
+
+**Style hint — `style` field (optional on any graphic sentence):**
+
+The pipeline automatically rotates through visual variants so no two consecutive graphics of the same type look the same. If you want a specific aesthetic for a topic or tone, add `"style": "<name>"` to the graphic sentence. Unknown style names fall back to rotation.
+
+| `graphic_type` | `style` value | What you get |
+|---|---|---|
+| `title_card` | `"minimal"` | Simple fade-in, centred — clean, neutral |
+| `title_card` | `"kinetic"` | Title glides upward, white rule wipe — energetic |
+| `title_card` | `"framed"` | Left vertical bar frames the title — structural |
+| `title_card` | `"editorial"` | Gold rule, title slides from right — serious/journalistic |
+| `infographic` | `"bars"` | Vertical bar chart |
+| `infographic` | `"horizontal"` | Horizontal bar chart — better for long labels |
+| `infographic` | `"lollipop"` | Lollipop (stem + dot) chart — elegant for 3–5 items |
+| `infographic` | `"callouts"` | Large counting numbers, no axes — best for 2–3 big stats |
+| `transition` | `"line"` | Accent line grows from centre |
+| `transition` | `"sweep"` | Dark panel sweeps across screen — dramatic |
+| `transition` | `"brackets"` | Corner brackets frame the label — precise/technical |
+| `transition` | `"crosshair"` | Thin crosshair from centre — clinical/analytical |
+| `list` | `"bullets"` | Coloured square bullets, slides from left |
+| `list` | `"numbered"` | Cyan number prefix, slides from right — use when order matters |
 
 **When to insert a graphic cue:**
 
 | Trigger | `graphic_type` | Rule |
 |---|---|---|
-| A sentence states a single powerful, quotable fact | `"title_card"` | The claim becomes the `title` variable (≤10 words). Insert immediately **before** that sentence. **Never at the start or end of the video.** |
-| A sentence compares ≥2 entities with specific numbers or percentages | `"infographic"` | Extract the comparison as `labels`/`values`. Insert immediately **before** that sentence. |
-| The script has a major section break — shift in time, location, or narrative phase | `"transition"` | `label` is the section name (≤4 words: `"Chapter Two"`, `"2019"`, `"The Aftermath"`). `sublabel` adds context (≤6 words: `"Five years later"`, `"London, UK"`). Insert immediately **before** the first sentence of the new section. |
+| A sentence states a single powerful, quotable fact | `"title_card"` | The claim → `title` (≤10 words). **Never at start or end of video.** |
+| A sentence compares ≥2 entities with specific numbers or percentages | `"infographic"` | Extract as `labels`/`values`. Prefer Pattern 2 (narrated). |
+| A sentence lists 2–6 distinct items, features, or steps | `"list"` | Items → `items` array. Prefer Pattern 2 when narrator reads the items aloud. |
+| The script has a major structural break — time jump, location change, or phase shift | `"transition"` | `label` ≤4 words. Always Pattern 1. |
 
-**Do not add a title card at the opening of the video.** Title cards exist to visually stress a specific mid-video claim — not as an intro slate. An opening title card will be rejected by the review pass.
+**Do not add a title card at the opening of the video.** Title cards stress a mid-video claim — not an intro slate.
 
-**Placement:** insert the graphic entry immediately before the corresponding narration sentence in the `sentences` array. The graphic plays while the narrator is making that point; the regular broll for that sentence follows directly after.
+**Placement:** insert the graphic entry immediately before (Pattern 1) or directly on (Pattern 2) the corresponding narration sentence in the `sentences` array.
 
-**Budget:** 0–2 graphic entries per video. A video with 3+ graphics feels like a slide deck. If you find yourself wanting many, use 0 instead — only add one if it is clearly the single most impactful moment in the script.
+**Budget:** 0–3 graphic entries per video (all types combined, both patterns). If you find yourself wanting more, cut to the most impactful ones only.
 
 **Example — title card stressing a key claim:**
 
@@ -420,13 +497,14 @@ A third `content_track` value marks a sentence slot as a **full-frame animated g
 - The `title` should name the metric AND the year/scope, e.g. `"Global EV Sales (M units, 2023)"` not just `"EV Sales"`
 
 **Review checklist for graphic cues:**
-- Is `text` empty for every graphic entry? (Must not be copied from the narration)
-- Is every graphic entry placed immediately **before** its corresponding narration sentence — not at the start or end of the video?
-- `title_card`: Does `title` capture the specific claim in ≤10 words? Is it a genuinely quotable standalone fact, not just "an interesting sentence"?
-- `infographic`: Are `labels` and `values` arrays the same length? Do the numbers match exactly what the narrator says?
-- `transition`: Is `label` ≤4 words? Does a real narrative pivot exist here — not just a topic shift between sentences?
-- Is `duration` within the recommended range for the type?
-- Is the total count of graphic entries ≤3 for the whole video (combining all types)? If more, cut to the most impactful ones.
+- **Pattern 1 (structural):** Is `text` empty? Is `duration` set within the recommended range? Is it placed before the relevant sentence — not at the very start or end of the video?
+- **Pattern 2 (narrated):** Is `text` the real narration sentence (non-empty)? Is `duration` absent? Are `visual_concepts` and `visual_caption` set for the footage fallback?
+- `title_card`: Does `title` capture the specific claim in ≤10 words? Is it a genuinely quotable standalone fact?
+- `infographic`: Are `labels` and `values` arrays the same length? Do the numbers match exactly what the narrator says? (Use `"callouts"` style for 2–3 stand-alone stats; use bar styles for comparisons of 4+ items.)
+- `list`: Does `items` have 2–6 entries? If narrator reads the list aloud, prefer Pattern 2. If order matters, add `"style": "numbered"`.
+- `transition`: Is `label` ≤4 words? Does a real narrative pivot exist here — not just a topic shift between sentences? (Always Pattern 1.)
+- `style`: If set, does the style name exist in the table above for this type?
+- Is the total count of graphic entries ≤3 for the whole video (combining all types and both patterns)? If more, cut to the most impactful ones.
 
 ---
 
@@ -790,7 +868,8 @@ never overrides it.
 - **Adding a title card at the end of the video** — same rule; the outro is handled by the pipeline's fade-out, not a graphic
 - **Adding a title card for a merely interesting sentence** — the bar is high: the claim must be quotable, specific, and impactful enough to warrant stopping the footage for 5 seconds. When in doubt, don't.
 - **Writing `subtitle` as a full sentence** — it should be a short tagline (3–6 words), not a description or summary
-- **Using an infographic for a single statistic** — one number does not need a bar chart; use a title card instead. Infographics are for comparisons (≥2 labeled values)
+- **Using an infographic for a single statistic** — one number does not need a bar chart; use a `title_card` or `list` with one item instead. Infographics are for comparisons (≥2 labeled values)
+- **Using a `list` for two items that differ numerically** — if you have two entities with measurable values, an `infographic` (style `"callouts"` or `"horizontal"`) communicates the comparison better than a plain list
 - **Using a transition for every topic shift** — transitions are for major structural breaks (time jump, location change, narrative phase change), not for paragraph-level topic changes within a section
 - **Writing a transition `label` longer than 4 words** — it's a section marker, not a sentence; "The Long Road to Recovery" is too long, "The Recovery" is correct
 - **Adding a transition at the very start or end of the video** — same rule as title cards; the pipeline's own fade-in/fade-out handles the video edges

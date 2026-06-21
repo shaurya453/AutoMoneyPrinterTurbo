@@ -1030,6 +1030,7 @@ def start(job_path: str) -> Optional[dict]:
                 height=h,
                 fps=30,
                 variables=sent.get("variables", {}),
+                style=sent.get("style"),
             )
             if rendered:
                 ordered_clips.append(rendered)
@@ -1041,6 +1042,38 @@ def start(job_path: str) -> Optional[dict]:
             if not got_any:
                 logger.warning(f"sentence {idx+1}: skipping — no clip available")
             continue
+
+        # Narrated graphic — sentence has real VO text AND graphic_type set.
+        # Render a Revideo clip sized to the full Whisper-derived sentence duration
+        # instead of fetching stock footage.  If the render fails, falls through to
+        # the normal footage fetch so the sentence is never left visually empty.
+        if sent.get("graphic_type") and sent.get("text"):
+            from app.services import graphics as _graphics
+            gfx_dur = sum(durations)   # full sentence visual span from Whisper
+            gfx_path = os.path.join(clips_dir, f"clip-{clip_counter:04d}.mp4")
+            clip_counter += 1
+            w, h = video_aspect.to_resolution()
+            rendered = _graphics.render_graphic_clip(
+                graphic_type=sent["graphic_type"],
+                out_path=gfx_path,
+                duration=gfx_dur,
+                width=w,
+                height=h,
+                fps=30,
+                variables=sent.get("variables", {}),
+                style=sent.get("style"),
+            )
+            if rendered:
+                ordered_clips.append(rendered)
+                got_any = True
+                obtained_duration += gfx_dur
+                video_clip_count += 1
+                continue  # graphic is the visual — skip footage fetch
+            else:
+                logger.warning(
+                    f"sentence {idx+1}: narrated graphic render failed — falling back to footage"
+                )
+                # Fall through to footage fetch below
 
         for clip_duration in durations:
             is_image_override = None
