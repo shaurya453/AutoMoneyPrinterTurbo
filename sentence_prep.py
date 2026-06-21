@@ -34,6 +34,24 @@ def _ensure_nltk_data():
 
 
 # ---------------------------------------------------------------------------
+# Markdown cleanup
+# ---------------------------------------------------------------------------
+
+def strip_markdown(text: str) -> str:
+    # Heading markers (##, ###, etc.) at the start of a line
+    text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
+    # Bold/italic markers (**text**, *text*, __text__, _text_)
+    text = re.sub(r"\*{1,3}|_{1,3}", "", text)
+    # Bullet/list markers (-, *, + at the start of a line)
+    text = re.sub(r"^[\-\*\+]\s+", "", text, flags=re.MULTILINE)
+    # Inline code and code fences
+    text = re.sub(r"`{1,3}[^`]*`{1,3}", "", text)
+    # Horizontal rules (--- or *** on their own line)
+    text = re.sub(r"^\s*[-\*]{3,}\s*$", "", text, flags=re.MULTILINE)
+    return text
+
+
+# ---------------------------------------------------------------------------
 # Sentence splitting
 # ---------------------------------------------------------------------------
 
@@ -167,6 +185,8 @@ def main():
 
     with open(args.script, "r", encoding="utf-8-sig") as fh:
         raw_text = fh.read()
+
+    raw_text = strip_markdown(raw_text)
 
     if not raw_text.strip():
         print("Error: script file is empty.", file=sys.stderr)
