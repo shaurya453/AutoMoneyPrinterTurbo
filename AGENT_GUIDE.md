@@ -157,8 +157,8 @@ Add `"style": "<name>"` to request a specific variant. Unknown names fall back t
 
 | Trigger | `graphic_type` | Rule |
 |---|---|---|
-| Explicit chapter/section heading in the script | `"transition"` | **Required** — always Pattern 1. Convert the heading sentence to a silent graphic (remove from `video_script`, set `text: ""`). |
-| Other major structural break — time jump, location, narrative phase | `"transition"` | Always Pattern 1. Never at first or last sentence. 0–1 additional beyond chapter transitions. |
+| Explicit chapter/section heading in the script | `"title_card"` | **Required — always Pattern 2.** TTS speaks the heading; the title card graphic plays simultaneously. Keep in `video_script`. 1 per chapter heading. |
+| Other major structural break — time jump, location, narrative phase | `"transition"` | Always Pattern 1 (silent). Never at first or last sentence. 0–2 per video. |
 | Sentence states a single powerful, quotable fact | `"title_card"` | Pattern 1 or 2. Never at start or end of video. 0–1 per video. |
 | Sentence compares ≥2 entities with specific numbers | `"infographic"` | Prefer Pattern 2. 0–1 per video (0–2 if genuinely distinct comparisons). |
 | Sentence lists 2–6 distinct items, features, or steps | `"list"` | Prefer Pattern 2 when narrator reads items. 0–1 per video. |
@@ -167,9 +167,9 @@ Add `"style": "<name>"` to request a specific variant. Unknown names fall back t
 
 #### Graphic cue rules
 
-- `title_card`: `title` ≤10 words. `subtitle` 3–6 words or `""`. The claim must be quotable and specific — not just interesting.
+- `title_card`: `title` ≤10 words. `subtitle` 3–6 words or `""`. For chapter headings, use the chapter name as `title` and `"chapter N"` as `subtitle` (e.g. `title: "A Glowing Obsession"`, `subtitle: "chapter two"`). Non-chapter title cards must be quotable and specific — not just interesting.
 - `infographic`: `labels` and `values` must be same length. `values` must be positive. 2–8 bars. `title` = metric + scope (e.g. `"Global EV Sales (M units, 2023)"`). Use `"callouts"` for 2–3 standalone stats; bar styles for comparisons.
-- `transition`: `label` ≤4 words, title case. `sublabel` ≤6 words, lower case, or omit. Chapter headings like "CHAPTER TWO — A Glowing Obsession" become `label: "A Glowing Obsession"`, `sublabel: "chapter two"`. Do not add transitions for every paragraph break — only chapter headings and major narrative pivots.
+- `transition`: `label` ≤4 words, title case. `sublabel` ≤6 words, lower case, or omit. Only for real narrative pivots — not every paragraph break, and not for chapter headings (use `title_card` Pattern 2 for those).
 - `list`: 2–6 items. Don't use for two items that differ numerically — use `"infographic"` instead. Add `"style": "numbered"` when order matters.
 
 ---
@@ -302,7 +302,7 @@ Re-read the entire sentences list as a quality audit:
 - Are images ≤25% of total sentences? If over, revisit borderline calls.
 - **Motif-rotation check**: are any two consecutive sentences assigned the same motif? Swap if so.
 - **Graphic review**: Pattern 1 has `text: ""` and `duration` set; Pattern 2 has real `text`, no `duration`, and `visual_concepts`/`visual_caption` set. Total ≤5 graphic entries.
-- **Chapter heading check**: scan `video_script` for lines that look like headings (all-caps, "CHAPTER", "PART", "SECTION", numbered acts). Each one must be a Pattern 1 transition in `sentences` and absent from `video_script`.
+- **Chapter heading check**: scan `video_script` for lines that look like headings (all-caps, "CHAPTER", "PART", "SECTION", numbered acts). Each one must have `graphic_type: "title_card"` set (Pattern 2) on its sentence entry — it must remain in `video_script` and keep its `text` so TTS speaks it.
 
 ---
 
@@ -323,7 +323,7 @@ Do NOT run `cli.py`. The worker runs it automatically.
 - **Repeating `video_topic` words in `visual_concepts`** — the pipeline appends topic automatically; repeating produces garbled queries
 - **Ambiguous single-word concepts** — `"court"`, `"bar"`, `"scale"` match unrelated domains; always disambiguate
 - **Brand-name collision on animal names** — `"firefly bulb"` returns Firefly-branded LED products; `"jaguar"` returns the car; use the biological category: `"firefly insect glowing"`, `"jaguar big cat"`, etc.
-- **Chapter headings left as narration** — sentences like "CHAPTER TWO — A Glowing Obsession" must become Pattern 1 transition graphics, removed from `video_script`; if left as b-roll, TTS reads the heading text aloud
+- **Chapter headings left as plain b-roll** — sentences like "CHAPTER TWO — A Glowing Obsession" must use Pattern 2 `title_card` (TTS speaks the heading, graphic plays simultaneously); they stay in `video_script` and keep their `text`; do NOT use Pattern 1 (which silences the VO)
 - **Near-duplicate fallbacks** — `[1]`/`[2]` must be genuinely broader than `[0]`, not synonyms
 - **Wrong `video_type`** — `"thematic"` for abstract/category videos; `"named_entity"` for one specific recurring subject
 - **Overusing `"named"`** — each call spends a Serper quota; use for genuinely specific entities only
