@@ -26,7 +26,7 @@ export default makeScene2D('transition-d', function* (view) {
   const subRef       = createRef<Txt>();
 
   view.add(
-    <Rect ref={containerRef} width={1920} height={1080} fill={'#0c0c0c'} opacity={1}>
+    <Rect ref={containerRef} width={1920} height={1080} fill={'#0c0c0c'} opacity={1} layout={false}>
       {/* Crosshair lines — rendered behind the label, dimmed before text appears */}
       <Rect ref={hRef} width={0}   height={2} fill={'#ffffff'} opacity={0} />
       <Rect ref={vRef} width={2}   height={0} fill={'#ffffff'} opacity={0} />
@@ -41,7 +41,8 @@ export default makeScene2D('transition-d', function* (view) {
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
-        maxWidth={1500}
+        width={1500}
+        textWrap={true}
         letterSpacing={4}
       />
       <Txt
@@ -54,7 +55,8 @@ export default makeScene2D('transition-d', function* (view) {
         fill={'#777777'}
         opacity={0}
         textAlign={'center'}
-        maxWidth={1400}
+        width={1400}
+        textWrap={true}
         letterSpacing={2}
       />
     </Rect>,

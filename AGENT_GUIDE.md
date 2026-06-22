@@ -160,37 +160,56 @@ The graphic is the visual for a normal narration sentence. Duration derived from
 | `"title_card"` | Animated title on dark background | `title` (≤10 words) | `subtitle`, `style` |
 | `"infographic"` | Animated chart with value labels | `title`, `labels` (string[]), `values` (number[]) | `unit`, `style` |
 | `"transition"` | Section divider, fades in/out | `label` (≤4 words) | `sublabel`, `style` |
-| `"list"` | Bullet or numbered list | `items` (string[], 2–6) | `title`, `style` |
+| `"list"` | Animated list — bullets, numbers, bars, or cards | `items` (string[], 2–6) | `title`, `style` |
 
 #### Duration (Pattern 1 only)
 
 | `graphic_type` | Duration |
 |---|---|
 | `"title_card"` | 5.0 s |
-| `"infographic"` | 10.0 s (4+ bars); 8.0 s (2–3 bars) |
+| `"infographic"` | 10.0 s (4+ data points); 8.0 s (2–3 data points) |
 | `"transition"` | 3.0 s |
-| `"list"` | 6 s (2–3 items); 8 s (4–5); 10 s (6) |
+| `"list"` | 6 s (2–3 items); 8 s (4–5 items); 10 s (6 items) |
 
-#### Style hint (optional)
+#### Style hint — when to use each variant
 
-Add `"style": "<name>"` to request a specific variant. Unknown names fall back to auto-rotation.
+Add `"style": "<name>"` to request a specific variant. If omitted, the pipeline rotates through variants automatically to avoid consecutive repeats. Unknown style names fall back to rotation.
 
-| `graphic_type` | `style` | What you get |
+**`title_card` styles:**
+
+| `style` | What you get | Best for |
 |---|---|---|
-| `title_card` | `"minimal"` | Simple fade-in, centred |
-| `title_card` | `"kinetic"` | Title glides up, white rule wipe |
-| `title_card` | `"framed"` | Left vertical bar frames title |
-| `title_card` | `"editorial"` | Gold rule, slides from right — journalistic |
-| `infographic` | `"bars"` | Vertical bar chart |
-| `infographic` | `"horizontal"` | Horizontal bars — better for long labels |
-| `infographic` | `"lollipop"` | Stem + dot chart |
-| `infographic` | `"callouts"` | Large counting numbers — best for 2–3 big stats |
-| `transition` | `"line"` | Accent line grows from centre |
-| `transition` | `"sweep"` | Dark panel sweeps across screen |
-| `transition` | `"brackets"` | Corner brackets frame label |
-| `transition` | `"crosshair"` | Thin crosshair from centre |
-| `list` | `"bullets"` | Coloured square bullets, slides from left |
-| `list` | `"numbered"` | Cyan number prefix, slides from right |
+| `"minimal"` | Title fades in centred on dark bg, subtitle fades below | Clean intros, general use, emotional quotes |
+| `"kinetic"` | Title glides upward while fading in; white rule wipes beneath | High-energy openers, modern tech/finance tone |
+| `"framed"` | Thin vertical bar draws down left edge; title and subtitle slide in | Structured documentary feel, multi-chapter videos |
+| `"editorial"` | Title slides in from right; warm gold accent rule | Journalism, long-form investigative, historical |
+
+**`infographic` styles:**
+
+| `style` | What you get | Best for |
+|---|---|---|
+| `"bars"` | Vertical bar chart, staggered growth | Comparing values of similar magnitude; 3–8 categories |
+| `"horizontal"` | Horizontal bars from a vertical axis | Long category labels that won't fit below a vertical bar |
+| `"lollipop"` | Thin stems with a dot at the tip, spring pop | Sparse data where spacing matters; 3–8 categories |
+| `"callouts"` | Large bold numbers count up from zero; category label beneath | 2–3 big standalone stats where the number IS the story |
+
+**`transition` styles:**
+
+| `style` | What you get | Best for |
+|---|---|---|
+| `"line"` | Short accent line grows from centre; label fades in | Minimal, general-purpose section break |
+| `"sweep"` | Deep-navy panel sweeps in from left, sweeps out to right | Cinematic chapter turns, dramatic time jumps |
+| `"brackets"` | L-shaped brackets draw in from opposing corners | Precision/technical tone, structured editorial |
+| `"crosshair"` | Crosshair lines grow from centre, dim to near-invisible; text appears on grid | Data journalism, surveillance, investigative tone |
+
+**`list` styles:**
+
+| `style` | What you get | Best for |
+|---|---|---|
+| `"bullets"` | Coloured square bullets; rows slide in from left, staggered | General-purpose, unordered, up to 6 items |
+| `"numbered"` | Cyan zero-padded numbers ("01.", "02."…); rows drop from above | Ordered steps, ranked lists, how-to sequences |
+| `"cascade"` | Coloured bar sweeps full width behind each row; text fades on top | Dramatic reveals, highlight-reel style, up to 6 items |
+| `"grid"` | Bordered card grid with accent number badge top-left | 4–6 items where you want equal visual weight per item |
 
 #### When to insert a graphic cue
 
@@ -204,12 +223,59 @@ Add `"style": "<name>"` to request a specific variant. Unknown names fall back t
 
 **Total graphic entries: ≤5 per video. Minimum 1 if the script has any chapter/section headings.**
 
+#### Handling list content split across multiple sentences
+
+`sentence_prep.py` creates one stub sentence per item when the script enumerates points. The agent must **merge these back into a single list graphic** — they must NOT remain as separate broll entries.
+
+**Recognition signs:** consecutive sentences that form a set ("First…", "Second…", "Another…", numbered/lettered items, or parallel structure where each sentence names one distinct thing).
+
+**How to merge:**
+
+1. Identify the **intro sentence** — the one that sets up the list (e.g. "Here are five ways to save money.").
+2. Strip each item sentence to its core phrase (no "First, they…" preamble) and put all of them in `variables.items`.
+3. **Delete the individual item sentences** from `sentences` entirely — do not leave them as broll entries.
+4. Create **one** `list` graphic entry using the intro sentence:
+   - **Pattern 2 (preferred):** set `graphic_type: "list"` on the intro sentence. The graphic plays while narrator reads the intro. Set `visual_concepts` and `visual_caption` as footage fallback.
+   - **Pattern 1 (alternative):** keep the intro sentence as a plain broll entry and add a separate silent `"text": ""` list slot after it with `duration` set.
+
+**Example — before (stubs from sentence_prep):**
+```jsonc
+{ "text": "Here are five ways ultra-processed foods hook consumers." },
+{ "text": "First, they add excessive sugar." },
+{ "text": "Second, they use artificial flavors." },
+{ "text": "Third, they engineer the perfect crunch." },
+{ "text": "Fourth, they hit the bliss point with fat and salt." },
+{ "text": "Fifth, they make the packaging irresistible." }
+```
+
+**After (Pattern 2 — one entry, five item stubs removed):**
+```jsonc
+{
+  "text": "Here are five ways ultra-processed foods hook consumers.",
+  "content_track": "broll",
+  "graphic_type": "list",
+  "variables": {
+    "title": "How Ultra-Processed Foods Hook You",
+    "items": [
+      "Excessive added sugar",
+      "Artificial flavors",
+      "Engineered crunch texture",
+      "Fat-salt-sugar bliss point",
+      "Irresistible packaging"
+    ],
+    "style": "bullets"
+  },
+  "visual_concepts": ["processed snack products shelf", "junk food close-up"],
+  "visual_caption": "close-up of brightly coloured processed snack packaging on a supermarket shelf"
+}
+```
+
 #### Graphic cue rules
 
 - `title_card`: `title` ≤10 words. `subtitle` 3–6 words or `""`. For chapter headings, use the chapter name as `title` and `"chapter N"` as `subtitle` (e.g. `title: "A Glowing Obsession"`, `subtitle: "chapter two"`). Non-chapter title cards must be quotable and specific — not just interesting.
-- `infographic`: `labels` and `values` must be same length. `values` must be positive. 2–8 bars. `title` = metric + scope (e.g. `"Global EV Sales (M units, 2023)"`). Use `"callouts"` for 2–3 standalone stats; bar styles for comparisons.
+- `infographic`: `labels` and `values` must be same length. `values` must be positive. 2–8 data points. `title` = metric + scope (e.g. `"Global EV Sales (M units, 2023)"`). Use `"callouts"` for 2–3 standalone stats; use `"bars"`, `"horizontal"`, or `"lollipop"` for side-by-side comparisons. Use `"horizontal"` when any label is longer than ~3 words.
 - `transition`: `label` ≤4 words, title case. `sublabel` ≤6 words, lower case, or omit. Only for real narrative pivots — not every paragraph break, and not for chapter headings (use `title_card` Pattern 2 for those).
-- `list`: 2–6 items. Don't use for two items that differ numerically — use `"infographic"` instead. Add `"style": "numbered"` when order matters.
+- `list`: 2–6 items. Don't use for two items that differ numerically — use `"infographic"` with `"callouts"` style instead. Use `"numbered"` when order matters; `"grid"` for 4–6 equal-weight items; `"cascade"` for a dramatic reveal effect; `"bullets"` for general unordered lists. **Never leave each item as a separate narration sentence** — all items belong in `variables.items`; remove the individual item stubs from `sentences` after extracting them (see "Handling list content split across multiple sentences" above).
 
 ---
 
@@ -309,7 +375,8 @@ These are starting points — adjust within a job if a particular section is unu
         "title": "Global EV Sales (M units, 2023)",
         "labels": ["China", "Europe", "USA"],
         "values": [8.1, 3.2, 1.4],
-        "unit": "M units"
+        "unit": "M units",
+        "style": "bars"
       },
       "visual_concepts": ["electric vehicle factory production line", "EV assembly plant"],
       "visual_caption": "rows of electric cars on a modern assembly line"
@@ -319,7 +386,7 @@ These are starting points — adjust within a job if a particular section is unu
   "voice_name": "en-US-AriaNeural",
   "voice_rate": 1.0,
   "video_aspect": "16:9",
-  "video_source": "pexels",
+  "video_source": "pexels",           // "pexels" | "pixabay"
   "subtitle_enabled": true,
   "subtitle_position": "bottom",
   "font_name": "Inter_18pt-SemiBold.ttf",
@@ -338,6 +405,8 @@ These are starting points — adjust within a job if a particular section is unu
 - Random local: `"bgm_search_term": ""`, `"bgm_file": "random"`
 - No BGM: `"bgm_search_term": ""`, `"bgm_file": "none"`
 
+Match `bgm_search_term` to the video's tone: `"tense thriller score"`, `"uplifting corporate background"`, `"melancholic piano"`, etc. Don't leave it generic for videos with a strong emotional arc.
+
 ---
 
 ## Step 2.5 — Review Pass (mandatory)
@@ -354,6 +423,7 @@ Re-read the entire sentences list as a quality audit:
 - **Motif-rotation check**: are any two consecutive sentences assigned the same motif? Swap if so.
 - **Graphic review**: Pattern 1 has `text: ""` and `duration` set; Pattern 2 has real `text`, no `duration`, and `visual_concepts`/`visual_caption` set. Total ≤5 graphic entries.
 - **Chapter heading check**: scan `video_script` for lines that look like headings (all-caps, "CHAPTER", "PART", "SECTION", numbered acts). Each one must have `graphic_type: "title_card"` set (Pattern 2) on its sentence entry — it must remain in `video_script` and keep its `text` so TTS speaks it.
+- **Style check**: does each graphic's `style` match the content? Long labels → `"horizontal"` infographic; 4–6 list items with equal weight → `"grid"`; ordered steps → `"numbered"`; 2–3 standalone stats → `"callouts"`.
 
 ---
 
@@ -382,7 +452,7 @@ Do NOT run `cli.py`. The worker runs it automatically.
 - **Generic emotion captions** — `"a person looking surprised"` matches off-topic stock; describe the on-topic scene the reaction happens *during*
 - **Vague `visual_caption`** — `"a video clip"` or `"relevant footage"` can't distinguish good candidates from bad
 - **Copying `visual_caption` from `visual_concepts`** — the caption describes the shot; `visual_concepts` are API queries
-- **Leaving `bgm_search_term` blank on emotional content** — music significantly improves impact
+- **Leaving `bgm_search_term` blank on emotional content** — music significantly improves impact; match it to the tone
 - **Graphic `text` not empty (Pattern 1)** — `text` must be `""` for silent graphic slots
 - **Graphic content in `video_script`** — `video_script` is narration only; graphic slots have no spoken words
 - **Setting `duration` on a Pattern 2 graphic** — duration is derived from Whisper; don't set it
@@ -390,9 +460,12 @@ Do NOT run `cli.py`. The worker runs it automatically.
 - **Title card at start or end of video** — mid-video only; pipeline handles fade-in/out at edges
 - **Title card for a merely interesting sentence** — must be quotable, specific, and impactful; when in doubt, skip
 - **Infographic for a single statistic** — use `title_card` or `"callouts"` style instead; infographics need ≥2 labeled values
+- **Infographic with long labels but `"bars"` style** — use `"horizontal"` when labels exceed ~3 words; vertical bars clip label text
 - **`list` for two numerically differing items** — use `"infographic"` with `"callouts"` style instead
 - **`labels` and `values` arrays of different lengths** — must match exactly
-- **More than 8 infographic bars** — too small to read; split if needed
+- **More than 8 infographic data points** — too small to read; split if needed
 - **Transition `label` longer than 4 words** — it's a section marker, not a sentence
 - **Transition for every topic shift** — only for major structural breaks (time jump, location, narrative phase)
-- **More than 3 graphic entries total** — cut to the most impactful ones
+- **More than 5 graphic entries total** — cut to the most impactful ones; the hard limit is ≤5
+- **Using `"grid"` style for fewer than 4 list items** — grid cards look sparse; use `"bullets"` or `"cascade"` for 2–3 items
+- **Omitting `style` when content has a clear fit** — don't leave the pipeline to guess; if labels are long, write `"horizontal"`; if it's a step sequence, write `"numbered"`

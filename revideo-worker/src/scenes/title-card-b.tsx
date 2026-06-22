@@ -15,9 +15,9 @@ export default makeScene2D('title-card-b', function* (view) {
   const hasSub = subtitle.length > 0;
 
   // Final resting positions — more vertical breathing room
-  const TITLE_Y    = hasSub ? -120 : -40;
+  const TITLE_Y    = hasSub ? -100 : 0;
   const TITLE_Y_0  = TITLE_Y + 64;   // starts below, slides up
-  const RULE_Y     = hasSub ? -22 : 48;
+  const RULE_Y     = hasSub ? -22 : 70;
   const RULE_MAX_W = 500;
   const SUB_Y      = hasSub ? 80 : 0;
 
@@ -27,10 +27,11 @@ export default makeScene2D('title-card-b', function* (view) {
   const subRef       = createRef<Txt>();
 
   view.add(
-    <Rect ref={containerRef} width={1920} height={1080} fill={'#060606'} opacity={1}>
+    <Rect ref={containerRef} width={1920} height={1080} fill={'#060606'} opacity={1} layout={false}>
       <Txt
         ref={titleRef}
         text={title}
+        x={0}
         y={TITLE_Y_0}
         fontSize={86}
         fontWeight={700}
@@ -38,7 +39,8 @@ export default makeScene2D('title-card-b', function* (view) {
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
-        maxWidth={1600}
+        textWrap={true}
+        width={1600}
       />
       <Rect
         ref={ruleRef}
@@ -51,6 +53,7 @@ export default makeScene2D('title-card-b', function* (view) {
       <Txt
         ref={subRef}
         text={subtitle}
+        x={0}
         y={SUB_Y}
         fontSize={36}
         fontWeight={300}
@@ -59,13 +62,20 @@ export default makeScene2D('title-card-b', function* (view) {
         opacity={0}
         letterSpacing={3}
         textAlign={'center'}
-        maxWidth={1400}
+        textWrap={true}
+        width={1400}
       />
     </Rect>,
   );
 
   const ANIM_IN  = 1.40;
   const ANIM_OUT = 0.40;
+
+  // Measure actual title height after first layout pass so the rule sits
+  // 14 px below the title's bottom edge regardless of wrap count.
+  yield;
+  const titleH = titleRef().size().height;
+  ruleRef().y(TITLE_Y + titleH / 2 + 14);
 
   yield* all(
     tween(0.70, v => {

@@ -1,5 +1,5 @@
 import '../global.css';
-import {makeScene2D, Layout, Rect, Txt} from '@revideo/2d';
+import {makeScene2D, Rect, Txt} from '@revideo/2d';
 import {all, chain, createRef, easeInOutCubic, easeOutCubic, tween, useScene, waitFor} from '@revideo/core';
 
 // Variant A — Bullet List
@@ -28,19 +28,23 @@ export default makeScene2D('list', function* (view) {
   const rowYs       = Array.from({length: n}, (_, i) => LIST_OFFSET - totalH / 2 + i * ROW_GAP);
   const TITLE_Y     = hasTitle ? rowYs[0] - ROW_GAP * 1.8 : 0;
 
-  // Layout anchor is slightly left of center; with width=1300, spans -700 to +600
-  const LAYOUT_X = -50;
-  const SLIDE_DX = 40;
-  const STAGGER  = 0.20;
-  const ROW_DUR  = 0.45;
-  const ANIM_OUT = 0.35;
+  // Row layout: [bullet 12px] [gap 22px] [text 1100px]  — total 1134px
+  // Row left edge at LEFT_ANCHOR; elements positioned as direct children of container
+  const LEFT_ANCHOR = -640;
+  const BULLET_X    = LEFT_ANCHOR + 6;          // bullet centre
+  const TEXT_X      = LEFT_ANCHOR + 12 + 22 + 550; // text centre (= LEFT_ANCHOR + 584)
+  const SLIDE_DX    = 40;
+  const STAGGER     = 0.20;
+  const ROW_DUR     = 0.45;
+  const ANIM_OUT    = 0.35;
 
-  const containerRef = createRef<Rect>();
-  const titleRef     = createRef<Txt>();
-  const rowRefs      = Array.from({length: n}, () => createRef<Layout>());
+  const containerRef  = createRef<Rect>();
+  const titleRef      = createRef<Txt>();
+  const bulletRefs    = Array.from({length: n}, () => createRef<Rect>());
+  const textRefs      = Array.from({length: n}, () => createRef<Txt>());
 
   view.add(
-    <Rect ref={containerRef} width={1920} height={1080} fill={'#0a0a0a'} opacity={1}>
+    <Rect ref={containerRef} width={1920} height={1080} fill={'#0a0a0a'} opacity={1} layout={false}>
       <Txt
         ref={titleRef}
         text={title}
@@ -51,35 +55,38 @@ export default makeScene2D('list', function* (view) {
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
-        maxWidth={1600}
+        width={1600}
+        textWrap={true}
       />
 
       {Array.from({length: n}, (_, i) => (
-        <Layout
-          ref={rowRefs[i]}
-          direction={'row'}
-          alignItems={'center'}
-          justifyContent={'start'}
-          gap={22}
-          x={LAYOUT_X - SLIDE_DX}
+        <Rect
+          ref={bulletRefs[i]}
+          width={12}
+          height={12}
+          fill={COLORS[i % COLORS.length]}
+          radius={2}
+          x={BULLET_X - SLIDE_DX}
           y={rowYs[i]}
           opacity={0}
-        >
-          <Rect
-            width={12}
-            height={12}
-            fill={COLORS[i % COLORS.length]}
-            radius={2}
-          />
-          <Txt
-            text={items[i]}
-            fontSize={40}
-            fontWeight={400}
-            fontFamily={'Inter, sans-serif'}
-            fill={'#e8e8e8'}
-            width={1100}
-          />
-        </Layout>
+        />
+      ))}
+
+      {Array.from({length: n}, (_, i) => (
+        <Txt
+          ref={textRefs[i]}
+          text={items[i]}
+          fontSize={40}
+          fontWeight={400}
+          fontFamily={'Inter, sans-serif'}
+          fill={'#e8e8e8'}
+          x={TEXT_X - SLIDE_DX}
+          y={rowYs[i]}
+          width={1100}
+          textAlign={'left'}
+          textWrap={true}
+          opacity={0}
+        />
       ))}
     </Rect>,
   );
@@ -91,13 +98,15 @@ export default makeScene2D('list', function* (view) {
   }
 
   yield* all(
-    ...rowRefs.slice(0, n).map((rowRef, i) =>
+    ...Array.from({length: n}, (_, i) =>
       chain(
         waitFor(i * STAGGER),
         tween(ROW_DUR, v => {
           const t = easeOutCubic(v);
-          rowRef().opacity(t);
-          rowRef().x(LAYOUT_X - SLIDE_DX + SLIDE_DX * t);
+          bulletRefs[i]().opacity(t);
+          textRefs[i]().opacity(t);
+          bulletRefs[i]().x(BULLET_X - SLIDE_DX + SLIDE_DX * t);
+          textRefs[i]().x(TEXT_X - SLIDE_DX + SLIDE_DX * t);
         }),
       ),
     ),

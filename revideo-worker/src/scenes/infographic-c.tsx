@@ -51,7 +51,7 @@ export default makeScene2D('infographic-c', function* (view) {
   const valRefs  = Array.from({length: n}, () => createRef<Txt>());
 
   view.add(
-    <Rect width={1920} height={1080} fill={'#0a0a0a'}>
+    <Rect width={1920} height={1080} fill={'#0a0a0a'} layout={false}>
       <Txt
         ref={titleRef}
         text={title}
@@ -62,7 +62,8 @@ export default makeScene2D('infographic-c', function* (view) {
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
-        maxWidth={1680}
+        width={1680}
+        textWrap={true}
       />
       <Rect
         ref={axisRef}
@@ -83,7 +84,8 @@ export default makeScene2D('infographic-c', function* (view) {
           fontFamily={'Inter, sans-serif'}
           fill={'#999999'}
           textAlign={'center'}
-          maxWidth={BAR_SLOT_W - 12}
+          width={BAR_SLOT_W - 12}
+          textWrap={true}
         />
       ))}
 
@@ -123,7 +125,8 @@ export default makeScene2D('infographic-c', function* (view) {
           fill={'#ffffff'}
           opacity={0}
           textAlign={'center'}
-          maxWidth={BAR_SLOT_W - 16}
+          width={BAR_SLOT_W - 16}
+          textWrap={true}
         />
       ))}
     </Rect>,

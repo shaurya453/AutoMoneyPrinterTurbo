@@ -29,7 +29,7 @@ export default makeScene2D('transition', function* (view) {
   const sublabelRef = createRef<Txt>();
 
   view.add(
-    <Rect ref={containerRef} width={1920} height={1080} fill={'#080808'} opacity={1}>
+    <Rect ref={containerRef} width={1920} height={1080} fill={'#080808'} opacity={1} layout={false}>
       <Rect
         ref={lineRef}
         width={0}
@@ -47,7 +47,8 @@ export default makeScene2D('transition', function* (view) {
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
-        maxWidth={1600}
+        width={1600}
+        textWrap={true}
         letterSpacing={4}
       />
       <Txt
@@ -60,7 +61,8 @@ export default makeScene2D('transition', function* (view) {
         fill={'#888888'}
         opacity={0}
         textAlign={'center'}
-        maxWidth={1400}
+        width={1400}
+        textWrap={true}
         letterSpacing={2}
       />
     </Rect>,

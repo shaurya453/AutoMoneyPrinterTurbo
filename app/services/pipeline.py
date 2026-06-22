@@ -1030,7 +1030,7 @@ def start(job_path: str) -> Optional[dict]:
                 height=h,
                 fps=30,
                 variables=sent.get("variables", {}),
-                style=sent.get("style"),
+                style=sent.get("variables", {}).get("style"),
             )
             if rendered:
                 ordered_clips.append(rendered)
@@ -1061,7 +1061,7 @@ def start(job_path: str) -> Optional[dict]:
                 height=h,
                 fps=30,
                 variables=sent.get("variables", {}),
-                style=sent.get("style"),
+                style=sent.get("variables", {}).get("style"),
             )
             if rendered:
                 ordered_clips.append(rendered)

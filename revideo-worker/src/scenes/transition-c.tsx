@@ -34,7 +34,7 @@ export default makeScene2D('transition-c', function* (view) {
   const subRef   = createRef<Txt>();
 
   view.add(
-    <Rect ref={containerRef} width={1920} height={1080} fill={'#080808'} opacity={1}>
+    <Rect ref={containerRef} width={1920} height={1080} fill={'#080808'} opacity={1} layout={false}>
       <Rect ref={tlHRef} width={0} height={ARM_W} fill={'#ffffff'} opacity={0.85} x={TL_X} y={TL_Y} />
       <Rect ref={tlVRef} width={ARM_W} height={0} fill={'#ffffff'} opacity={0.85} x={TL_X} y={TL_Y} />
       <Rect ref={brHRef} width={0} height={ARM_W} fill={'#ffffff'} opacity={0.85} x={BR_X} y={BR_Y} />
@@ -49,7 +49,8 @@ export default makeScene2D('transition-c', function* (view) {
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
-        maxWidth={1600}
+        width={1600}
+        textWrap={true}
         letterSpacing={4}
       />
       <Txt
@@ -62,7 +63,8 @@ export default makeScene2D('transition-c', function* (view) {
         fill={'#888888'}
         opacity={0}
         textAlign={'center'}
-        maxWidth={1400}
+        width={1400}
+        textWrap={true}
         letterSpacing={2}
       />
     </Rect>,

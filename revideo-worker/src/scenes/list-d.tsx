@@ -59,7 +59,7 @@ export default makeScene2D('list-d', function* (view) {
   const txtRefs      = Array.from({length: n}, () => createRef<Txt>());
 
   view.add(
-    <Rect ref={containerRef} width={1920} height={1080} fill={'#0d0d0d'} opacity={1}>
+    <Rect ref={containerRef} width={1920} height={1080} fill={'#0d0d0d'} opacity={1} layout={false}>
       <Txt
         ref={titleRef}
         text={title}
@@ -70,57 +70,63 @@ export default makeScene2D('list-d', function* (view) {
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
-        maxWidth={1600}
+        width={1600}
+        textWrap={true}
       />
 
       {Array.from({length: n}, (_, i) => {
         const {x, y} = cardCentres[i];
-        const col     = i % COLS;
+        return (
+          <Rect
+            ref={cardRefs[i]}
+            width={CARD_W}
+            height={CARD_H}
+            fill={'#161620'}
+            stroke={COLORS[i % COLORS.length]}
+            lineWidth={1.5}
+            opacity={0}
+            radius={8}
+            x={x}
+            y={y}
+          />
+        );
+      })}
+      {Array.from({length: n}, (_, i) => {
+        const {x, y} = cardCentres[i];
         const numSize = CARD_H <= 160 ? 32 : 40;
+        return (
+          <Txt
+            ref={numRefs[i]}
+            text={String(i + 1).padStart(2, '0')}
+            x={x - CARD_W / 2 + 32}
+            y={y - CARD_H / 2 + numSize / 2 + 14}
+            fontSize={numSize}
+            fontWeight={800}
+            fontFamily={'Inter, sans-serif'}
+            fill={COLORS[i % COLORS.length]}
+            opacity={0}
+            textAlign={'left'}
+          />
+        );
+      })}
+      {Array.from({length: n}, (_, i) => {
+        const {x, y} = cardCentres[i];
         const txtSize = CARD_H <= 160 ? 26 : 32;
         return (
-          <>
-            {/* Card background with border */}
-            <Rect
-              ref={cardRefs[i]}
-              width={CARD_W}
-              height={CARD_H}
-              fill={'#161620'}
-              stroke={COLORS[i % COLORS.length]}
-              lineWidth={1.5}
-              opacity={0}
-              radius={8}
-              x={x}
-              y={y}
-            />
-            {/* Accent number in top-left of card */}
-            <Txt
-              ref={numRefs[i]}
-              text={String(i + 1).padStart(2, '0')}
-              x={x - CARD_W / 2 + 32}
-              y={y - CARD_H / 2 + numSize / 2 + 14}
-              fontSize={numSize}
-              fontWeight={800}
-              fontFamily={'Inter, sans-serif'}
-              fill={COLORS[i % COLORS.length]}
-              opacity={0}
-              textAlign={'left'}
-            />
-            {/* Item text, centred in card */}
-            <Txt
-              ref={txtRefs[i]}
-              text={items[i]}
-              x={x}
-              y={y + 8}
-              fontSize={txtSize}
-              fontWeight={400}
-              fontFamily={'Inter, sans-serif'}
-              fill={'#d8d8d8'}
-              opacity={0}
-              textAlign={'center'}
-              maxWidth={CARD_W - 48}
-            />
-          </>
+          <Txt
+            ref={txtRefs[i]}
+            text={items[i]}
+            x={x}
+            y={y + 8}
+            fontSize={txtSize}
+            fontWeight={400}
+            fontFamily={'Inter, sans-serif'}
+            fill={'#d8d8d8'}
+            opacity={0}
+            textAlign={'center'}
+            width={CARD_W - 48}
+            textWrap={true}
+          />
         );
       })}
     </Rect>,

@@ -15,7 +15,7 @@ export default makeScene2D('title-card-d', function* (view) {
 
   const hasSub = subtitle.length > 0;
 
-  const TITLE_Y  = hasSub ? -90 : -22;
+  const TITLE_Y  = hasSub ? -90 : 0;
   const RULE_Y   = hasSub ? -10  : 38;
   const RULE_W   = 320;
   const SUB_Y    = hasSub ? 76  : 0;
@@ -28,7 +28,7 @@ export default makeScene2D('title-card-d', function* (view) {
   const subRef       = createRef<Txt>();
 
   view.add(
-    <Rect ref={containerRef} width={1920} height={1080} fill={'#030303'} opacity={1}>
+    <Rect ref={containerRef} width={1920} height={1080} fill={'#030303'} opacity={1} layout={false}>
       <Txt
         ref={titleRef}
         text={title}
@@ -40,7 +40,8 @@ export default makeScene2D('title-card-d', function* (view) {
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
-        maxWidth={1600}
+        textWrap={true}
+        width={1600}
       />
       <Rect
         ref={ruleRef}
@@ -61,7 +62,8 @@ export default makeScene2D('title-card-d', function* (view) {
         opacity={0}
         letterSpacing={2}
         textAlign={'center'}
-        maxWidth={1400}
+        textWrap={true}
+        width={1400}
       />
     </Rect>,
   );

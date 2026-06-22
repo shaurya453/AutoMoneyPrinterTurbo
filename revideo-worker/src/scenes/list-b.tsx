@@ -1,5 +1,5 @@
 import '../global.css';
-import {makeScene2D, Layout, Rect, Txt} from '@revideo/2d';
+import {makeScene2D, Rect, Txt} from '@revideo/2d';
 import {all, chain, createRef, easeInOutCubic, easeOutCubic, tween, useScene, waitFor} from '@revideo/core';
 
 // Variant B — Numbered List (Drop-in)
@@ -24,18 +24,23 @@ export default makeScene2D('list-b', function* (view) {
   const rowYs       = Array.from({length: n}, (_, i) => LIST_OFFSET - totalH / 2 + i * ROW_GAP);
   const TITLE_Y     = hasTitle ? rowYs[0] - ROW_GAP * 1.8 : 0;
 
-  const LAYOUT_X = -50;
-  const DROP_DY  = 48;   // items start 48px ABOVE final position, drop down
-  const STAGGER  = 0.22;
-  const ROW_DUR  = 0.50;
-  const ANIM_OUT = 0.35;
+  // Row layout: [number 88px] [gap 32px] [text 1020px]  — total 1140px
+  // Row left edge at LEFT_ANCHOR; elements positioned as direct children of container
+  const LEFT_ANCHOR = -640;
+  const NUM_X       = LEFT_ANCHOR + 44;           // number centre
+  const TEXT_X      = LEFT_ANCHOR + 88 + 32 + 510; // text centre (= LEFT_ANCHOR + 630)
+  const DROP_DY     = 48;
+  const STAGGER     = 0.22;
+  const ROW_DUR     = 0.50;
+  const ANIM_OUT    = 0.35;
 
-  const containerRef = createRef<Rect>();
-  const titleRef     = createRef<Txt>();
-  const rowRefs      = Array.from({length: n}, () => createRef<Layout>());
+  const containerRef  = createRef<Rect>();
+  const titleRef      = createRef<Txt>();
+  const numRefs       = Array.from({length: n}, () => createRef<Txt>());
+  const textRefs      = Array.from({length: n}, () => createRef<Txt>());
 
   view.add(
-    <Rect ref={containerRef} width={1920} height={1080} fill={'#060616'} opacity={1}>
+    <Rect ref={containerRef} width={1920} height={1080} fill={'#060616'} opacity={1} layout={false}>
       <Txt
         ref={titleRef}
         text={title}
@@ -46,37 +51,41 @@ export default makeScene2D('list-b', function* (view) {
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
-        maxWidth={1600}
+        width={1600}
+        textWrap={true}
       />
 
       {Array.from({length: n}, (_, i) => (
-        <Layout
-          ref={rowRefs[i]}
-          direction={'row'}
-          alignItems={'center'}
-          justifyContent={'start'}
-          gap={32}
-          x={LAYOUT_X}
+        <Txt
+          ref={numRefs[i]}
+          text={String(i + 1).padStart(2, '0') + '.'}
+          fontSize={52}
+          fontWeight={800}
+          fontFamily={'Inter, sans-serif'}
+          fill={'#4fcef7'}
+          x={NUM_X}
           y={rowYs[i] - DROP_DY}
+          width={88}
+          textAlign={'left'}
           opacity={0}
-        >
-          <Txt
-            text={String(i + 1).padStart(2, '0') + '.'}
-            fontSize={52}
-            fontWeight={800}
-            fontFamily={'Inter, sans-serif'}
-            fill={'#4fcef7'}
-            width={88}
-          />
-          <Txt
-            text={items[i]}
-            fontSize={38}
-            fontWeight={300}
-            fontFamily={'Inter, sans-serif'}
-            fill={'#d8d8d8'}
-            width={1020}
-          />
-        </Layout>
+        />
+      ))}
+
+      {Array.from({length: n}, (_, i) => (
+        <Txt
+          ref={textRefs[i]}
+          text={items[i]}
+          fontSize={38}
+          fontWeight={300}
+          fontFamily={'Inter, sans-serif'}
+          fill={'#d8d8d8'}
+          x={TEXT_X}
+          y={rowYs[i] - DROP_DY}
+          width={1020}
+          textAlign={'left'}
+          textWrap={true}
+          opacity={0}
+        />
       ))}
     </Rect>,
   );
@@ -89,13 +98,15 @@ export default makeScene2D('list-b', function* (view) {
 
   // Items drop down from above into position, staggered
   yield* all(
-    ...rowRefs.slice(0, n).map((rowRef, i) =>
+    ...Array.from({length: n}, (_, i) =>
       chain(
         waitFor(i * STAGGER),
         tween(ROW_DUR, v => {
           const t = easeOutCubic(v);
-          rowRef().opacity(t);
-          rowRef().y(rowYs[i] - DROP_DY + DROP_DY * t);
+          numRefs[i]().opacity(t);
+          textRefs[i]().opacity(t);
+          numRefs[i]().y(rowYs[i] - DROP_DY + DROP_DY * t);
+          textRefs[i]().y(rowYs[i] - DROP_DY + DROP_DY * t);
         }),
       ),
     ),

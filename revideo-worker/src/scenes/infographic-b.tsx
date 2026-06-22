@@ -53,7 +53,7 @@ export default makeScene2D('infographic-b', function* (view) {
   const valRefs  = Array.from({length: n}, () => createRef<Txt>());
 
   view.add(
-    <Rect width={1920} height={1080} fill={'#0a0a0a'}>
+    <Rect width={1920} height={1080} fill={'#0a0a0a'} layout={false}>
       <Txt
         ref={titleRef}
         text={title}
@@ -64,7 +64,8 @@ export default makeScene2D('infographic-b', function* (view) {
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
-        maxWidth={1680}
+        width={1680}
+        textWrap={true}
       />
 
       {/* Vertical axis line */}
@@ -90,6 +91,7 @@ export default makeScene2D('infographic-b', function* (view) {
           fill={'#999999'}
           textAlign={'right'}
           maxWidth={LABEL_W}
+          textWrap={true}
         />
       ))}
 
@@ -120,6 +122,7 @@ export default makeScene2D('infographic-b', function* (view) {
           opacity={0}
           textAlign={'left'}
           maxWidth={180}
+          textWrap={true}
         />
       ))}
     </Rect>,

@@ -30,7 +30,7 @@ export default makeScene2D('transition-b', function* (view) {
   const subRef       = createRef<Txt>();
 
   view.add(
-    <Rect ref={containerRef} width={1920} height={1080} fill={'#080808'} opacity={1}>
+    <Rect ref={containerRef} width={1920} height={1080} fill={'#080808'} opacity={1} layout={false}>
       <Rect
         ref={panelRef}
         width={1920}
@@ -58,7 +58,8 @@ export default makeScene2D('transition-b', function* (view) {
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
-        maxWidth={1600}
+        width={1600}
+        textWrap={true}
         letterSpacing={4}
       />
       <Txt
@@ -71,7 +72,8 @@ export default makeScene2D('transition-b', function* (view) {
         fill={'#888888'}
         opacity={0}
         textAlign={'center'}
-        maxWidth={1400}
+        width={1400}
+        textWrap={true}
         letterSpacing={2}
       />
     </Rect>,

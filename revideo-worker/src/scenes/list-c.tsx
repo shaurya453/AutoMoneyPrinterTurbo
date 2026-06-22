@@ -32,7 +32,8 @@ export default makeScene2D('list-c', function* (view) {
 
   const BAR_W    = 1760;  // full-width accent bar
   const BAR_X    = 0;     // centred
-  const TEXT_X   = -820;  // left edge for text (with maxWidth keeping it right)
+  // TEXT_X is the CENTER of the 1600px text bounding box; left edge lands at -820 (TEXT_X - 800)
+  const TEXT_X   = -20;
 
   const SWEEP_DUR = 0.28;
   const FADE_DUR  = 0.30;
@@ -45,7 +46,7 @@ export default makeScene2D('list-c', function* (view) {
   const textRefs     = Array.from({length: n}, () => createRef<Txt>());
 
   view.add(
-    <Rect ref={containerRef} width={1920} height={1080} fill={'#0a0e18'} opacity={1}>
+    <Rect ref={containerRef} width={1920} height={1080} fill={'#0a0e18'} opacity={1} layout={false}>
       <Txt
         ref={titleRef}
         text={title}
@@ -56,7 +57,8 @@ export default makeScene2D('list-c', function* (view) {
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
-        maxWidth={1600}
+        width={1600}
+        textWrap={true}
       />
 
       {/* Accent bars — one per row, starts collapsed */}
@@ -86,7 +88,8 @@ export default makeScene2D('list-c', function* (view) {
           fill={'#e8e8e8'}
           opacity={0}
           textAlign={'left'}
-          maxWidth={1600}
+          width={1600}
+          textWrap={true}
         />
       ))}
     </Rect>,

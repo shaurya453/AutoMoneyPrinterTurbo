@@ -19,19 +19,17 @@ export default makeScene2D('title-card-c', function* (view) {
   const BAR_TOP_Y = -160;
   const BAR_MAX_H = 320;
 
-  // Text block: left-aligned, starting ~100px to the right of the bar.
-  // TEXT_CENTER_X is the center of the maxWidth bounding box; with textAlign='left',
-  // the text left edge sits at TEXT_CENTER_X - TEXT_W/2 ≈ -640 (100px gap from bar).
-  const TEXT_W         = 1400;
-  const TEXT_CENTER_X  = 60;   // TEXT_CENTER_X - TEXT_W/2 = 60 - 700 = -640
-  const TEXT_X_START   = TEXT_CENTER_X - 64;  // slides rightward into final position
+  // Text block: centred on screen. x=0 is canvas centre; width=1600 gives the bounding
+  // box; textAlign='center' renders text symmetrically around x=0.
+  const TEXT_W        = 1600;
+  const TEXT_CENTER_X = 0;    // canvas centre
+  const TEXT_X_START  = -40;  // slides 40px rightward into centre
 
-  const TITLE_Y = hasSub ? -80 : -24;
+  const TITLE_Y = hasSub ? -80 : 0;
   const TICK_Y  = hasSub ? 8 : 32;
-  // Tick rule: left-aligned from same left edge (-640), extends 260px right.
-  // Centre of the tick rect: -640 + 130 = -510
-  const TICK_X  = -510;
-  const SUB_Y   = hasSub ? 68 : 0;
+  // Tick rule centred at x=0, grows symmetrically outward.
+  const TICK_X  = 0;
+  const SUB_Y   = hasSub ? 72 : 0;
 
   const containerRef = createRef<Rect>();
   const barRef       = createRef<Rect>();
@@ -40,7 +38,7 @@ export default makeScene2D('title-card-c', function* (view) {
   const subRef       = createRef<Txt>();
 
   view.add(
-    <Rect ref={containerRef} width={1920} height={1080} fill={'#080808'} opacity={1}>
+    <Rect ref={containerRef} width={1920} height={1080} fill={'#080808'} opacity={1} layout={false}>
       {/* Vertical accent bar (starts collapsed at top) */}
       <Rect
         ref={barRef}
@@ -52,7 +50,7 @@ export default makeScene2D('title-card-c', function* (view) {
         opacity={0.75}
       />
 
-      {/* Title — left-aligned, slides right into position */}
+      {/* Title — centred, slides right into position */}
       <Txt
         ref={titleRef}
         text={title}
@@ -63,11 +61,12 @@ export default makeScene2D('title-card-c', function* (view) {
         fontFamily={'Inter, sans-serif'}
         fill={'#ffffff'}
         opacity={0}
-        textAlign={'left'}
-        maxWidth={TEXT_W}
+        textAlign={'center'}
+        textWrap={true}
+        width={TEXT_W}
       />
 
-      {/* Thin horizontal rule — left-aligned with text */}
+      {/* Thin horizontal rule — centred */}
       <Rect
         ref={tickRef}
         width={0}
@@ -77,7 +76,7 @@ export default makeScene2D('title-card-c', function* (view) {
         y={TICK_Y}
       />
 
-      {/* Subtitle — left-aligned */}
+      {/* Subtitle — centred */}
       <Txt
         ref={subRef}
         text={subtitle}
@@ -89,8 +88,9 @@ export default makeScene2D('title-card-c', function* (view) {
         fill={'#888888'}
         opacity={0}
         letterSpacing={4}
-        textAlign={'left'}
-        maxWidth={TEXT_W}
+        textAlign={'center'}
+        textWrap={true}
+        width={TEXT_W}
       />
     </Rect>,
   );
