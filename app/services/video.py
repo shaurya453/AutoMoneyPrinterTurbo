@@ -588,7 +588,7 @@ def apply_ken_burns(
     height: int,
     frame_scale: float = 0.85,
     zoom_start: float = 1.0,
-    zoom_end: float = 1.15,
+    zoom_end: float = 1.06,
 ):
     """
     MoviePy Ken Burns fallback.
@@ -596,7 +596,7 @@ def apply_ken_burns(
     The image is fitted into frame_scale × (width, height) centered on a static
     blurred/darkened full-screen background.  Inside that inset frame the image
     zooms smoothly from zoom_start to zoom_end (both ≥ 1.0; 1.0 = full image
-    visible, 1.15 = 15 % zoomed in showing the centre 87 % of the image).
+    visible, 1.06 = 6 % zoomed in showing the centre 94 % of the image).
     """
     from moviepy.video.VideoClip import VideoClip as _VideoClip
     from PIL import Image as _PILImage
@@ -647,7 +647,7 @@ def _render_ken_burns_ffmpeg(
     threads: int = 2,
     frame_scale: float = 0.85,
     zoom_start: float = 1.0,
-    zoom_end: float = 1.15,
+    zoom_end: float = 1.06,
     upscale_factor: int = 8,
 ) -> str:
     """
@@ -666,7 +666,7 @@ def _render_ken_burns_ffmpeg(
 
     zoom_start / zoom_end must be ≥ 1.0.
       1.0  → shows the full fitted image (no crop)
-      1.15 → zoomed in 15 %, showing the centre 87 % of the image
+      1.06 → zoomed in 6 %, showing the centre 94 % of the image
     """
     import tempfile
     from PIL import Image as _PILImage
