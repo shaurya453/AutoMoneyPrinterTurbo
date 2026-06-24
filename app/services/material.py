@@ -171,7 +171,13 @@ def sort_by_metadata(
         score -= sum(3 for w in avoid_words if w in haystack)
         return score
 
-    return sorted(candidates, key=_score, reverse=True)
+    scored = sorted(candidates, key=_score, reverse=True)
+    if config.app.get("relevance_debug_log", False):
+        for item in scored[:5]:
+            logger.debug(
+                f"metadata sort: score={_score(item):+d} tags={item.tags!r:.60} url={item.url}"
+            )
+    return scored
 
 
 def _rerank_by_thumbnail(
