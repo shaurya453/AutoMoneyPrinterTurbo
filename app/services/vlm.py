@@ -119,16 +119,22 @@ def verify_image(
     avoid_str = ", ".join(avoid) if avoid else "watermarks, text overlays, cartoons"
 
     prompt = (
-        "You are a footage reviewer for a documentary video. Evaluate whether this "
-        "image is a good visual match for the narration moment.\n\n"
+        "You are a footage curator for a documentary video. Decide whether this image "
+        "is acceptable b-roll for the narration moment shown below.\n\n"
         f'Narration: "{narration}"\n'
         f'Visual intent: "{visual_caption}"\n'
-        f'Topic: "{video_topic}"\n'
-        f"Must show: {must_show_str}\n"
+        f'Overall topic: "{video_topic}"\n'
+        f"Should show: {must_show_str}\n"
         f"Avoid: {avoid_str}\n\n"
-        'Return JSON only: {"accepted": true/false, "score": 0.0-1.0, "reason": "short string"}\n'
-        "Reject if the image is clearly off-topic, contains watermarks, heavy text, "
-        "cartoons, or does not support the narration."
+        "Scoring guide:\n"
+        "  0.8–1.0 — clearly on-topic, strong visual match\n"
+        "  0.5–0.7 — thematically related, acceptable b-roll even if not a perfect match\n"
+        "  0.2–0.4 — loosely related or too generic for this topic\n"
+        "  0.0–0.1 — clearly wrong, offensive, or contains watermarks/heavy text/cartoons\n\n"
+        "Be lenient: footage that is thematically relevant to the overall topic is acceptable "
+        "even if it doesn't match the visual intent word-for-word. "
+        "Only score below 0.3 if the image is clearly wrong for this documentary.\n\n"
+        'Return JSON only: {"accepted": true/false, "score": 0.0-1.0, "reason": "short string"}'
     )
 
     global _consecutive_rate_errors, _circuit_open
@@ -169,7 +175,11 @@ def verify_image(
         if response.usage:
             _total_input_tokens += response.usage.prompt_tokens or 0
             _total_output_tokens += response.usage.completion_tokens or 0
-        return not accepted or score < threshold
+        # Use score as the sole gate. The accepted boolean is advisory only —
+        # the VLM can be overly literal about exact visual match, so we let the
+        # numeric score (calibrated by the prompt's scoring guide) decide.
+        del accepted
+        return score < threshold
     except Exception as exc:
         exc_str = str(exc)
         if "429" in exc_str or "rate_limit" in exc_str.lower() or "quota" in exc_str.lower():
