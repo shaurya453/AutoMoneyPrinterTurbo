@@ -62,6 +62,19 @@ def passes(result: Optional[bool]) -> bool:
     return result is not True
 
 
+def _to_jpeg(image_bytes: bytes) -> bytes:
+    """Re-encode image_bytes to JPEG via PIL. Returns b'' if decoding fails."""
+    try:
+        import io
+        from PIL import Image
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            buf = io.BytesIO()
+            img.convert("RGB").save(buf, format="JPEG", quality=85)
+            return buf.getvalue()
+    except Exception:
+        return b""
+
+
 def verify_image(
     image_bytes: bytes,
     narration: str,
@@ -102,6 +115,11 @@ def verify_image(
 
     global _consecutive_rate_errors, _circuit_open
     try:
+        # Normalize to JPEG — OpenAI only accepts png/jpeg/gif/webp and some
+        # CDNs serve AVIF or other formats that will cause a 400.
+        image_bytes = _to_jpeg(image_bytes)
+        if not image_bytes:
+            return None
         b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
         response = client.chat.completions.create(
             model=model,
