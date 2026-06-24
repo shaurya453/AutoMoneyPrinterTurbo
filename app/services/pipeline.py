@@ -257,12 +257,12 @@ def _build_query_ladder(
             if q not in ladder:
                 ladder.append(q)
         else:
-            # Thematic: bare concept first, anchored version as fallback rung.
+            # Thematic: bare concept only. Appending the full topic string
+            # produces long, over-specific queries ("supermarket aisle empty
+            # shelves vanishing packaged food staples") that stock image search
+            # handles poorly. The bare topic rung below is the safety net.
             if concept not in ladder:
                 ladder.append(concept)
-            anchored = f"{concept} {video_topic}"
-            if anchored not in ladder:
-                ladder.append(anchored)
 
     if video_topic and video_topic not in ladder:
         ladder.append(video_topic)
