@@ -113,7 +113,7 @@ def verify_image(
         return None
 
     model = str(config.app.get("vlm_model", "gpt-4.1-nano"))
-    threshold = float(config.app.get("vlm_threshold", 0.55))
+    threshold = float(config.app.get("vlm_threshold", 0.35))
 
     must_show_str = ", ".join(must_show) if must_show else "anything relevant"
     avoid_str = ", ".join(avoid) if avoid else "watermarks, text overlays, cartoons"
@@ -175,10 +175,9 @@ def verify_image(
         if response.usage:
             _total_input_tokens += response.usage.prompt_tokens or 0
             _total_output_tokens += response.usage.completion_tokens or 0
-        # Use score as the sole gate. The accepted boolean is advisory only —
-        # the VLM can be overly literal about exact visual match, so we let the
-        # numeric score (calibrated by the prompt's scoring guide) decide.
-        del accepted
+        # Score is the sole gate; accepted is logged above but not used here —
+        # the VLM tends to say accepted=false for thematically relevant footage
+        # that doesn't exactly match the visual caption wording.
         return score < threshold
     except Exception as exc:
         exc_str = str(exc)

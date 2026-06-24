@@ -230,19 +230,17 @@ def _build_query_ladder(
     determined by `video_type`.
 
     named_entity — every concept is combined with `video_topic` upfront
-        ("{concept} {video_topic}"), preserving the original constant-anchor
-        behavior.  Variety comes from different aspects of the same subject.
+        ("{concept} {video_topic}"), preserving specificity for real-world
+        subjects.  Variety comes from different aspects of the same subject.
 
-    thematic (default) — the bare concept is tried first, with the anchored
-        form ("{concept} {video_topic}") as the immediately-following fallback
-        rung.  The anchor is only reached when the bare-concept search returns
-        nothing or all candidates fail relevance, keeping the theme as a
-        disambiguation net rather than a constant prefix that collapses every
-        shot into the same visual stereotype.
+    thematic (default) — bare concepts only, no topic appended per concept.
+        Appending the topic produces overly long, precise phrases ("supermarket
+        aisle empty shelves vanishing packaged food staples") that stock search
+        engines handle poorly. The final bare-`video_topic` rung is the only
+        anchor and acts as a last-resort safety net.
 
-    In both modes a final bare-`video_topic` rung is appended as the last-resort
-    safety net.  Duplicates are removed in order.  When `video_topic` is empty,
-    both modes fall back to bare concepts (legacy behavior).
+    Duplicates are removed in order.  When `video_topic` is empty, both modes
+    fall back to bare concepts (legacy behavior).
     """
     video_topic = (video_topic or "").strip()
     ladder: List[str] = []
