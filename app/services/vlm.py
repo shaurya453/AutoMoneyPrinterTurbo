@@ -1,14 +1,15 @@
 """
-app/services/vlm.py — VLM visual verification via Google Gemini
+app/services/vlm.py — VLM visual verification via OpenAI
 
 Checks downloaded footage against narration context. Any failure degrades
 gracefully to None, which is treated as "pass" by passes() — mirroring the
 nsfw.py and relevance.py fail-open pattern.
 
 Enable by setting vlm_verify_enabled = true and vlm_api_key in config.toml.
-Get a free Gemini API key at aistudio.google.com (1,500 req/day free).
+Uses gpt-4.1-nano by default (~$0.002 per video at 10 clips).
 """
 
+import base64
 import json
 from typing import List, Optional
 
@@ -41,10 +42,10 @@ def _get_client():
         return None
 
     try:
-        from google import genai
+        from openai import OpenAI
 
-        _client = genai.Client(api_key=api_key)
-        logger.info("VLM: Google Gemini client initialized")
+        _client = OpenAI(api_key=api_key)
+        logger.info("VLM: OpenAI client initialized")
     except Exception as exc:
         logger.warning(f"VLM unavailable, continuing without it: {exc}")
         _client = None
@@ -80,7 +81,7 @@ def verify_image(
     if client is None or not image_bytes:
         return None
 
-    model = str(config.app.get("vlm_model", "gemini-2.0-flash-lite"))
+    model = str(config.app.get("vlm_model", "gpt-4.1-nano"))
     threshold = float(config.app.get("vlm_threshold", 0.55))
 
     must_show_str = ", ".join(must_show) if must_show else "anything relevant"
@@ -101,39 +102,45 @@ def verify_image(
 
     global _consecutive_rate_errors, _circuit_open
     try:
-        from google.genai import types
-
-        response = client.models.generate_content(
+        b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+        response = client.chat.completions.create(
             model=model,
-            contents=[
-                prompt,
-                types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "low"},
+                        },
+                    ],
+                }
             ],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-            ),
+            response_format={"type": "json_object"},
+            max_tokens=100,
         )
-        raw = (response.text or "").strip()
+        raw = (response.choices[0].message.content or "").strip()
         data = json.loads(raw)
         accepted = bool(data.get("accepted", True))
         score = float(data.get("score", 0.5))
         reason = str(data.get("reason", ""))
         if config.app.get("relevance_debug_log", False):
             logger.debug(f"VLM: accepted={accepted} score={score:.2f} reason={reason!r}")
-        _consecutive_rate_errors = 0  # reset on success
+        _consecutive_rate_errors = 0
         return not accepted or score < threshold
     except Exception as exc:
         exc_str = str(exc)
-        if "429" in exc_str or "RESOURCE_EXHAUSTED" in exc_str or "quota" in exc_str.lower():
+        if "429" in exc_str or "rate_limit" in exc_str.lower() or "quota" in exc_str.lower():
             _consecutive_rate_errors += 1
             if _consecutive_rate_errors >= _CIRCUIT_BREAKER_THRESHOLD:
                 _circuit_open = True
                 logger.warning(
                     f"VLM circuit breaker tripped after {_consecutive_rate_errors} "
-                    f"consecutive quota errors — VLM disabled for this run (fail-open)"
+                    f"consecutive rate errors — VLM disabled for this run (fail-open)"
                 )
             else:
-                logger.warning(f"VLM quota error ({_consecutive_rate_errors}/{_CIRCUIT_BREAKER_THRESHOLD}), fail-open")
+                logger.warning(f"VLM rate error ({_consecutive_rate_errors}/{_CIRCUIT_BREAKER_THRESHOLD}), fail-open")
         else:
             logger.warning(f"VLM verify failed (fail-open): {exc}")
         return None
