@@ -19,6 +19,12 @@ from app.config import config
 _client = None
 _client_load_attempted = False
 
+# Circuit breaker: after this many consecutive 429/quota errors, stop calling
+# the API for the rest of the process (fail-open silently).
+_CIRCUIT_BREAKER_THRESHOLD = 3
+_consecutive_rate_errors = 0
+_circuit_open = False
+
 
 def _get_client():
     global _client, _client_load_attempted
@@ -46,8 +52,8 @@ def _get_client():
 
 
 def is_enabled() -> bool:
-    """True if VLM verification is enabled and the Gemini client loaded."""
-    return _get_client() is not None
+    """True if VLM verification is enabled, client loaded, and circuit not open."""
+    return _get_client() is not None and not _circuit_open
 
 
 def passes(result: Optional[bool]) -> bool:
@@ -93,6 +99,7 @@ def verify_image(
         "cartoons, or does not support the narration."
     )
 
+    global _consecutive_rate_errors, _circuit_open
     try:
         from google.genai import types
 
@@ -113,7 +120,20 @@ def verify_image(
         reason = str(data.get("reason", ""))
         if config.app.get("relevance_debug_log", False):
             logger.debug(f"VLM: accepted={accepted} score={score:.2f} reason={reason!r}")
+        _consecutive_rate_errors = 0  # reset on success
         return not accepted or score < threshold
     except Exception as exc:
-        logger.warning(f"VLM verify failed (fail-open): {exc}")
+        exc_str = str(exc)
+        if "429" in exc_str or "RESOURCE_EXHAUSTED" in exc_str or "quota" in exc_str.lower():
+            _consecutive_rate_errors += 1
+            if _consecutive_rate_errors >= _CIRCUIT_BREAKER_THRESHOLD:
+                _circuit_open = True
+                logger.warning(
+                    f"VLM circuit breaker tripped after {_consecutive_rate_errors} "
+                    f"consecutive quota errors — VLM disabled for this run (fail-open)"
+                )
+            else:
+                logger.warning(f"VLM quota error ({_consecutive_rate_errors}/{_CIRCUIT_BREAKER_THRESHOLD}), fail-open")
+        else:
+            logger.warning(f"VLM verify failed (fail-open): {exc}")
         return None
