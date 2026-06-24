@@ -62,6 +62,7 @@ export default makeScene2D('title-card-c', function* (view) {
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
+        justifyContent={'center'}
         textWrap={true}
         width={TEXT_W}
       />
@@ -89,6 +90,7 @@ export default makeScene2D('title-card-c', function* (view) {
         opacity={0}
         letterSpacing={4}
         textAlign={'center'}
+        justifyContent={'center'}
         textWrap={true}
         width={TEXT_W}
       />

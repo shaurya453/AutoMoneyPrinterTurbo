@@ -40,6 +40,7 @@ export default makeScene2D('transition', function* (view) {
       <Txt
         ref={labelRef}
         text={label}
+        x={0}
         y={LABEL_Y}
         fontSize={80}
         fontWeight={700}
@@ -47,6 +48,7 @@ export default makeScene2D('transition', function* (view) {
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
+        justifyContent={'center'}
         width={1600}
         textWrap={true}
         letterSpacing={4}
@@ -54,6 +56,7 @@ export default makeScene2D('transition', function* (view) {
       <Txt
         ref={sublabelRef}
         text={sublabel}
+        x={0}
         y={SUBLABEL_Y}
         fontSize={34}
         fontWeight={300}
@@ -61,6 +64,7 @@ export default makeScene2D('transition', function* (view) {
         fill={'#888888'}
         opacity={0}
         textAlign={'center'}
+        justifyContent={'center'}
         width={1400}
         textWrap={true}
         letterSpacing={2}

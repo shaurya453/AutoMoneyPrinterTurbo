@@ -63,6 +63,7 @@ export default makeScene2D('list-d', function* (view) {
       <Txt
         ref={titleRef}
         text={title}
+        x={0}
         y={TITLE_Y}
         fontSize={52}
         fontWeight={700}
@@ -70,6 +71,7 @@ export default makeScene2D('list-d', function* (view) {
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
+        justifyContent={'center'}
         width={1600}
         textWrap={true}
       />
@@ -105,7 +107,6 @@ export default makeScene2D('list-d', function* (view) {
             fontFamily={'Inter, sans-serif'}
             fill={COLORS[i % COLORS.length]}
             opacity={0}
-            textAlign={'left'}
           />
         );
       })}
@@ -124,6 +125,7 @@ export default makeScene2D('list-d', function* (view) {
             fill={'#d8d8d8'}
             opacity={0}
             textAlign={'center'}
+            justifyContent={'center'}
             width={CARD_W - 48}
             textWrap={true}
           />

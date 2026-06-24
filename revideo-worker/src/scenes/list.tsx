@@ -48,6 +48,7 @@ export default makeScene2D('list', function* (view) {
       <Txt
         ref={titleRef}
         text={title}
+        x={0}
         y={TITLE_Y}
         fontSize={54}
         fontWeight={700}
@@ -55,6 +56,7 @@ export default makeScene2D('list', function* (view) {
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
+        justifyContent={'center'}
         width={1600}
         textWrap={true}
       />
@@ -84,6 +86,7 @@ export default makeScene2D('list', function* (view) {
           y={rowYs[i]}
           width={1100}
           textAlign={'left'}
+          justifyContent={'flex-start'}
           textWrap={true}
           opacity={0}
         />

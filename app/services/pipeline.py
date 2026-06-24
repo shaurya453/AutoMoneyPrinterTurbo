@@ -906,6 +906,7 @@ def start(job_path: str) -> Optional[dict]:
     # narration. Each sub-clip fetches a different image (used_urls dedupes).
     _CLIP_TARGET = 4.0
     _MIN_VISUAL_DUR = 3.0  # absolute floor for any single clip's duration
+    _MIN_GRAPHIC_DUR = 4.0  # minimum for narrated (Pattern 2) graphic clips
     _IMAGE_CLIP_MAX = 7.0  # max seconds per individual Ken Burns image clip
 
     # ---- Pass 1: plan per-sentence clip durations using absolute resync.
@@ -1049,7 +1050,7 @@ def start(job_path: str) -> Optional[dict]:
         # the normal footage fetch so the sentence is never left visually empty.
         if sent.get("graphic_type") and sent.get("text"):
             from app.services import graphics as _graphics
-            gfx_dur = sum(durations)   # full sentence visual span from Whisper
+            gfx_dur = max(sum(durations), _MIN_GRAPHIC_DUR)  # enforce minimum visual span
             gfx_path = os.path.join(clips_dir, f"clip-{clip_counter:04d}.mp4")
             clip_counter += 1
             w, h = video_aspect.to_resolution()

@@ -71,6 +71,7 @@ export default makeScene2D('infographic', function* (view) {
       <Txt
         ref={titleRef}
         text={title}
+        x={0}
         y={-420}
         fontSize={56}
         fontWeight={700}
@@ -78,6 +79,7 @@ export default makeScene2D('infographic', function* (view) {
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
+        justifyContent={'center'}
         textWrap={true}
         width={1680}
       />
@@ -101,6 +103,7 @@ export default makeScene2D('infographic', function* (view) {
           fontFamily={'Inter, sans-serif'}
           fill={'#999999'}
           textAlign={'center'}
+          justifyContent={'center'}
           width={BAR_SLOT_W - 12}
           textWrap={true}
         />
@@ -132,6 +135,7 @@ export default makeScene2D('infographic', function* (view) {
           fill={'#ffffff'}
           opacity={0}
           textAlign={'center'}
+          justifyContent={'center'}
           width={BAR_SLOT_W - 20}
           textWrap={true}
         />

@@ -32,8 +32,11 @@ export default makeScene2D('list-c', function* (view) {
 
   const BAR_W    = 1760;  // full-width accent bar
   const BAR_X    = 0;     // centred
-  // TEXT_X is the CENTER of the 1600px text bounding box; left edge lands at -820 (TEXT_X - 800)
-  const TEXT_X   = -20;
+  // Text column shares the same left anchor as list-a/b (LEFT_ANCHOR = -640).
+  // With a 1280px box centred at x=0, the left edge lands exactly at -640.
+  const LEFT_ANCHOR = -640;
+  const TEXT_W   = 1280;
+  const TEXT_X   = 0;
 
   const SWEEP_DUR = 0.28;
   const FADE_DUR  = 0.30;
@@ -50,6 +53,7 @@ export default makeScene2D('list-c', function* (view) {
       <Txt
         ref={titleRef}
         text={title}
+        x={0}
         y={TITLE_Y}
         fontSize={54}
         fontWeight={700}
@@ -57,6 +61,7 @@ export default makeScene2D('list-c', function* (view) {
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
+        justifyContent={'center'}
         width={1600}
         textWrap={true}
       />
@@ -88,7 +93,8 @@ export default makeScene2D('list-c', function* (view) {
           fill={'#e8e8e8'}
           opacity={0}
           textAlign={'left'}
-          width={1600}
+          justifyContent={'flex-start'}
+          width={TEXT_W}
           textWrap={true}
         />
       ))}

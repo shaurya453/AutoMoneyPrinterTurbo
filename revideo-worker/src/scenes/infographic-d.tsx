@@ -49,6 +49,7 @@ export default makeScene2D('infographic-d', function* (view) {
       <Txt
         ref={titleRef}
         text={title}
+        x={0}
         y={-400}
         fontSize={52}
         fontWeight={700}
@@ -56,6 +57,7 @@ export default makeScene2D('infographic-d', function* (view) {
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
+        justifyContent={'center'}
         width={1680}
         textWrap={true}
       />
@@ -79,6 +81,7 @@ export default makeScene2D('infographic-d', function* (view) {
           fill={COLORS[i % COLORS.length]}
           opacity={0}
           textAlign={'center'}
+          justifyContent={'center'}
         />
       ))}
 
@@ -94,6 +97,7 @@ export default makeScene2D('infographic-d', function* (view) {
           fill={'#666666'}
           opacity={0}
           textAlign={'center'}
+          justifyContent={'center'}
         />
       ))}
 
@@ -109,6 +113,7 @@ export default makeScene2D('infographic-d', function* (view) {
           fill={'#888888'}
           opacity={0}
           textAlign={'center'}
+          justifyContent={'center'}
           width={SLOT_W - 20}
           textWrap={true}
         />

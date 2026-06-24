@@ -28,10 +28,11 @@ export default makeScene2D('infographic-b', function* (view) {
   const ROW_GAP    = 96;
 
   // Label zone: right-aligned labels live to the left of AXIS_X.
-  // With LABEL_W=280, label right edge aligns flush with AXIS_X.
+  // LABEL_GAP adds whitespace between the label right edge and the axis line.
   const AXIS_X    = -220;
   const LABEL_W   = 280;
-  const LABEL_X   = AXIS_X - LABEL_W / 2;  // = -360 (centre of label bounding box)
+  const LABEL_GAP = 24;
+  const LABEL_X   = AXIS_X - LABEL_W / 2 - LABEL_GAP;  // right edge 24px left of AXIS_X
   const MAX_BAR_W = 680;
 
   const totalH   = BAR_H + (n - 1) * ROW_GAP;
@@ -57,6 +58,7 @@ export default makeScene2D('infographic-b', function* (view) {
       <Txt
         ref={titleRef}
         text={title}
+        x={0}
         y={TITLE_Y}
         fontSize={52}
         fontWeight={700}
@@ -64,6 +66,7 @@ export default makeScene2D('infographic-b', function* (view) {
         fill={'#ffffff'}
         opacity={0}
         textAlign={'center'}
+        justifyContent={'center'}
         width={1680}
         textWrap={true}
       />
@@ -90,7 +93,8 @@ export default makeScene2D('infographic-b', function* (view) {
           fontFamily={'Inter, sans-serif'}
           fill={'#999999'}
           textAlign={'right'}
-          maxWidth={LABEL_W}
+          justifyContent={'flex-end'}
+          width={LABEL_W}
           textWrap={true}
         />
       ))}
@@ -108,12 +112,12 @@ export default makeScene2D('infographic-b', function* (view) {
         />
       ))}
 
-      {/* Value labels — appear at bar tip */}
+      {/* Value labels — appear at bar tip; left-edge = bar-right + 12 px gap */}
       {Array.from({length: n}, (_, i) => (
         <Txt
           ref={valRefs[i]}
           text={formatVal(values[i])}
-          x={AXIS_X + targetWs[i] + 56}
+          x={AXIS_X + targetWs[i] + 102}
           y={barYs[i]}
           fontSize={24}
           fontWeight={700}
@@ -121,8 +125,7 @@ export default makeScene2D('infographic-b', function* (view) {
           fill={'#ffffff'}
           opacity={0}
           textAlign={'left'}
-          maxWidth={180}
-          textWrap={true}
+          width={180}
         />
       ))}
     </Rect>,
