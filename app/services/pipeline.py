@@ -31,7 +31,7 @@ from app.models.schema import (
     VideoParams,
     VideoTransitionMode,
 )
-from app.services import material, nsfw, relevance, subtitle, video, voice
+from app.services import material, nsfw, relevance, subtitle, video, voice, vlm
 from app.utils import utils
 
 
@@ -280,6 +280,7 @@ def _fetch_video_clip(
     used_urls: set,
     caption_prompt: str = "",
     query_ladder: Optional[List[str]] = None,
+    video_topic: str = "",
     recent_embeddings: Optional[Any] = None,
     dedup_threshold: float = 0.92,
 ) -> Optional[str]:
@@ -317,6 +318,8 @@ def _fetch_video_clip(
     coverr_enabled = bool(config.app.get("coverr_enabled", True))
     motion_filter_enabled = bool(config.app.get("motion_filter_enabled", True))
     motion_min_score = float(config.app.get("motion_min_score", 0.04))
+    must_show = sentence.get("must_show") or []
+    avoid = sentence.get("avoid") or []
 
     def _get_rung_results(term: str) -> list:
         """Fetch candidates for one ladder rung from primary source + Coverr."""
@@ -333,8 +336,12 @@ def _fetch_video_clip(
                 video_aspect=video_aspect,
                 prompt=caption_prompt,
             )
-            return primary + coverr
-        return primary
+            combined = primary + coverr
+        else:
+            combined = primary
+        if must_show or avoid:
+            combined = material.sort_by_metadata(combined, caption_prompt, must_show, avoid)
+        return combined
 
     # search_terms is a subject-anchored query ladder: each entry is
     # "{visual_concept} {video_topic}", specific concept first and
@@ -409,6 +416,23 @@ def _fetch_video_clip(
                 except Exception:
                     pass
                 continue
+
+            if vlm.is_enabled() and frames:
+                mid_frame = frames[len(frames) // 2]
+                if not vlm.passes(vlm.verify_image(
+                    mid_frame,
+                    sentence.get("text", ""),
+                    sentence.get("visual_caption", ""),
+                    video_topic,
+                    must_show,
+                    avoid,
+                )):
+                    logger.info(f"clip {clip_idx}: rejected by VLM: {candidate.url}")
+                    try:
+                        os.remove(out_path)
+                    except Exception:
+                        pass
+                    continue
 
             # Motion gate — reject static clips (photographs exported as MP4,
             # frozen zooms) before spending a relevance or dedup check on them.
@@ -524,6 +548,7 @@ def _fetch_image_clip(
     used_urls: set,
     caption_prompt: str = "",
     query_ladder: Optional[List[str]] = None,
+    video_topic: str = "",
     source_order: Optional[List[str]] = None,
     recent_embeddings: Optional[Any] = None,
     dedup_threshold: float = 0.92,
@@ -549,6 +574,11 @@ def _fetch_image_clip(
         caption_prompt=caption_prompt,
         recent_embeddings=recent_embeddings,
         dedup_threshold=dedup_threshold,
+        narration=sentence.get("text", ""),
+        visual_caption=sentence.get("visual_caption", ""),
+        video_topic=video_topic,
+        must_show=sentence.get("must_show") or [],
+        avoid=sentence.get("avoid") or [],
     )
     if not image_path:
         return None
@@ -645,11 +675,12 @@ def _fetch_clip(
     args_video = (sentence, sent_duration, trim_buffer, source, video_aspect, clip_idx, clips_dir, used_urls, caption_prompt, query_ladder)
     args_image = (sentence, sent_duration, trim_buffer, video_aspect, clip_idx, clips_dir, used_urls, caption_prompt, query_ladder)
     dedup_kw = {"recent_embeddings": recent_embeddings, "dedup_threshold": dedup_threshold}
+    topic_kw = {"video_topic": video_topic}
 
     if content_track == "named":
         # Named/specific subjects are always served as images via Serper,
         # regardless of media_type or the image-ratio cap's preference flip.
-        result = _fetch_image_clip(*args_image, source_order=named_source_order, **dedup_kw)
+        result = _fetch_image_clip(*args_image, source_order=named_source_order, **dedup_kw, **topic_kw)
         primary, fallback_name, is_image = "image", "video", True
     elif video_type == "named_entity":
         # For named_entity broll, respect media_type but route image requests
@@ -662,10 +693,10 @@ def _fetch_clip(
             else sentence.get("media_type") == "image"
         )
         if is_image:
-            result = _fetch_image_clip(*args_image, source_order=named_source_order, **dedup_kw)
+            result = _fetch_image_clip(*args_image, source_order=named_source_order, **dedup_kw, **topic_kw)
             primary, fallback_name = "image", "video"
         else:
-            result = _fetch_video_clip(*args_video, **dedup_kw)
+            result = _fetch_video_clip(*args_video, **dedup_kw, **topic_kw)
             primary, fallback_name = "video", "image"
     else:
         is_image = (
@@ -674,10 +705,10 @@ def _fetch_clip(
             else sentence.get("media_type") == "image"
         )
         if is_image:
-            result = _fetch_image_clip(*args_image, source_order=None, **dedup_kw)
+            result = _fetch_image_clip(*args_image, source_order=None, **dedup_kw, **topic_kw)
             primary, fallback_name = "image", "video"
         else:
-            result = _fetch_video_clip(*args_video, **dedup_kw)
+            result = _fetch_video_clip(*args_video, **dedup_kw, **topic_kw)
             primary, fallback_name = "video", "image"
 
     if result:
@@ -685,7 +716,7 @@ def _fetch_clip(
 
     logger.warning(f"clip {clip_idx}: no {primary} found for {query_ladder} — trying {fallback_name} fallback")
     if fallback_name == "video":
-        result = _fetch_video_clip(*args_video, **dedup_kw)
+        result = _fetch_video_clip(*args_video, **dedup_kw, **topic_kw)
     else:
         # For named_entity videos, broll image fallbacks also route through
         # the named-track source order (Serper first) — generic broll image
@@ -696,6 +727,7 @@ def _fetch_clip(
             *args_image,
             source_order=(named_source_order if use_named_order else None),
             **dedup_kw,
+            **topic_kw,
         )
     if result:
         return result, (fallback_name == "image")
@@ -710,12 +742,12 @@ def _fetch_clip(
             fb_caption_prompt = relevance.build_prompt(extra_concepts[0], video_topic)
             args_video_fb = (fb_sentence, sent_duration, trim_buffer, source, video_aspect, clip_idx, clips_dir, used_urls, fb_caption_prompt, fb_ladder)
             args_image_fb = (fb_sentence, sent_duration, trim_buffer, video_aspect, clip_idx, clips_dir, used_urls, fb_caption_prompt, fb_ladder)
-            video_fb = _fetch_video_clip(*args_video_fb, **dedup_kw)
+            video_fb = _fetch_video_clip(*args_video_fb, **dedup_kw, **topic_kw)
             if video_fb:
                 logger.info(f"clip {clip_idx}: used topic-wide fallback concepts {extra_concepts[:3]}")
                 return video_fb, False
             fb_named_order = named_source_order if video_type == "named_entity" else None
-            image_fb = _fetch_image_clip(*args_image_fb, source_order=fb_named_order, **dedup_kw)
+            image_fb = _fetch_image_clip(*args_image_fb, source_order=fb_named_order, **dedup_kw, **topic_kw)
             if image_fb:
                 logger.info(f"clip {clip_idx}: used topic-wide fallback concepts {extra_concepts[:3]}")
                 return image_fb, True

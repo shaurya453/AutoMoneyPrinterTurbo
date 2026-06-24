@@ -54,6 +54,7 @@ class MaterialInfo:
     url: str = ""
     duration: int = 0
     thumbnail: str = ""
+    tags: str = ""
 
 
 class VideoParams(BaseModel):

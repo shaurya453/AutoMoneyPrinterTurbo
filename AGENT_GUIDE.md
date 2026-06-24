@@ -67,6 +67,21 @@ One sentence describing the shot — used by the CLIP relevance filter to rank a
 | "I walked into a Kroger" | `["Kroger storefront", "supermarket interior"]` | `"wide shot of a supermarket interior with aisles and shoppers"` |
 | "Tim Cook took the stage" | `["Tim Cook portrait"]` | `"Tim Cook speaking on a stage at a product event"` |
 
+### `must_show` and `avoid` (optional)
+
+Optional lists of plain-English keywords used to guide the VLM footage reviewer (when `vlm_verify_enabled = true` in config) and to pre-sort candidates by metadata match.
+
+```jsonc
+"must_show": ["shopping cart", "grocery aisle"],   // footage MUST contain these
+"avoid": ["people's faces", "text overlays", "logos"]  // footage should avoid these
+```
+
+**When to set these:**
+- Set `must_show` when a specific visual element is essential to the narration and generic b-roll would mislead (e.g. the sentence explicitly describes a shopping cart being pushed).
+- Set `avoid` when the topic makes certain image types likely to appear but wrong (e.g. a finance documentary should avoid meme-style charts; a nature doc should avoid cartoon wildlife).
+- Both fields are optional lists. Omit them (or set to `[]`) for most sentences — the VLM uses sensible defaults (avoid watermarks, text overlays, cartoons) when not set.
+- Do NOT use these as a substitute for `visual_concepts` — they are a refinement on top of the search query, not the query itself.
+
 ### `content_track`
 
 - **`"named"`** — `visual_concepts[0]` is a specific, uniquely identifiable entity that has a real-world name. Routes to Google Images (Serper) first. `media_type` is ignored for the primary fetch.
@@ -356,7 +371,9 @@ These are starting points — adjust within a job if a particular section is unu
       "content_track": "broll",       // "named" | "broll" | "graphic"
       "visual_caption": "what the camera should show, one sentence",
       "media_type": "video",          // "video" | "image"
-      "assigned_motif": "..."         // thematic only
+      "assigned_motif": "...",        // thematic only
+      "must_show": [],                // optional — keywords footage MUST contain
+      "avoid": []                     // optional — keywords footage should avoid
     },
     // Pattern 1 graphic (silent)
     {

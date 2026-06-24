@@ -29,3 +29,10 @@ tokenizers==0.23.1
 # nsfw_gate_enabled in config.toml) -- relevance/tag-based filtering still
 # applies, but the pixel-level safety net is disabled.
 nudenet==3.4.2
+
+# VLM footage verification (app/services/vlm.py): uses Google Gemini vision
+# to check each downloaded image/frame against the narration sentence.
+# Free tier at aistudio.google.com: 1,500 req/day on gemini-2.0-flash-lite.
+# If this package fails to load or vlm_api_key is missing/vlm_verify_enabled
+# is false, vlm.py degrades to a no-op automatically.
+google-genai>=1.0.0

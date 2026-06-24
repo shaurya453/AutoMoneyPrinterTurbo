@@ -11,7 +11,7 @@ from PIL import Image, UnidentifiedImageError
 
 from app.config import config
 from app.models.schema import MaterialInfo, VideoAspect
-from app.services import nsfw, relevance
+from app.services import nsfw, relevance, vlm
 from app.utils import utils
 
 # Thread-safe counter for API key rotation
@@ -119,6 +119,61 @@ def _download_bytes(url: str) -> bytes:
 _MAX_RERANK_CANDIDATES = 25
 
 
+def _pexels_url_to_tags(url: str) -> str:
+    """Extract descriptive words from a Pexels video/photo page URL.
+
+    e.g. 'https://www.pexels.com/video/bird-flying-in-sky-4048183/' → 'bird flying in sky'
+    """
+    if not url:
+        return ""
+    try:
+        path = urlparse(url).path.strip("/")
+        segment = path.split("/")[-1]
+        parts = [p for p in segment.split("-") if p and not p.isdigit()]
+        return " ".join(parts)
+    except Exception:
+        return ""
+
+
+def sort_by_metadata(
+    candidates: list,
+    caption_prompt: str,
+    must_show: List[str] = None,
+    avoid: List[str] = None,
+) -> list:
+    """Re-order candidates by keyword match score against tags/metadata.
+
+    A lightweight pre-sort before download: candidates whose tags contain
+    more caption_prompt words are tried first; must_show hits get a bonus,
+    avoid hits get a penalty. Never discards — only reorders.
+    """
+    if not candidates:
+        return candidates
+    must_show = must_show or []
+    avoid = avoid or []
+
+    stop = {"a", "an", "the", "of", "in", "on", "at", "to", "for", "and", "or", "with"}
+    prompt_words = [
+        w.lower()
+        for w in re.findall(r"\w+", caption_prompt)
+        if len(w) > 2 and w.lower() not in stop
+    ]
+    must_words = [w.lower() for w in " ".join(must_show).split() if len(w) > 2]
+    avoid_words = [w.lower() for w in " ".join(avoid).split() if len(w) > 2]
+
+    if not prompt_words and not must_words and not avoid_words:
+        return candidates
+
+    def _score(item) -> int:
+        haystack = (item.tags or "").lower()
+        score = sum(1 for w in prompt_words if w in haystack)
+        score += sum(2 for w in must_words if w in haystack)
+        score -= sum(3 for w in avoid_words if w in haystack)
+        return score
+
+    return sorted(candidates, key=_score, reverse=True)
+
+
 def _rerank_by_thumbnail(
     items: List[MaterialInfo], prompt: str, kind: str = "video"
 ) -> List[MaterialInfo]:
@@ -202,6 +257,7 @@ def search_videos_pexels(
                 item.url = chosen["link"]
                 item.duration = duration
                 item.thumbnail = v.get("image", "")
+                item.tags = _pexels_url_to_tags(v.get("url", ""))
                 video_items.append(item)
         return _rerank_by_thumbnail(video_items, prompt, kind="video")
     except Exception as e:
@@ -279,6 +335,7 @@ def search_videos_pixabay(
                 item.url = chosen["url"]
                 item.duration = duration
                 item.thumbnail = thumbnail
+                item.tags = v.get("tags", "")
                 video_items.append(item)
         return _rerank_by_thumbnail(video_items, prompt, kind="video")
     except Exception as e:
@@ -363,6 +420,7 @@ def search_videos_coverr(
             item.url = video_url
             item.duration = duration
             item.thumbnail = hit.get("thumbnail") or hit.get("preview") or ""
+            item.tags = (hit.get("title") or hit.get("slug", "").replace("-", " ")).strip()
             video_items.append(item)
 
         return _rerank_by_thumbnail(video_items, prompt, kind="video")
@@ -840,6 +898,11 @@ def download_image(
     caption_prompt: str = "",
     recent_embeddings=None,
     dedup_threshold: float = 0.92,
+    narration: str = "",
+    visual_caption: str = "",
+    video_topic: str = "",
+    must_show: List[str] = None,
+    avoid: List[str] = None,
 ) -> str:
     """
     Search for a still image using multiple providers in priority order and
@@ -944,6 +1007,18 @@ def download_image(
                     except Exception:
                         pass
                     continue
+
+                if vlm.is_enabled():
+                    if not vlm.passes(vlm.verify_image(
+                        image_bytes, narration, visual_caption, video_topic,
+                        must_show or [], avoid or [],
+                    )):
+                        logger.info(f"VLM rejected image candidate: {url}")
+                        try:
+                            os.remove(local)
+                        except Exception:
+                            pass
+                        continue
 
                 dedup_emb = None
                 if recent_embeddings is not None:

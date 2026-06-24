@@ -110,6 +110,32 @@ nsfw_threshold = 0.25
 nsfw_frame_samples = 4
 
 # ---------------------------------------------------------------------------
+# VLM image/video verification (Google Gemini) — post-download quality gate
+# Sends each downloaded image (or midpoint frame for video clips) to a vision
+# model along with the narration sentence, visual intent, and topic. Rejects
+# footage that is clearly off-topic, contains watermarks or heavy text, or
+# doesn't match the narration moment. Runs AFTER the NSFW gate and BEFORE
+# the CLIP relevance margin — so NSFW hard-rejects still happen independently.
+# Fail-open: any API error silently falls through to CLIP-based filtering.
+#
+# Get a free key at https://aistudio.google.com — no billing required.
+# Free tier: 1,500 requests/day on gemini-2.0-flash-lite.
+# ---------------------------------------------------------------------------
+vlm_verify_enabled = false
+
+# Your Google AI Studio (Gemini) API key.
+# vlm_api_key = "your_key_here"
+vlm_api_key = ""
+
+# Gemini model to use. gemini-2.0-flash-lite is the cheapest vision model
+# and is on the free tier. Upgrade to gemini-2.0-flash for more accuracy.
+vlm_model = "gemini-2.0-flash-lite"
+
+# Reject a candidate if Gemini returns a relevance score below this threshold
+# (0.0–1.0). 0.55 means "must be a reasonable match" without being too strict.
+vlm_threshold = 0.55
+
+# ---------------------------------------------------------------------------
 # Embedding-based de-duplication at clip selection
 # Rejects any candidate whose CLIP embedding is too similar to a recently
 # placed shot, keeping the visual variety high even when the search pool is
