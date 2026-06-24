@@ -822,6 +822,8 @@ def start(job_path: str) -> Optional[dict]:
     with open(job_path, "r", encoding="utf-8") as fh:
         job = json.load(fh)
 
+    vlm.reset_usage()
+
     task_id = job.get("task_id") or utils.get_uuid()
     sentences: list = job.get("sentences", [])
     video_script: str = job.get("video_script", "").strip()
@@ -1390,6 +1392,7 @@ def start(job_path: str) -> Optional[dict]:
         "combined": combined_path,
         "clips": ordered_clips,
         "audio_duration": audio_duration,
+        "vlm_usage": vlm.get_usage(),
     }
 
     logger.success(f"pipeline complete → {output_file}")

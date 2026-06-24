@@ -76,6 +76,9 @@ def main():
         os._exit(1)
 
     print(json.dumps(result, indent=2, ensure_ascii=False))
+    vlm_usage = result.get("vlm_usage")
+    if vlm_usage:
+        print(f"PIPELINE_USAGE: {json.dumps(vlm_usage)}", flush=True)
     sys.stdout.flush()
     os._exit(0)
 

@@ -26,6 +26,24 @@ _CIRCUIT_BREAKER_THRESHOLD = 3
 _consecutive_rate_errors = 0
 _circuit_open = False
 
+# Per-run usage accumulators (reset at pipeline start via reset_usage()).
+_total_calls = 0
+_total_input_tokens = 0
+_total_output_tokens = 0
+
+
+def reset_usage() -> None:
+    global _total_calls, _total_input_tokens, _total_output_tokens
+    _total_calls = _total_input_tokens = _total_output_tokens = 0
+
+
+def get_usage() -> dict:
+    return {
+        "calls": _total_calls,
+        "input_tokens": _total_input_tokens,
+        "output_tokens": _total_output_tokens,
+    }
+
 
 def _get_client():
     global _client, _client_load_attempted
@@ -146,6 +164,11 @@ def verify_image(
         if config.app.get("relevance_debug_log", False):
             logger.debug(f"VLM: accepted={accepted} score={score:.2f} reason={reason!r}")
         _consecutive_rate_errors = 0
+        global _total_calls, _total_input_tokens, _total_output_tokens
+        _total_calls += 1
+        if response.usage:
+            _total_input_tokens += response.usage.prompt_tokens or 0
+            _total_output_tokens += response.usage.completion_tokens or 0
         return not accepted or score < threshold
     except Exception as exc:
         exc_str = str(exc)
