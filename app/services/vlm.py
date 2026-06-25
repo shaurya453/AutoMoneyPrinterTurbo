@@ -75,9 +75,12 @@ def is_enabled() -> bool:
     return _get_client() is not None and not _circuit_open
 
 
-def passes(result: Optional[bool]) -> bool:
-    """None or False passes (fail-open / accepted); only True rejects."""
-    return result is not True
+def passes(result: Optional[float]) -> bool:
+    """None → fail-open (accept). Float → accept if score >= vlm_threshold."""
+    if result is None:
+        return True
+    threshold = float(config.app.get("vlm_threshold", 0.35))
+    return result >= threshold
 
 
 def _to_jpeg(image_bytes: bytes) -> bytes:
@@ -100,11 +103,12 @@ def verify_image(
     video_topic: str,
     must_show: List[str] = None,
     avoid: List[str] = None,
-) -> Optional[bool]:
-    """Verify that image_bytes is a good visual match for the narration context.
+) -> Optional[float]:
+    """Score image_bytes against the narration context. Returns 0.0–1.0 or None (fail-open).
 
-    Returns True if rejected, False if accepted, None on any failure (fail-open).
-    Use passes(verify_image(...)) to gate acceptance.
+    Use passes(verify_image(...)) to gate acceptance — passes() compares the
+    score against vlm_threshold (default 0.35).  None means the VLM call
+    failed; passes(None) returns True (fail-open), so failures never block.
 
     For video clips, pass the midpoint frame bytes (from nsfw.sample_frame_bytes).
     """
@@ -164,21 +168,17 @@ def verify_image(
         )
         raw = (response.choices[0].message.content or "").strip()
         data = json.loads(raw)
-        accepted = bool(data.get("accepted", True))
         score = float(data.get("score", 0.5))
         reason = str(data.get("reason", ""))
         if config.app.get("relevance_debug_log", False):
-            logger.debug(f"VLM: accepted={accepted} score={score:.2f} reason={reason!r}")
+            logger.debug(f"VLM: score={score:.2f} reason={reason!r}")
         _consecutive_rate_errors = 0
         global _total_calls, _total_input_tokens, _total_output_tokens
         _total_calls += 1
         if response.usage:
             _total_input_tokens += response.usage.prompt_tokens or 0
             _total_output_tokens += response.usage.completion_tokens or 0
-        # Score is the sole gate; accepted is logged above but not used here —
-        # the VLM tends to say accepted=false for thematically relevant footage
-        # that doesn't exactly match the visual caption wording.
-        return score < threshold
+        return score
     except Exception as exc:
         exc_str = str(exc)
         if "429" in exc_str or "rate_limit" in exc_str.lower() or "quota" in exc_str.lower():

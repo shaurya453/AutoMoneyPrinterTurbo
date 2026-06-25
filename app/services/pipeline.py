@@ -1034,6 +1034,15 @@ def start(job_path: str) -> Optional[dict]:
     image_clip_count = 0
     video_clip_count = 0
 
+    # Concept-frequency guard: when the enrichment agent mode-collapses and
+    # assigns the same visual_concepts to many sentences, the same search terms
+    # exhaust their candidate pools quickly and produce visually monotone clips.
+    # Track per-concept usage and substitute fresh alternatives from the job's
+    # full concept pool once a concept has been used max_concept_reuse times.
+    from collections import Counter as _Counter
+    concept_usage: _Counter = _Counter()
+    max_concept_reuse = int(config.app.get("max_concept_reuse", 2))
+
     clip_counter = 0  # unique index for clip filenames across all sentences
     obtained_duration = 0.0  # sum of planned durations that yielded a clip
     for idx, plan in enumerate(clip_plans):
@@ -1107,6 +1116,23 @@ def start(job_path: str) -> Optional[dict]:
                     f"sentence {idx+1}: narrated graphic render failed — falling back to footage"
                 )
                 # Fall through to footage fetch below
+
+        # Concept-frequency guard: if all of this sentence's concepts are stale
+        # (used >= max_concept_reuse times), substitute fresh ones from the
+        # topic-wide pool so the search ladder broadens instead of cycling.
+        own_concepts = _get_visual_concepts(sent)
+        if (own_concepts
+                and sent.get("content_track", "broll") != "named"
+                and all(concept_usage[c] >= max_concept_reuse for c in own_concepts)):
+            fresh = [c for c in _all_concepts if concept_usage[c] < max_concept_reuse]
+            if fresh:
+                sent = {**sent, "visual_concepts": fresh[:2]}
+                logger.info(
+                    f"clip {clip_counter}: concepts {own_concepts} stale "
+                    f"(used >={max_concept_reuse}x) — substituting {fresh[:2]}"
+                )
+        for c in own_concepts:
+            concept_usage[c] += 1
 
         for clip_duration in durations:
             is_image_override = None

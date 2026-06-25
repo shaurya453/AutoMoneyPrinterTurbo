@@ -46,6 +46,7 @@ The pipeline builds a query ladder: `[concept[0], concept[0] + topic, concept[1]
 - Never force a niche `[0]` the sentence doesn't need — if generic b-roll communicates the beat, write toward the broader end
 - Disambiguate single words that could match unrelated domains (e.g. `"court"` → `"courtroom interior"`, `"scale"` → `"kitchen scale"`)
 - Disambiguate animal/insect names that are also brand names (e.g. `"firefly"` matches Firefly-branded LED bulbs; use `"firefly insect glowing"` or `"glowing beetle dark field"` instead). Same applies to `"jaguar"` (car), `"swift"` (programming language), `"python"` (software), etc.
+- **Variety rule (critical for long videos):** the same visual_concepts pair must not appear on more than 2–3 sentences across the whole video. Actively track what you have already written — pick new scenes, angles, or settings as the script progresses. Never fall back to recycling a small set of generic concepts (`"shopper inspecting label"`, `"financial report pages"`, etc.) for sentences where the narration clearly calls for something more specific.
 
 **Example (thematic, `video_topic = "grocery price inflation"`):**
 - Sentence: "I walked through the freezer aisle."
@@ -441,6 +442,7 @@ Re-read the entire sentences list as a quality audit:
 - **Graphic review**: Pattern 1 has `text: ""` and `duration` set; Pattern 2 has real `text`, no `duration`, and `visual_concepts`/`visual_caption` set. Total ≤5 graphic entries.
 - **Chapter heading check**: scan `video_script` for lines that look like headings (all-caps, "CHAPTER", "PART", "SECTION", numbered acts). Each one must have `graphic_type: "title_card"` set (Pattern 2) on its sentence entry — it must remain in `video_script` and keep its `text` so TTS speaks it.
 - **Style check**: does each graphic's `style` match the content? Long labels → `"horizontal"` infographic; 4–6 list items with equal weight → `"grid"`; ordered steps → `"numbered"`; 2–3 standalone stats → `"callouts"`.
+- **Concept-repetition check**: scan the entire sentences list for any visual_concepts pair that appears more than 3 times. Replace every overused entry with a distinct alternative that fits that sentence's specific narration beat.
 
 ---
 
