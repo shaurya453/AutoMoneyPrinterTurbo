@@ -72,40 +72,6 @@ def split_sentences(text: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Chapter heading detection — pre-tags headings as title_card graphics so
-# the agent can't miss them regardless of attention span.
-# ---------------------------------------------------------------------------
-
-_ORDINAL_WORDS = {
-    "one": "one", "two": "two", "three": "three", "four": "four",
-    "five": "five", "six": "six", "seven": "seven", "eight": "eight",
-    "nine": "nine", "ten": "ten", "eleven": "eleven", "twelve": "twelve",
-    "1": "one", "2": "two", "3": "three", "4": "four", "5": "five",
-    "6": "six", "7": "seven", "8": "eight", "9": "nine", "10": "ten",
-}
-
-# Matches: "CHAPTER ONE — Title" / "PART 2: Title" / "SECTION THREE — Title"
-# The title portion after the separator is optional.
-_HEADING_RE = re.compile(
-    r"^(CHAPTER|PART|SECTION)\s+(\w+)\s*(?:[—\-:][ \t]*(.+))?$",
-    re.IGNORECASE,
-)
-
-
-def _detect_chapter_heading(text: str):
-    """Return (title, subtitle) if text is a chapter/part/section heading, else None."""
-    m = _HEADING_RE.match(text.strip())
-    if not m:
-        return None
-    kind = m.group(1).lower()
-    num = m.group(2).lower()
-    rest = (m.group(3) or "").strip()
-    title = rest if rest else text.strip()
-    subtitle = f"{kind} {_ORDINAL_WORDS.get(num, num)}"
-    return (title, subtitle)
-
-
-# ---------------------------------------------------------------------------
 # Search-term scaffold (rough — agent must improve these in Step 2)
 # ---------------------------------------------------------------------------
 
@@ -235,22 +201,14 @@ def main():
     print(f"Sentences detected: {len(sentences)}")
 
     sentence_entries = []
-    heading_count = 0
     for sent in sentences:
         terms = extract_search_terms(sent, stopwords_set, n=args.terms)
-        entry = {
+        sentence_entries.append({
             "text": sent,
             "visual_concepts": terms,
             "content_track": "broll",
             "media_type": "video",
-        }
-        heading = _detect_chapter_heading(sent)
-        if heading:
-            title, subtitle = heading
-            entry["graphic_type"] = "title_card"
-            entry["variables"] = {"title": title, "subtitle": subtitle}
-            heading_count += 1
-        sentence_entries.append(entry)
+        })
 
     task_id = args.task_id or str(uuid.uuid4())
 
@@ -285,8 +243,6 @@ def main():
 
     print(f"Job JSON written to: {args.out}")
     print(f"Task ID: {task_id}")
-    if heading_count:
-        print(f"Chapter headings pre-tagged: {heading_count} (graphic_type: title_card)")
 
     preview_count = min(3, len(sentence_entries))
     print(f"\nSentence preview ({preview_count} of {len(sentence_entries)}):")

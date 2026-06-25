@@ -812,44 +812,6 @@ def _timings_to_srt(timings: list, subtitle_path: str) -> None:
 # Main entry point
 # ---------------------------------------------------------------------------
 
-_HEADING_RE = re.compile(
-    r"^(CHAPTER|PART|SECTION)\s+(\w+)\s*(?:[—\-:][ \t]*(.+))?$",
-    re.IGNORECASE,
-)
-_ORDINAL_WORDS = {
-    "one": "one", "two": "two", "three": "three", "four": "four",
-    "five": "five", "six": "six", "seven": "seven", "eight": "eight",
-    "nine": "nine", "ten": "ten",
-    "1": "one", "2": "two", "3": "three", "4": "four", "5": "five",
-    "6": "six", "7": "seven", "8": "eight", "9": "nine", "10": "ten",
-}
-
-
-def _enforce_heading_graphics(sentences: list) -> None:
-    """Force graphic_type='title_card' on any chapter/part/section heading the
-    agent failed to tag. Mutates sentences in-place; logs a warning for each
-    enforcement so the gap is always visible in the run log."""
-    for sent in sentences:
-        text = (sent.get("text") or "").strip()
-        m = _HEADING_RE.match(text)
-        if not m:
-            continue
-        if sent.get("graphic_type") == "title_card":
-            continue  # already tagged correctly
-        kind = m.group(1).lower()
-        num = m.group(2).lower()
-        rest = (m.group(3) or "").strip()
-        title = rest if rest else text
-        subtitle = f"{kind} {_ORDINAL_WORDS.get(num, num)}"
-        sent["graphic_type"] = "title_card"
-        if not sent.get("variables"):
-            sent["variables"] = {"title": title, "subtitle": subtitle}
-        logger.warning(
-            f"heading enforcement: '{text[:60]}' was missing graphic_type — "
-            f"force-set title_card (title={title!r}, subtitle={subtitle!r})"
-        )
-
-
 def start(job_path: str) -> Optional[dict]:
     """
     Run the full sentence-level documentary pipeline from a job JSON file.
@@ -877,8 +839,6 @@ def start(job_path: str) -> Optional[dict]:
     if not sentences:
         logger.error("job.sentences is empty — run sentence_prep.py first")
         return None
-
-    _enforce_heading_graphics(sentences)
 
     work_dir = os.path.dirname(os.path.abspath(job_path))
     os.makedirs(work_dir, exist_ok=True)
