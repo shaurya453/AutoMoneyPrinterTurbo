@@ -231,14 +231,14 @@ Add `"style": "<name>"` to request a specific variant. If omitted, the pipeline 
 
 For each sentence, ask yourself the four questions below. Do not look for specific keywords — reason about what the viewer needs at that moment.
 
-| Question to ask yourself | `graphic_type` | Max per video |
+| Question to ask yourself | `graphic_type` | Budget |
 |---|---|---|
-| **Is this sentence orienting the viewer to a new topic, chapter, or numbered item in a series?** Any sentence that introduces and names a new segment in a sequence qualifies, regardless of phrasing. Examples: "Number one, Kellogg's Corn Pops…" · "First, the Roman period…" · "Step one:…" · "Part two covers…" · "The next brand is…" · "Starting with…" · any all-caps or title-case heading. Rule of thumb: if a viewer landing mid-video would think "ah, this is a new section," it needs a title card. | `"title_card"` Pattern 2 | 1 per heading |
-| **Must the viewer track or compare specific numbers to understand this sentence?** Two or more concrete quantities — prices, percentages, years, counts — placed side by side for comparison. A single isolated statistic does not qualify; it must require visual comparison to land. | `"infographic"` | 0–2 |
-| **Does this sentence introduce a parallel set of items the narrator will enumerate?** "Here are five ways…" · "There are three reasons…" · "The key ingredients are…" · "These are the steps…" · "I found six examples…". When yes, collapse all individual item sentences into `variables.items` and remove them as separate broll entries. | `"list"` | 0–1 |
-| **Is there a genuine narrative leap that b-roll cannot convey — a jump in time, location, or tone?** Only real structural pivots qualify, not every paragraph break. Never at the first or last sentence. | `"transition"` Pattern 1 | 0–2 |
+| **Is this sentence orienting the viewer to a new topic, chapter, or numbered item in a series?** Any sentence that introduces and names a new segment in a sequence qualifies, regardless of phrasing. Examples: "Number one, Kellogg's Corn Pops…" · "First, the Roman period…" · "Step one:…" · "Part two covers…" · "The next brand is…" · "Starting with…" · any all-caps or title-case heading. Rule of thumb: if a viewer landing mid-video would think "ah, this is a new section," it needs a title card. | `"title_card"` Pattern 2 | **Required — 1 per heading, no exceptions** |
+| **Must the viewer track or compare specific numbers to understand this sentence?** Two or more concrete quantities — prices, percentages, years, counts — placed side by side for comparison. A single isolated statistic does not qualify; it must require visual comparison to land. | `"infographic"` | 0–2 (fits in remaining budget) |
+| **Does this sentence introduce a parallel set of items the narrator will enumerate?** "Here are five ways…" · "There are three reasons…" · "The key ingredients are…" · "These are the steps…" · "I found six examples…". **Immediately collapse all following item sentences into `variables.items` and delete them from `sentences`** — see "Handling list content" below. | `"list"` | 0–1 (fits in remaining budget) |
+| **Is there a genuine narrative leap that b-roll cannot convey — a jump in time, location, or tone?** Only real structural pivots qualify, not every paragraph break. Never at the first or last sentence. | `"transition"` Pattern 1 | 0–2 (fits in remaining budget) |
 
-**Total graphic entries: ≤5 per video. Minimum 1 if the script contains any sentence that orients the viewer to a new section or numbered item in a series.**
+**Budget rule: chapter/section heading title cards are always required — tag every one. Infographic, list, and transition entries together must not push the total above 5. If heading title cards alone fill the budget, skip other graphic types for that video.**
 
 #### Handling list content split across multiple sentences
 
@@ -441,7 +441,7 @@ Re-read the entire sentences list as a quality audit:
 - Is `max_image_ratio` set at the job root and appropriate for the content type?
 - **Motif-rotation check**: are any two consecutive sentences assigned the same motif? Swap if so.
 - **Graphic review**: Pattern 1 has `text: ""` and `duration` set; Pattern 2 has real `text`, no `duration`, and `visual_concepts`/`visual_caption` set. Total ≤5 graphic entries.
-- **Graphic coverage check**: read every sentence and ask: does this orient the viewer to a new section or numbered item ("Number one…", "First…", "Step N…", "Part N…", "The next/first/second…", any heading)? Does it introduce a parallel list? Does it compare specific numbers? Does it mark a genuine narrative leap? Each missed opportunity leaves the viewer without a visual anchor — add the appropriate graphic type if the count limit allows. Confirm every `title_card` (Pattern 2) entry still has real `text` so TTS speaks it.
+- **Graphic coverage check**: read every sentence and ask: (a) does this orient the viewer to a new section or numbered item ("Number one…", "First…", "Step N…", "Part N…", "The next/first/second…", any heading)? — if yes, it **must** have `graphic_type: "title_card"`, no exceptions; (b) does it introduce a parallel list? (c) does it compare specific numbers side by side? (d) does it mark a genuine narrative leap? For (b)–(d), add the graphic type if the total budget (≤5 minus heading count) allows. Confirm every Pattern 2 `title_card` still has real `text` so TTS speaks it.
 - **Style check**: does each graphic's `style` match the content? Long labels → `"horizontal"` infographic; 4–6 list items with equal weight → `"grid"`; ordered steps → `"numbered"`; 2–3 standalone stats → `"callouts"`.
 - **Concept-repetition check**: scan the entire sentences list for any visual_concepts pair that appears more than 3 times. Replace every overused entry with a distinct alternative that fits that sentence's specific narration beat.
 
