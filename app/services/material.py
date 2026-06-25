@@ -891,7 +891,7 @@ _IMAGE_PROVIDERS = {
     "serper": search_images_serper,
 }
 
-_DEFAULT_IMAGE_SOURCE_ORDER = ["serper", "duckduckgo", "wikimedia", "pexels", "pixabay", "unsplash"]
+_DEFAULT_IMAGE_SOURCE_ORDER = ["duckduckgo", "wikimedia", "pexels", "pixabay", "unsplash"]
 
 _CANDIDATES_PER_TERM = 6
 
