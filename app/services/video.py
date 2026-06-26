@@ -533,6 +533,20 @@ def concat_video_clips_with_ffmpeg(
 _BG_BRIGHTNESS = 0.5
 _BG_BLUR_FRACTION = 0.06  # downscale-then-upscale blur strength
 
+_PAN_Z = 1.12                    # zoom factor for pan animations (shows 89% of image, 11% motion range)
+_PAN_TRAVEL = 1 - 1 / _PAN_Z    # fraction of image traversed by panning ≈ 0.107
+
+_KEN_BURNS_ANIMATIONS = ("pan_lr", "pan_rl", "zoom_in", "pan_ud")
+_last_ken_burns_animation: str | None = None
+
+
+def _pick_animation() -> str:
+    global _last_ken_burns_animation
+    pool = [a for a in _KEN_BURNS_ANIMATIONS if a != _last_ken_burns_animation]
+    choice = random.choice(pool)
+    _last_ken_burns_animation = choice
+    return choice
+
 
 def _blur_and_darken(frame: np.ndarray, brightness: float = _BG_BRIGHTNESS, blur_fraction: float = _BG_BLUR_FRACTION) -> np.ndarray:
     """Cheap blur (downscale + upscale) and brightness reduction for a background layer."""
@@ -586,18 +600,10 @@ def apply_ken_burns(
     duration: float,
     width: int,
     height: int,
-    frame_scale: float = 0.85,
-    zoom_start: float = 1.0,
-    zoom_end: float = 1.06,
+    frame_scale: float = 1.0,
+    animation: str = "zoom_in",
 ):
-    """
-    MoviePy Ken Burns fallback.
-
-    The image is fitted into frame_scale × (width, height) centered on a static
-    blurred/darkened full-screen background.  Inside that inset frame the image
-    zooms smoothly from zoom_start to zoom_end (both ≥ 1.0; 1.0 = full image
-    visible, 1.06 = 6 % zoomed in showing the centre 94 % of the image).
-    """
+    """MoviePy Ken Burns fallback with pan/zoom animations and ease-out timing."""
     from moviepy.video.VideoClip import VideoClip as _VideoClip
     from PIL import Image as _PILImage
 
@@ -607,26 +613,58 @@ def apply_ken_burns(
         src_w, src_h = img.size
         bg_arr = _blur_and_darken(np.array(_cover_crop_image(img, width, height)))
 
-    # Fit image into the foreground budget (frame_scale of screen).
     fg_budget_w = width * frame_scale
     fg_budget_h = height * frame_scale
     fit_scale = min(fg_budget_w / src_w, fg_budget_h / src_h)
     fit_w = int(fit_scale * src_w)
     fit_h = int(fit_scale * src_h)
 
-    # Pre-resize once; Ken Burns crops & re-scales each frame from this.
     fit_arr = np.array(img.resize((fit_w, fit_h), _PILImage.LANCZOS))
 
     x_off = (width - fit_w) // 2
     y_off = (height - fit_h) // 2
 
     def make_frame(t: float) -> np.ndarray:
-        progress = t / max(duration, 1e-6)
-        z = zoom_start + (zoom_end - zoom_start) * progress
-        crop_w = max(1, int(fit_w / z))
-        crop_h = max(1, int(fit_h / z))
-        x0 = (fit_w - crop_w) // 2
-        y0 = (fit_h - crop_h) // 2
+        p = t / max(duration, 1e-6)
+        pe = 1.0 - (1.0 - p) ** 2  # ease-out: fast start, decelerates
+
+        if animation == "fade":
+            fade_d = min(0.4, duration * 0.15)
+            if t < fade_d:
+                alpha = t / fade_d
+            elif t > duration - fade_d:
+                alpha = (duration - t) / max(fade_d, 1e-6)
+            else:
+                alpha = 1.0
+            alpha = max(0.0, min(1.0, alpha))
+            bg_region = bg_arr[y_off:y_off + fit_h, x_off:x_off + fit_w]
+            blended = (fit_arr.astype(np.float32) * alpha + bg_region.astype(np.float32) * (1.0 - alpha)).astype(np.uint8)
+            frame = bg_arr.copy()
+            frame[y_off:y_off + fit_h, x_off:x_off + fit_w] = blended
+            return frame
+
+        if animation == "zoom_in":
+            z = 1.0 + (_PAN_Z - 1.0) * pe
+            crop_w = max(1, int(fit_w / z))
+            crop_h = max(1, int(fit_h / z))
+            x0 = (fit_w - crop_w) // 2
+            y0 = (fit_h - crop_h) // 2
+        elif animation == "pan_lr":
+            crop_w = max(1, int(fit_w / _PAN_Z))
+            crop_h = max(1, int(fit_h / _PAN_Z))
+            x0 = int((fit_w - crop_w) * pe)
+            y0 = (fit_h - crop_h) // 2
+        elif animation == "pan_rl":
+            crop_w = max(1, int(fit_w / _PAN_Z))
+            crop_h = max(1, int(fit_h / _PAN_Z))
+            x0 = int((fit_w - crop_w) * (1.0 - p) ** 2)
+            y0 = (fit_h - crop_h) // 2
+        else:  # pan_ud
+            crop_w = max(1, int(fit_w / _PAN_Z))
+            crop_h = max(1, int(fit_h / _PAN_Z))
+            x0 = (fit_w - crop_w) // 2
+            y0 = int((fit_h - crop_h) * pe)
+
         crop = _PILImage.fromarray(fit_arr[y0:y0 + crop_h, x0:x0 + crop_w])
         fg = np.array(crop.resize((fit_w, fit_h), _PILImage.LANCZOS))
 
@@ -645,28 +683,15 @@ def _render_ken_burns_ffmpeg(
     height: int,
     output_path: str,
     threads: int = 2,
-    frame_scale: float = 0.85,
-    zoom_start: float = 1.0,
-    zoom_end: float = 1.06,
+    frame_scale: float = 1.0,
+    animation: str = "zoom_in",
     upscale_factor: int = 8,
 ) -> str:
     """
-    FFmpeg Ken Burns with blurred static background and centered inset foreground.
+    FFmpeg Ken Burns: blurred background + centered image with ease-out pan/zoom.
 
-    Layout
-    ------
-    background : full width×height, blurred + darkened, static for the whole clip
-    foreground : image fitted into frame_scale×(width,height), centered on the bg
-
-    Ken Burns (inside the foreground frame)
-    ----------------------------------------
-    The foreground image is pre-upscaled by upscale_factor (lanczos) before
-    zoompan, so its integer rounding operates in upscaled-pixel space — giving
-    sub-pixel smoothness at output resolution.
-
-    zoom_start / zoom_end must be ≥ 1.0.
-      1.0  → shows the full fitted image (no crop)
-      1.06 → zoomed in 6 %, showing the centre 94 % of the image
+    Image is pre-upscaled by upscale_factor (lanczos) before zoompan for
+    sub-pixel smooth motion. animation selects one of pan_lr/pan_rl/zoom_in/pan_ud.
     """
     import tempfile
     from PIL import Image as _PILImage
@@ -702,25 +727,70 @@ def _render_ken_burns_ffmpeg(
         _PILImage.fromarray(bg_arr).save(tmp_bg)
 
         total_frames = max(int(round(duration * fps)), 1)
+        d_minus_1 = max(total_frames - 1, 1)
 
         # In-filter upscaled dimensions (even for libx264).
         up_w = fit_w * upscale_factor
         up_h = fit_h * upscale_factor
 
-        # z ≥ 1.0; zoompan crops iw/z × ih/z from the upscaled input and scales
-        # it to the output size.  At z=1 → full image visible; z=1.15 → 15% zoom.
-        z_expr = f"{zoom_start}+({zoom_end}-{zoom_start})*on/{max(total_frames-1,1)}"
-
         # Centered overlay offset; static because foreground size never changes.
         fg_x = (width - fit_w) // 2
         fg_y = (height - fit_h) // 2
+
+        # Fade-only path for non-landscape images — no zoompan, no upscale.
+        if animation == "fade":
+            fade_d = min(0.4, duration * 0.15)
+            fade_out_st = max(0.0, duration - fade_d)
+            filter_complex = (
+                f"[0:v]fade=t=in:st=0:d={fade_d:.3f},"
+                f"fade=t=out:st={fade_out_st:.3f}:d={fade_d:.3f}"
+                f"[fg];"
+                f"[1:v][fg]overlay=x={fg_x}:y={fg_y}"
+            )
+            cmd = [
+                ffmpeg_bin, "-y",
+                "-sws_flags", "lanczos",
+                "-f", "image2", "-loop", "1", "-t", str(duration), "-i", tmp_pre,
+                "-f", "image2", "-loop", "1", "-t", str(duration), "-i", tmp_bg,
+                "-filter_complex", filter_complex,
+                "-t", str(duration),
+                "-r", str(fps),
+                "-c:v", codec, "-preset", "fast",
+                "-an",
+                "-threads", str(threads),
+                output_path,
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if proc.returncode != 0:
+                logger.warning(f"FFmpeg Ken Burns (fade) stderr: {proc.stderr[-600:]}")
+                return ""
+            return output_path if os.path.exists(output_path) else ""
+
+        # iw/ih in expressions refer to upscaled dimensions; on=0..total_frames-1.
+        # Ease-out: 1-(1-p)^2 — fast start, decelerates.
+        if animation == "pan_lr":
+            z_expr = f"{_PAN_Z}"
+            x_expr = f"iw*{_PAN_TRAVEL:.6f}*(1-pow(1-on/{d_minus_1},2))"
+            y_expr = f"ih/2-ih/(2*{_PAN_Z})"
+        elif animation == "pan_rl":
+            z_expr = f"{_PAN_Z}"
+            x_expr = f"iw*{_PAN_TRAVEL:.6f}*pow(1-on/{d_minus_1},2)"
+            y_expr = f"ih/2-ih/(2*{_PAN_Z})"
+        elif animation == "pan_ud":
+            z_expr = f"{_PAN_Z}"
+            x_expr = f"iw/2-iw/(2*{_PAN_Z})"
+            y_expr = f"ih*{_PAN_TRAVEL:.6f}*(1-pow(1-on/{d_minus_1},2))"
+        else:  # zoom_in
+            z_expr = f"1.0+{_PAN_Z - 1.0:.4f}*(1-pow(1-on/{d_minus_1},2))"
+            x_expr = "iw/2-iw/(2*zoom)"
+            y_expr = "ih/2-ih/(2*zoom)"
 
         filter_complex = (
             f"[0:v]scale={up_w}:{up_h}:flags=lanczos,"
             f"zoompan="
             f"z='{z_expr}':"
-            f"x='iw/2-iw/zoom/2':"
-            f"y='ih/2-ih/zoom/2':"
+            f"x='{x_expr}':"
+            f"y='{y_expr}':"
             f"d={total_frames}:"
             f"s={fit_w}x{fit_h}:"
             f"fps={fps}"
@@ -767,16 +837,23 @@ def render_ken_burns_clip(
     Render a Ken Burns clip from image_path to an MP4 at output_path.
     Returns output_path on success, '' on failure.
     """
+    from PIL import Image as _PILImg
+    with _PILImg.open(image_path) as _im:
+        _is_landscape = _im.width > _im.height
+    animation = _pick_animation() if _is_landscape else "fade"
     # Prefer FFmpeg (sub-pixel smooth zoom) over MoviePy (integer rounding jitter).
     try:
-        result = _render_ken_burns_ffmpeg(image_path, duration, width, height, output_path, threads)
+        result = _render_ken_burns_ffmpeg(
+            image_path, duration, width, height, output_path, threads,
+            animation=animation,
+        )
         if result:
             return result
         logger.warning(f"FFmpeg Ken Burns returned empty for {image_path}, falling back to MoviePy")
     except Exception as exc:
         logger.warning(f"FFmpeg Ken Burns exception for {image_path}: {exc} — falling back to MoviePy")
 
-    clip = apply_ken_burns(image_path, duration, width, height)
+    clip = apply_ken_burns(image_path, duration, width, height, animation=animation)
     try:
         _write_videofile_with_codec_fallback(
             clip,

@@ -166,7 +166,7 @@ def _uniform_timestamps(
 # ffmpeg xfade (see video.XFADE_CLIP_LIMIT) — otherwise this padding would
 # never be consumed and would just inflate the final video's duration.
 _CROSSFADE_DUR = video._DEFAULT_CROSSFADE_SECONDS
-_TRIM_BUFFER = _CROSSFADE_DUR + _CROSSFADE_DUR / 2   # 0.3 s total padding per clip
+_TRIM_BUFFER = _CROSSFADE_DUR   # exactly cancels the crossfade overlap → zero net drift
 
 
 # ---------------------------------------------------------------------------
@@ -937,8 +937,8 @@ def start(job_path: str) -> Optional[dict]:
     # split into multiple clips so a single still never holds for the full
     # narration. Each sub-clip fetches a different image (used_urls dedupes).
     _CLIP_TARGET = 4.0
-    _MIN_VISUAL_DUR = 3.0  # absolute floor for any single clip's duration
-    _MIN_GRAPHIC_DUR = 4.0  # minimum for narrated (Pattern 2) graphic clips
+    _MIN_VISUAL_DUR = 2.0  # absolute floor for any single clip's duration
+    _MIN_ANIM_DUR = 2.5  # conservative cover for all 4 title-card animation variants
     _IMAGE_CLIP_MAX = 7.0  # max seconds per individual Ken Burns image clip
 
     # ---- Pass 1: plan per-sentence clip durations using absolute resync.
@@ -960,8 +960,18 @@ def start(job_path: str) -> Optional[dict]:
         is_image = sent.get("media_type") == "image"
 
         start_k = max(rel_starts[idx], cum_end)
-        if idx + 1 < len(rel_starts):
-            target_end_k = max(rel_starts[idx + 1], start_k)
+        if idx + 1 < len(timings):
+            next_rel = rel_starts[idx + 1]
+            # Pure graphic sentences carry (0.0, 0.0) placeholder timestamps.
+            # Using one as target_end_k collapses raw_total to zero, forcing the
+            # _MIN_VISUAL_DUR floor and pushing cum_end ahead of the audio timeline.
+            # Skip past any contiguous pure graphics to find the next narrated boundary.
+            if timings[idx + 1][0].get("content_track") == "graphic":
+                for j in range(idx + 2, len(timings)):
+                    if rel_starts[j] > 0:
+                        next_rel = rel_starts[j]
+                        break
+            target_end_k = max(next_rel, start_k)
         else:
             target_end_k = max(audio_duration, start_k)
         raw_total = target_end_k - start_k
@@ -984,7 +994,15 @@ def start(job_path: str) -> Optional[dict]:
             num_clips = max(1, min(ideal_clips, max_clips_by_min_dur))
 
         floor = num_clips * _MIN_VISUAL_DUR
-        total = max(floor, raw_total)
+        # Narrated graphics (graphic_type + text, not pure graphic) must use the
+        # Whisper-derived duration so cum_end tracks the audio timeline exactly.
+        # Applying _MIN_VISUAL_DUR floor here would push cum_end past the audio
+        # position and cause every subsequent clip to drift late.
+        is_narrated_graphic = bool(sent.get("graphic_type") and sent.get("text"))
+        if is_narrated_graphic:
+            total = max(raw_total, 1.0)    # 1s Revideo stability floor only
+        else:
+            total = max(floor, raw_total)
         durations = [total / num_clips] * num_clips
         cum_end = start_k + total
 
@@ -1091,24 +1109,35 @@ def start(job_path: str) -> Optional[dict]:
         # the normal footage fetch so the sentence is never left visually empty.
         if sent.get("graphic_type") and sent.get("text"):
             from app.services import graphics as _graphics
-            gfx_dur = max(sum(durations), _MIN_GRAPHIC_DUR)  # enforce minimum visual span
+            whisper_dur = sum(durations)       # exact audio slot from Whisper
+            render_dur = max(whisper_dur, _MIN_ANIM_DUR)  # guarantee animation completes
             gfx_path = os.path.join(clips_dir, f"clip-{clip_counter:04d}.mp4")
             clip_counter += 1
             w, h = video_aspect.to_resolution()
             rendered = _graphics.render_graphic_clip(
                 graphic_type=sent["graphic_type"],
                 out_path=gfx_path,
-                duration=gfx_dur,
+                duration=render_dur,
                 width=w,
                 height=h,
                 fps=30,
                 variables=sent.get("variables", {}),
                 style=sent.get("variables", {}).get("style"),
             )
+            if rendered and render_dur > whisper_dur:
+                # Clip rendered longer than audio slot to let animation complete.
+                # Trim back to the audio slot so the timeline stays in sync.
+                trim_path = gfx_path.replace('.mp4', '-t.mp4')
+                if _trim_clip(rendered, whisper_dur, trim_path):
+                    os.replace(trim_path, gfx_path)
+                else:
+                    logger.warning(
+                        f"sentence {idx+1}: anim trim failed — using full {render_dur:.2f}s clip"
+                    )
             if rendered:
                 ordered_clips.append(rendered)
                 got_any = True
-                obtained_duration += gfx_dur
+                obtained_duration += whisper_dur
                 video_clip_count += 1
                 continue  # graphic is the visual — skip footage fetch
             else:
