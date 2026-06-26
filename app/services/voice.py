@@ -367,7 +367,7 @@ def _azure_tts_chunked(
 
     chunks = _split_text_for_tts(text)
     if len(chunks) == 1:
-        return None  # caller should use the direct path
+        return azure_tts_v1(text, voice_name, voice_rate, voice_file)
 
     logger.info(f"chunked TTS: {len(chunks)} chunks for {len(text)} chars")
 
@@ -402,7 +402,8 @@ def _azure_tts_chunked(
         list_file = os.path.join(tmpdir, "concat_list.txt")
         with open(list_file, "w", encoding="utf-8") as f:
             for cf in chunk_files:
-                f.write(f"file '{cf}'\n")
+                escaped = cf.replace("'", "'\\''")
+                f.write(f"file '{escaped}'\n")
 
         cmd = [
             "ffmpeg", "-y", "-loglevel", "error",

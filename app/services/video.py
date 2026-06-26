@@ -1089,8 +1089,11 @@ def combine_videos(
         while start_time < clip_duration:
             end_time = min(start_time + max_clip_duration, clip_duration)
 
+            if end_time <= start_time:
+                break  # max_clip_duration=0 or floating-point edge case — prevent infinite loop
+
             # 保留所有有效分段。
-            # 这样既不会丢掉“整段视频本身就短于 max_clip_duration”的素材，
+            # 这样既不会丢掉”整段视频本身就短于 max_clip_duration”的素材，
             # 也不会吞掉长视频最后剩下的一小段尾部内容。
             if end_time > start_time:
                 subclipped_items.append(
@@ -1129,6 +1132,7 @@ def combine_videos(
             f"remaining: {audio_duration - effective_duration:.2f}s"
         )
 
+        clip_file = None
         try:
             clip = _open_video_clip_quietly(subclipped_item.file_path).subclipped(
                 subclipped_item.start_time, subclipped_item.end_time
@@ -1175,6 +1179,11 @@ def combine_videos(
 
         except Exception as e:
             logger.error(f"failed to process clip: {str(e)}")
+            if clip_file and os.path.exists(clip_file):
+                try:
+                    os.remove(clip_file)
+                except OSError:
+                    pass
 
     # NOTE: clips are intentionally NOT looped/repeated to cover any shortfall
     # against audio_duration -- repeating already-shown footage is exactly the
@@ -1290,7 +1299,8 @@ def wrap_text(text, max_width, font="Arial", fontsize=60):
         lines.append(current)
 
     result = "\n".join(line.strip() for line in lines if line.strip()).strip()
-    height = len(lines) * height
+    _, line_h = get_text_size("A")
+    height = len(lines) * line_h
     return result, height
 
 
@@ -1359,11 +1369,7 @@ def _build_word_highlight_clips(
         # file_to_subtitles returns (index, "HH:MM:SS,mmm --> HH:MM:SS,mmm", text)
         _, time_str, text = entry
         parts = time_str.split(" --> ")
-        def _ts(s):
-            h, m, rest = s.strip().split(":")
-            sec, ms = rest.split(",")
-            return int(h) * 3600 + int(m) * 60 + int(sec) + int(ms) / 1000
-        parsed.append((_ts(parts[0]), _ts(parts[1]), text.strip()))
+        parsed.append((_srt_time_to_seconds(parts[0]), _srt_time_to_seconds(parts[1]), text.strip()))
 
     try:
         font = ImageFont.truetype(font_path, params.font_size)

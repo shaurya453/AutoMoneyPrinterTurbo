@@ -71,14 +71,24 @@ def _api_get_json(url: str, headers: dict = None, timeout: tuple = _HTTP_TIMEOUT
     """GET `url` and return the parsed JSON body, raising on HTTP errors.
 
     Shared by the provider search functions below to avoid repeating the
-    proxies/verify/timeout boilerplate.
+    proxies/verify/timeout boilerplate. Retries up to 3 times on HTTP 429
+    with exponential backoff before giving up.
     """
-    r = requests.get(
-        url, headers=headers, proxies=config.proxy,
-        verify=_get_tls_verify(), timeout=timeout,
-    )
-    r.raise_for_status()
-    return r.json()
+    import time as _time
+    last_exc: Exception = RuntimeError("no attempts made")
+    for attempt in range(3):
+        r = requests.get(
+            url, headers=headers, proxies=config.proxy,
+            verify=_get_tls_verify(), timeout=timeout,
+        )
+        if r.status_code == 429 and attempt < 2:
+            wait = 2 ** attempt  # 1 s, 2 s
+            logger.warning(f"429 rate limit from API (attempt {attempt + 1}/3) — retrying in {wait}s")
+            _time.sleep(wait)
+            continue
+        r.raise_for_status()
+        return r.json()
+    raise last_exc
 
 
 def _api_post_json(url: str, json_body: dict, headers: dict = None, timeout: tuple = _HTTP_TIMEOUT_API) -> dict:
@@ -448,8 +458,8 @@ def save_video(video_url: str, save_dir: str = "") -> str:
     video_id = f"vid-{url_hash}"
     video_path = f"{save_dir}/{video_id}.mp4"
 
-    # if video already exists, return the path
-    if os.path.exists(video_path) and os.path.getsize(video_path) > 0:
+    # if video already exists and is a plausible size, return the path
+    if os.path.exists(video_path) and os.path.getsize(video_path) > 4096:
         logger.info(f"video already exists: {video_path}")
         return video_path
 

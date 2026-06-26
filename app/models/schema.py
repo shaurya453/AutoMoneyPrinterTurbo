@@ -20,7 +20,7 @@ class VideoConcatMode(str, Enum):
 
 
 class VideoTransitionMode(str, Enum):
-    none = None
+    none = "none"
     shuffle = "Shuffle"
     fade_in = "FadeIn"
     fade_out = "FadeOut"

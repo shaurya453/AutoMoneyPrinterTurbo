@@ -194,6 +194,8 @@ def _trim_clip(src_path: str, duration: float, out_path: str) -> bool:
             return True
     except subprocess.TimeoutExpired:
         logger.warning(f"ffmpeg stream-copy trim timed out after {_TRIM_TIMEOUT_SECONDS}s: {src_path}")
+    except Exception as e:
+        logger.warning(f"ffmpeg stream-copy trim failed: {e}")
     # Re-encode fallback
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
@@ -209,6 +211,9 @@ def _trim_clip(src_path: str, duration: float, out_path: str) -> bool:
         )
     except subprocess.TimeoutExpired:
         logger.warning(f"ffmpeg re-encode trim timed out after {_TRIM_TIMEOUT_SECONDS}s: {src_path}")
+        return False
+    except Exception as e:
+        logger.warning(f"ffmpeg re-encode trim failed: {e}")
         return False
 
 
@@ -893,7 +898,10 @@ def start(job_path: str) -> Optional[dict]:
         try:
             _narration_timings, word_timings = _get_sentence_timestamps(audio_file, _narration_sents)
         except Exception as exc:
-            logger.warning(f"whisper failed ({exc}), falling back to uniform distribution")
+            logger.warning(
+                f"whisper failed ({exc}), falling back to uniform distribution "
+                f"— word-level subtitle highlights will be disabled"
+            )
             _narration_timings = _uniform_timestamps(_narration_sents, audio_duration)
 
     # Re-merge graphic sentences back at their original positions with (0.0, 0.0) placeholders.
@@ -1023,8 +1031,9 @@ def start(job_path: str) -> Optional[dict]:
     # Extend the last clip's slot by outro_tail so the combined video naturally
     # reaches audio_duration + outro_tail without the outro step having to loop
     # the last clip from the beginning (which caused visible repetition).
+    # Graphics have a fixed Revideo-rendered duration — don't extend them.
     _OUTRO_TAIL = 2.0
-    if clip_plans:
+    if clip_plans and clip_plans[-1]["sent"].get("content_track") != "graphic":
         clip_plans[-1]["durations"][-1] += _OUTRO_TAIL
 
     # Crossfade trim-buffer padding is only consumed when combine_videos will
@@ -1181,7 +1190,7 @@ def start(job_path: str) -> Optional[dict]:
                     f"clip {clip_counter}: concepts {own_concepts} stale "
                     f"(used >={max_concept_reuse}x) — substituting {fresh[:2]}"
                 )
-        for c in own_concepts:
+        for c in _get_visual_concepts(sent):
             concept_usage[c] += 1
 
         for clip_duration in durations:

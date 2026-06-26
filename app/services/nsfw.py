@@ -156,7 +156,7 @@ def sample_frame_bytes(video_path: str, num_frames: int = 4) -> List[bytes]:
         num_frames = max(1, num_frames)
         for i in range(num_frames):
             t = duration * (i + 0.5) / num_frames
-            frame = clip.get_frame(min(t, max(duration - 0.01, 0.0)))
+            frame = clip.get_frame(min(t, max(duration - 1e-6, 0.0)))
             frame_bytes = _frame_to_jpeg_bytes(frame)
             if frame_bytes:
                 frames.append(frame_bytes)
