@@ -235,7 +235,7 @@ For each sentence, ask yourself the four questions below. Do not look for specif
 |---|---|---|
 | **Is this sentence orienting the viewer to a new topic, chapter, or numbered item in a series?** Any sentence that introduces and names a new segment in a sequence qualifies, regardless of phrasing. Examples: "Number one, Kellogg's Corn Pops…" · "First, the Roman period…" · "Step one:…" · "Part two covers…" · "The next brand is…" · "Starting with…" · any all-caps or title-case heading. Rule of thumb: if a viewer landing mid-video would think "ah, this is a new section," it needs a title card. | `"title_card"` Pattern 2 | **Required — 1 per heading, no exceptions** |
 | **Must the viewer track or compare specific numbers to understand this sentence?** Two or more concrete quantities — prices, percentages, years, counts — placed side by side for comparison. A single isolated statistic does not qualify; it must require visual comparison to land. | `"infographic"` | 0–2 (fits in remaining budget) |
-| **Does this sentence introduce a parallel set of items the narrator will enumerate?** "Here are five ways…" · "There are three reasons…" · "The key ingredients are…" · "These are the steps…" · "I found six examples…". **Immediately collapse all following item sentences into `variables.items` and delete them from `sentences`** — see "Handling list content" below. | `"list"` | 0–1 (fits in remaining budget) |
+| **Does this sentence introduce a parallel set of items the narrator will enumerate?** "Here are five ways…" · "There are three reasons…" · "The key ingredients are…" · "These are the steps…" · "I found six examples…". **Immediately collapse all following item sentences into `variables.items` and delete them from `sentences`** — see "Handling list content" below. **CRITICAL: only use list when every individual item is a single short sentence. If any item needs two or more sentences of narration, skip list entirely and leave all items as regular broll.** | `"list"` | 0–1 (fits in remaining budget) |
 | **Is there a genuine narrative leap that b-roll cannot convey — a jump in time, location, or tone?** Only real structural pivots qualify, not every paragraph break. Never at the first or last sentence. | `"transition"` Pattern 1 | 0–2 (fits in remaining budget) |
 
 **Budget rule: chapter/section heading title cards are always required — tag every one. Infographic, list, and transition entries together must not push the total above 5. If heading title cards alone fill the budget, skip other graphic types for that video.**
@@ -246,11 +246,13 @@ For each sentence, ask yourself the four questions below. Do not look for specif
 
 **Recognition signs:** consecutive sentences that form a set ("First…", "Second…", "Another…", numbered/lettered items, or parallel structure where each sentence names one distinct thing).
 
-**How to merge:**
+**Before starting: check item length.** Count how many sentences each item takes to narrate. If ANY single item spans two or more sentences, **do not use list** — leave the intro and all item sentences as regular broll/named entries. List is only appropriate when every item fits in one short sentence.
+
+**How to merge (single-sentence items only):**
 
 1. Identify the **intro sentence** — the one that sets up the list (e.g. "Here are five ways to save money.").
-2. Strip each item sentence to its core phrase (no "First, they…" preamble) and put all of them in `variables.items`.
-3. **Delete the individual item sentences** from `sentences` entirely — do not leave them as broll entries.
+2. Strip **every** item sentence to its core phrase (no "First, they…" preamble). Put **all of them** in `variables.items` — never leave any item as a remaining broll entry; missing items make the list appear incomplete.
+3. **Delete ALL the individual item sentences** from `sentences` entirely — remove every item stub, not just some. Zero item sentences should remain after the list entry.
 4. Create **one** `list` graphic entry using the intro sentence:
    - **Pattern 2 (preferred):** set `graphic_type: "list"` on the intro sentence. The graphic plays while narrator reads the intro. Set `visual_concepts` and `visual_caption` as footage fallback.
    - **Pattern 1 (alternative):** keep the intro sentence as a plain broll entry and add a separate silent `"text": ""` list slot after it with `duration` set.
@@ -292,7 +294,7 @@ For each sentence, ask yourself the four questions below. Do not look for specif
 - `title_card`: `title` ≤10 words. `subtitle` 3–6 words or `""`. For chapter headings, use the chapter name as `title` and `"chapter N"` as `subtitle` (e.g. `title: "A Glowing Obsession"`, `subtitle: "chapter two"`). Non-chapter title cards must be quotable and specific — not just interesting.
 - `infographic`: `labels` and `values` must be same length. `values` must be positive. 2–8 data points. `title` = metric + scope (e.g. `"Global EV Sales (M units, 2023)"`). Use `"callouts"` for 2–3 standalone stats; use `"bars"`, `"horizontal"`, or `"lollipop"` for side-by-side comparisons. Use `"horizontal"` when any label is longer than ~3 words.
 - `transition`: `label` ≤4 words, title case. `sublabel` ≤6 words, lower case, or omit. Only for real narrative pivots — not every paragraph break, and not for chapter headings (use `title_card` Pattern 2 for those).
-- `list`: 2–6 items. Don't use for two items that differ numerically — use `"infographic"` with `"callouts"` style instead. Use `"numbered"` when order matters; `"grid"` for 4–6 equal-weight items; `"cascade"` for a dramatic reveal effect; `"bullets"` for general unordered lists. **Never leave each item as a separate narration sentence** — all items belong in `variables.items`; remove the individual item stubs from `sentences` after extracting them (see "Handling list content split across multiple sentences" above).
+- `list`: 2–6 items. **Only use when every item is a single short sentence** — if any item requires two or more sentences to narrate, skip list and use regular broll for all items. Don't use for two items that differ numerically — use `"infographic"` with `"callouts"` style instead. Use `"numbered"` when order matters; `"grid"` for 4–6 equal-weight items; `"cascade"` for a dramatic reveal effect; `"bullets"` for general unordered lists. **Delete every individual item sentence from `sentences` after extracting them into `variables.items` — leave zero item stubs behind** (see "Handling list content split across multiple sentences" above).
 
 ---
 
@@ -482,6 +484,8 @@ Do NOT run `cli.py`. The worker runs it automatically.
 - **Infographic for a single statistic** — use `title_card` or `"callouts"` style instead; infographics need ≥2 labeled values
 - **Infographic with long labels but `"bars"` style** — use `"horizontal"` when labels exceed ~3 words; vertical bars clip label text
 - **`list` for two numerically differing items** — use `"infographic"` with `"callouts"` style instead
+- **`list` when items have multi-sentence narration** — if the narrator elaborates on item A for 2–3 sentences, a condensed label in the list won't match; skip list entirely and use regular broll for all items
+- **Leaving some item sentences in `sentences` after creating a list** — ALL item sentences must be deleted; partial deletion makes the list look incomplete (only 1 item shows instead of all)
 - **`labels` and `values` arrays of different lengths** — must match exactly
 - **More than 8 infographic data points** — too small to read; split if needed
 - **Transition `label` longer than 4 words** — it's a section marker, not a sentence

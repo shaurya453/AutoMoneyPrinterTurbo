@@ -1117,7 +1117,22 @@ def start(job_path: str) -> Optional[dict]:
         if sent.get("graphic_type") and sent.get("text"):
             from app.services import graphics as _graphics
             whisper_dur = sum(durations)       # exact audio slot from Whisper
-            render_dur = max(whisper_dur, _MIN_ANIM_DUR)  # guarantee animation completes
+
+            # For list graphics, ensure all items finish animating in before the
+            # clip is trimmed.  Worst-case animIn across all 4 list variants is the
+            # cascade variant (C): titleTime≈0.52s + (n-1)×0.30s stagger + 0.58s
+            # sweep+fade ≈ 0.80 + n×0.30s.  We require at least 0.5s of dwell after
+            # the last item appears so the viewer can read it, then trim there rather
+            # than at whisper_dur.  A 0.40s pad on top gives room for the fade-out.
+            if sent.get("graphic_type") == "list":
+                n_items = len(sent.get("variables", {}).get("items", []))
+                _list_anim_in = 0.80 + n_items * 0.30   # worst-case animIn (cascade)
+                _trim_target  = max(whisper_dur, _list_anim_in + 0.50)   # +0.5s dwell
+                render_dur    = _trim_target + 0.40      # +fade-out
+            else:
+                _trim_target = whisper_dur
+                render_dur   = max(whisper_dur, _MIN_ANIM_DUR)
+
             gfx_path = os.path.join(clips_dir, f"clip-{clip_counter:04d}.mp4")
             clip_counter += 1
             w, h = video_aspect.to_resolution()
@@ -1131,11 +1146,10 @@ def start(job_path: str) -> Optional[dict]:
                 variables=sent.get("variables", {}),
                 style=sent.get("variables", {}).get("style"),
             )
-            if rendered and render_dur > whisper_dur:
-                # Clip rendered longer than audio slot to let animation complete.
-                # Trim back to the audio slot so the timeline stays in sync.
+            if rendered and render_dur > _trim_target:
+                # Clip rendered longer than target slot; trim to target.
                 trim_path = gfx_path.replace('.mp4', '-t.mp4')
-                if _trim_clip(rendered, whisper_dur, trim_path):
+                if _trim_clip(rendered, _trim_target, trim_path):
                     os.replace(trim_path, gfx_path)
                 else:
                     logger.warning(
@@ -1144,7 +1158,7 @@ def start(job_path: str) -> Optional[dict]:
             if rendered:
                 ordered_clips.append(rendered)
                 got_any = True
-                obtained_duration += whisper_dur
+                obtained_duration += _trim_target
                 video_clip_count += 1
                 continue  # graphic is the visual — skip footage fetch
             else:
