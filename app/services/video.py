@@ -615,11 +615,15 @@ def apply_ken_burns(
 
     fg_budget_w = width * frame_scale
     fg_budget_h = height * frame_scale
-    fit_scale = min(fg_budget_w / src_w, fg_budget_h / src_h)
-    fit_w = int(fit_scale * src_w)
-    fit_h = int(fit_scale * src_h)
-
-    fit_arr = np.array(img.resize((fit_w, fit_h), _PILImage.LANCZOS))
+    if src_w >= src_h:  # landscape — cover to fill full frame, no side bars
+        fit_w = width
+        fit_h = height
+        fit_arr = np.array(_cover_crop_image(img, fit_w, fit_h))
+    else:               # portrait — fit inside frame, blurred bars on sides
+        fit_scale = min(fg_budget_w / src_w, fg_budget_h / src_h)
+        fit_w = int(fit_scale * src_w)
+        fit_h = int(fit_scale * src_h)
+        fit_arr = np.array(img.resize((fit_w, fit_h), _PILImage.LANCZOS))
 
     x_off = (width - fit_w) // 2
     y_off = (height - fit_h) // 2
@@ -711,10 +715,14 @@ def _render_ken_burns_ffmpeg(
     # Fit image into the foreground budget (frame_scale of screen).
     fg_budget_w = width * frame_scale
     fg_budget_h = height * frame_scale
-    fit_scale = min(fg_budget_w / src_w, fg_budget_h / src_h)
-    # Round to even for libx264 compatibility.
-    fit_w = int(fit_scale * src_w / 2) * 2
-    fit_h = int(fit_scale * src_h / 2) * 2
+    if src_w >= src_h:  # landscape — cover-scale to fill full frame, no side bars
+        fit_w = int(width / 2) * 2
+        fit_h = int(height / 2) * 2
+    else:               # portrait — fit inside frame, blurred bars on sides
+        fit_scale = min(fg_budget_w / src_w, fg_budget_h / src_h)
+        # Round to even for libx264 compatibility.
+        fit_w = int(fit_scale * src_w / 2) * 2
+        fit_h = int(fit_scale * src_h / 2) * 2
 
     # Centered overlay offset; static because foreground size never changes.
     fg_x = (width - fit_w) // 2
