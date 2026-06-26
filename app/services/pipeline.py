@@ -1020,6 +1020,13 @@ def start(job_path: str) -> Optional[dict]:
             "sent_audio_dur": sent_audio_dur,
         })
 
+    # Extend the last clip's slot by outro_tail so the combined video naturally
+    # reaches audio_duration + outro_tail without the outro step having to loop
+    # the last clip from the beginning (which caused visible repetition).
+    _OUTRO_TAIL = 2.0
+    if clip_plans:
+        clip_plans[-1]["durations"][-1] += _OUTRO_TAIL
+
     # Crossfade trim-buffer padding is only consumed when combine_videos will
     # actually run ffmpeg xfade (see video.XFADE_CLIP_LIMIT) — otherwise it
     # would just inflate the final video's duration beyond the narration.

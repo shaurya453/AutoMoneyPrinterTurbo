@@ -685,13 +685,16 @@ def _render_ken_burns_ffmpeg(
     threads: int = 2,
     frame_scale: float = 1.0,
     animation: str = "zoom_in",
-    upscale_factor: int = 8,
 ) -> str:
     """
     FFmpeg Ken Burns: blurred background + centered image with ease-out pan/zoom.
 
-    Image is pre-upscaled by upscale_factor (lanczos) before zoompan for
-    sub-pixel smooth motion. animation selects one of pan_lr/pan_rl/zoom_in/pan_ud.
+    Pre-resizes the image to a 2× canvas (cover-crop, lanczos) in PIL, then uses
+    FFmpeg crop(t) + 2:1 scale(lanczos) per frame.  The 2:1 downscale interpolates
+    fractional crop positions → smooth sub-pixel motion with no zoompan quantization.
+
+    Animations: pan_lr/pan_rl/pan_ud use static crop dimensions (x/y vary per frame).
+    zoom_in uses eval=frame so w/h/x/y all vary per frame for smooth magnification.
     """
     import tempfile
     from PIL import Image as _PILImage
@@ -713,32 +716,22 @@ def _render_ken_burns_ffmpeg(
     fit_w = int(fit_scale * src_w / 2) * 2
     fit_h = int(fit_scale * src_h / 2) * 2
 
-    # Pre-resize to fit dimensions; FFmpeg upscales in-filter via zoompan.
-    pre_resized = img.resize((fit_w, fit_h), _PILImage.LANCZOS)
+    # Centered overlay offset; static because foreground size never changes.
+    fg_x = (width - fit_w) // 2
+    fg_y = (height - fit_h) // 2
 
     tmp_pre = tmp_bg = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-            tmp_pre = f.name
-        pre_resized.save(tmp_pre)
-
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             tmp_bg = f.name
         _PILImage.fromarray(bg_arr).save(tmp_bg)
 
-        total_frames = max(int(round(duration * fps)), 1)
-        d_minus_1 = max(total_frames - 1, 1)
-
-        # In-filter upscaled dimensions (even for libx264).
-        up_w = fit_w * upscale_factor
-        up_h = fit_h * upscale_factor
-
-        # Centered overlay offset; static because foreground size never changes.
-        fg_x = (width - fit_w) // 2
-        fg_y = (height - fit_h) // 2
-
-        # Fade-only path for non-landscape images — no zoompan, no upscale.
+        # Fade-only path for portrait/square images — no pan/zoom.
         if animation == "fade":
+            pre_resized = img.resize((fit_w, fit_h), _PILImage.LANCZOS)
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+                tmp_pre = f.name
+            pre_resized.save(tmp_pre)
             fade_d = min(0.4, duration * 0.15)
             fade_out_st = max(0.0, duration - fade_d)
             filter_complex = (
@@ -766,37 +759,65 @@ def _render_ken_burns_ffmpeg(
                 return ""
             return output_path if os.path.exists(output_path) else ""
 
-        # iw/ih in expressions refer to upscaled dimensions; on=0..total_frames-1.
-        # Ease-out: 1-(1-p)^2 — fast start, decelerates.
-        if animation == "pan_lr":
-            z_expr = f"{_PAN_Z}"
-            x_expr = f"iw*{_PAN_TRAVEL:.6f}*(1-pow(1-on/{d_minus_1},2))"
-            y_expr = f"ih/2-ih/(2*{_PAN_Z})"
-        elif animation == "pan_rl":
-            z_expr = f"{_PAN_Z}"
-            x_expr = f"iw*{_PAN_TRAVEL:.6f}*pow(1-on/{d_minus_1},2)"
-            y_expr = f"ih/2-ih/(2*{_PAN_Z})"
-        elif animation == "pan_ud":
-            z_expr = f"{_PAN_Z}"
-            x_expr = f"iw/2-iw/(2*{_PAN_Z})"
-            y_expr = f"ih*{_PAN_TRAVEL:.6f}*(1-pow(1-on/{d_minus_1},2))"
-        else:  # zoom_in
-            z_expr = f"1.0+{_PAN_Z - 1.0:.4f}*(1-pow(1-on/{d_minus_1},2))"
-            x_expr = "iw/2-iw/(2*zoom)"
-            y_expr = "ih/2-ih/(2*zoom)"
+        # --- scale + crop(t) + scale approach for all pan/zoom animations ---
+        # Pre-resize to 2× canvas in PIL (cover-crop → lanczos).  FFmpeg crop
+        # evaluates x/y as float t-expressions per frame; the 2:1 lanczos downscale
+        # blends neighbouring pixels for smooth sub-pixel motion.
+        dur = max(duration, 0.001)
+        eot = f"(1-pow(1-t/{dur:.6f},2))"  # ease-out quadratic: 0→1, fast start
 
-        filter_complex = (
-            f"[0:v]scale={up_w}:{up_h}:flags=lanczos,"
-            f"zoompan="
-            f"z='{z_expr}':"
-            f"x='{x_expr}':"
-            f"y='{y_expr}':"
-            f"d={total_frames}:"
-            f"s={fit_w}x{fit_h}:"
-            f"fps={fps}"
-            f"[fg];"
-            f"[1:v][fg]overlay=x={fg_x}:y={fg_y}"
-        )
+        if animation == "pan_lr":
+            # 2× canvas wider by _PAN_Z to give horizontal pan travel.
+            cw = int(fit_w * 2 * _PAN_Z / 2) * 2
+            ch = fit_h * 2
+            travel = cw - fit_w * 2
+            canvas_img = _cover_crop_image(img, cw, ch)
+            # x/y are re-evaluated per frame by default; w/h are static.
+            filter_fg = (
+                f"[0:v]crop=w={fit_w * 2}:h={ch}:x='{travel}*{eot}':y=0,"
+                f"scale={fit_w}:{fit_h}:flags=lanczos[fg]"
+            )
+        elif animation == "pan_rl":
+            cw = int(fit_w * 2 * _PAN_Z / 2) * 2
+            ch = fit_h * 2
+            travel = cw - fit_w * 2
+            canvas_img = _cover_crop_image(img, cw, ch)
+            # Reversed ease-out: starts at travel (right), decelerates to 0 (left).
+            filter_fg = (
+                f"[0:v]crop=w={fit_w * 2}:h={ch}:x='{travel}*(1-{eot})':y=0,"
+                f"scale={fit_w}:{fit_h}:flags=lanczos[fg]"
+            )
+        elif animation == "pan_ud":
+            cw = fit_w * 2
+            ch = int(fit_h * 2 * _PAN_Z / 2) * 2
+            travel = ch - fit_h * 2
+            canvas_img = _cover_crop_image(img, cw, ch)
+            filter_fg = (
+                f"[0:v]crop=w={cw}:h={fit_h * 2}:x=0:y='{travel}*{eot}',"
+                f"scale={fit_w}:{fit_h}:flags=lanczos[fg]"
+            )
+        else:  # zoom_in — crop filter doesn't support dynamic w/h; use 8× zoompan instead.
+            # At 8× upscale the per-frame position error is ≤1/8 output pixel,
+            # which is imperceptible for a uniform magnification change (unlike pans
+            # where lateral drift is much more visible).
+            _uz = 8
+            up_w = fit_w * _uz
+            up_h = fit_h * _uz
+            total_frames = max(int(round(duration * fps)), 1)
+            d_minus_1 = max(total_frames - 1, 1)
+            z_expr = f"1.0+{_PAN_Z - 1.0:.4f}*(1-pow(1-on/{d_minus_1},2))"
+            canvas_img = img.resize((fit_w, fit_h), _PILImage.LANCZOS)
+            filter_fg = (
+                f"[0:v]scale={up_w}:{up_h}:flags=lanczos,"
+                f"zoompan=z='{z_expr}':x='iw/2-iw/(2*zoom)':y='ih/2-ih/(2*zoom)':"
+                f"d={total_frames}:s={fit_w}x{fit_h}:fps={fps}[fg]"
+            )
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            tmp_pre = f.name
+        canvas_img.save(tmp_pre)
+
+        filter_complex = f"{filter_fg};[1:v][fg]overlay=x={fg_x}:y={fg_y}"
         cmd = [
             ffmpeg_bin, "-y",
             "-sws_flags", "lanczos",
