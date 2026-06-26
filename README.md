@@ -198,6 +198,33 @@ The Phase 1 system prompt used by the portal worker lives at `../portal/data/glo
 
 ---
 
+## Ken Burns animations
+
+Still images are displayed with one of four animated Ken Burns effects, picked randomly with no consecutive repeats:
+
+| Animation | Motion |
+|---|---|
+| `pan_lr` | Pan left → right |
+| `pan_rl` | Pan right → left |
+| `zoom_in` | Slow zoom in from centre |
+| `pan_ud` | Pan top → bottom |
+
+All animations use **ease-out quadratic timing** — fast at the start, decelerates to a smooth stop. The image fills the full 16:9 frame (`frame_scale=1.0`); a blurred/darkened version of the same image is used as a background safety net for non-16:9 sources (portrait, square, ultrawide). Portrait images (width ≤ height) skip the pan/zoom pool entirely and use a fade-in / fade-out instead.
+
+---
+
+## Visual-audio sync
+
+The pipeline uses faster-whisper sentence timestamps as the ground truth for when each clip plays. Several mechanisms keep footage locked to narration even across long videos:
+
+- **Absolute resync** — each sentence's footage slot is computed from its Whisper start timestamp, not accumulated from previous durations, so any local slip resets at the next sentence.
+- **Narrated title cards** — chapter title cards that have both spoken text and a `graphic_type` are rendered to exactly the Whisper-derived duration; a `_MIN_ANIM_DUR = 2.5 s` floor guarantees the animation completes, and the clip is post-trimmed back to the audio slot if needed.
+- **Pure-graphic lookahead** — non-narrated graphic sentences (pure visual inserts) carry `(0.0, 0.0)` placeholder timestamps; the planner skips past them to find the next narrated boundary, preventing the preceding sentence's footage slot from collapsing to zero.
+- **Crossfade trim buffer** — for smaller jobs (≤ 40 clips) that use xfade dissolves, the per-clip padding equals the crossfade duration exactly (0.2 s), so the overlap cancels with zero net drift.
+- **Minimum clip floor** — the per-clip duration floor is 2.0 s (not 3.0 s), so sentences ≥ 2 s are never inflated beyond their Whisper window.
+
+---
+
 ## Stack
 
 | Component | Library |
@@ -205,6 +232,7 @@ The Phase 1 system prompt used by the portal worker lives at `../portal/data/glo
 | TTS | [edge-tts](https://github.com/rany2/edge-tts) |
 | Timestamp alignment | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) |
 | Video assembly | [MoviePy 2](https://github.com/Zulko/moviepy) + FFmpeg |
+| Motion graphics | [Revideo](https://re.video/) (Node.js, Puppeteer renderer) |
 | Stock video | Pexels, Pixabay, Coverr |
 | Stock images | DuckDuckGo, Wikimedia Commons, Pexels Photos, Pixabay Images, Unsplash, Serper (Google Images) |
 | BGM | Pixabay Music (online) or user-supplied MP3s in `resource/songs/` |
