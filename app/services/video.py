@@ -9,7 +9,7 @@ import shutil
 import subprocess
 from contextlib import redirect_stdout
 from functools import lru_cache
-from typing import List
+from typing import List, Optional
 from loguru import logger
 import numpy as np
 from moviepy import (
@@ -1044,6 +1044,7 @@ def combine_videos(
     video_transition_mode: VideoTransitionMode = None,
     max_clip_duration: int = 5,
     threads: int = 2,
+    planned_clip_durations: Optional[List[float]] = None,
 ) -> str:
     audio_clip = AudioFileClip(audio_file)
     try:
@@ -1141,6 +1142,15 @@ def combine_videos(
             clip = _open_video_clip_quietly(subclipped_item.file_path).subclipped(
                 subclipped_item.start_time, subclipped_item.end_time
             )
+            # Snap to frame-aligned planned duration so per-clip stream-copy epsilon
+            # doesn't accumulate as A/V sync drift across long videos.  Only clamp
+            # when the clip is LONGER than planned; if it's short, leave it as-is.
+            if planned_clip_durations and i < len(planned_clip_durations):
+                _planned = planned_clip_durations[i]
+                _n_frames = max(1, round(_planned * fps))
+                _snap_dur = _n_frames / fps
+                if clip.duration > _snap_dur + 0.001:
+                    clip = clip.subclipped(0, _snap_dur)
             clip_duration = clip.duration
             # Not all videos are same size, so we need to resize them
             clip_w, clip_h = clip.size

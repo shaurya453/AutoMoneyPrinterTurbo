@@ -926,6 +926,7 @@ def start(job_path: str) -> Optional[dict]:
     os.makedirs(clips_dir, exist_ok=True)
 
     ordered_clips: List[str] = []
+    planned_clip_durations: List[float] = []  # parallel to ordered_clips; frame-snap target for combine_videos
     used_urls: set = set()  # tracks clip URLs used this run to prevent reuse
     total_sentences = len(timings)
 
@@ -1110,6 +1111,7 @@ def start(job_path: str) -> Optional[dict]:
             )
             if rendered:
                 ordered_clips.append(rendered)
+                planned_clip_durations.append(gfx_dur)
                 got_any = True
                 obtained_duration += gfx_dur
                 video_clip_count += 1
@@ -1166,6 +1168,7 @@ def start(job_path: str) -> Optional[dict]:
                     )
             if rendered:
                 ordered_clips.append(rendered)
+                planned_clip_durations.append(_trim_target)
                 got_any = True
                 obtained_duration += _trim_target
                 video_clip_count += 1
@@ -1225,6 +1228,7 @@ def start(job_path: str) -> Optional[dict]:
             if fetched:
                 clip_path, used_image = fetched
                 ordered_clips.append(clip_path)
+                planned_clip_durations.append(clip_duration + trim_buffer)
                 got_any = True
                 obtained_duration += clip_duration
                 if used_image:
@@ -1282,6 +1286,7 @@ def start(job_path: str) -> Optional[dict]:
             clip_counter += 1
             if fetched:
                 ordered_clips.append(fetched[0])
+                planned_clip_durations.append(_CLIP_TARGET + trim_buffer)
                 obtained_duration += _CLIP_TARGET
         if obtained_duration < audio_duration - 0.5:
             logger.warning(
@@ -1308,6 +1313,7 @@ def start(job_path: str) -> Optional[dict]:
             # Clips are already pre-trimmed; use a large cap to avoid re-trimming.
             max_clip_duration=999,
             threads=os.cpu_count() or 4,
+            planned_clip_durations=planned_clip_durations,
         )
     except Exception:
         logger.exception("combine_videos() raised — aborting")
