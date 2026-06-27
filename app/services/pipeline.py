@@ -775,11 +775,15 @@ def _resolve_bgm(job: dict) -> Tuple[str, str]:
     Resolve BGM source for this job and return (bgm_type, bgm_file) for VideoParams.
 
     Priority:
-      1. bgm_search_term  — search Pixabay online and download; falls back to random local
-      2. bgm_file = "random" — pick a random file from resource/songs/
-      3. bgm_file = "none" / "" — no BGM
+      1. bgm_file = "none" / "" — no BGM (hard override, checked before bgm_search_term)
+      2. bgm_search_term  — search Pixabay online and download; falls back to random local
+      3. bgm_file = "random" — pick a random file from resource/songs/
       4. bgm_file = "/path/or/name" — explicit local file
     """
+    raw = job.get("bgm_file", "random")
+    if not raw or raw.lower() in ("", "none"):
+        return "", ""
+
     search_term = job.get("bgm_search_term", "").strip()
     if search_term:
         logger.info(f"searching for BGM online: '{search_term}'")
@@ -792,9 +796,6 @@ def _resolve_bgm(job: dict) -> Tuple[str, str]:
         logger.warning("online BGM search failed — falling back to random local file")
         return "random", ""
 
-    raw = job.get("bgm_file", "random")
-    if not raw or raw.lower() in ("", "none"):
-        return "", ""
     if raw == "random":
         return "random", ""
     return "", raw  # explicit local path or filename
