@@ -736,7 +736,7 @@ def _render_ken_burns_ffmpeg(
 
         # Fade-only path for portrait/square images — no pan/zoom.
         if animation == "fade":
-            pre_resized = img.resize((fit_w, fit_h), _PILImage.LANCZOS)
+            pre_resized = _cover_crop_image(img, fit_w, fit_h)
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
                 tmp_pre = f.name
             pre_resized.save(tmp_pre)
@@ -814,7 +814,7 @@ def _render_ken_burns_ffmpeg(
             total_frames = max(int(round(duration * fps)), 1)
             d_minus_1 = max(total_frames - 1, 1)
             z_expr = f"1.0+{_PAN_Z - 1.0:.4f}*(1-pow(1-on/{d_minus_1},2))"
-            canvas_img = img.resize((fit_w, fit_h), _PILImage.LANCZOS)
+            canvas_img = _cover_crop_image(img, fit_w, fit_h)
             filter_fg = (
                 f"[0:v]scale={up_w}:{up_h}:flags=lanczos,"
                 f"zoompan=z='{z_expr}':x='iw/2-iw/(2*zoom)':y='ih/2-ih/(2*zoom)':"
@@ -1092,6 +1092,10 @@ def combine_videos(
             if end_time <= start_time:
                 break  # max_clip_duration=0 or floating-point edge case — prevent infinite loop
 
+            if end_time - start_time < 0.1:  # skip sub-100ms slivers — ffmpeg xfade can't handle them
+                start_time = end_time
+                continue
+
             # 保留所有有效分段。
             # 这样既不会丢掉”整段视频本身就短于 max_clip_duration”的素材，
             # 也不会吞掉长视频最后剩下的一小段尾部内容。
@@ -1164,6 +1168,10 @@ def combine_videos(
 
             # Store clip duration before closing
             clip_duration_saved = clip.duration
+            if clip_duration_saved < 0.1:
+                logger.warning(f"skipping degenerate clip ({clip_duration_saved:.3f}s): {subclipped_item.file_path}")
+                close_clip(clip)
+                continue
             close_clip(clip)
 
             processed_clips.append(

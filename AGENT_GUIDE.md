@@ -46,7 +46,26 @@ The pipeline builds a query ladder: `[concept[0], concept[0] + topic, concept[1]
 - Never force a niche `[0]` the sentence doesn't need — if generic b-roll communicates the beat, write toward the broader end
 - Disambiguate single words that could match unrelated domains (e.g. `"court"` → `"courtroom interior"`, `"scale"` → `"kitchen scale"`)
 - Disambiguate animal/insect names that are also brand names (e.g. `"firefly"` matches Firefly-branded LED bulbs; use `"firefly insect glowing"` or `"glowing beetle dark field"` instead). Same applies to `"jaguar"` (car), `"swift"` (programming language), `"python"` (software), etc.
-- **Variety rule (critical for long videos):** the same visual_concepts pair must not appear on more than 2–3 sentences across the whole video. Actively track what you have already written — pick new scenes, angles, or settings as the script progresses. Never fall back to recycling a small set of generic concepts (`"shopper inspecting label"`, `"financial report pages"`, etc.) for sentences where the narration clearly calls for something more specific.
+- **Variety rule (hard limit):** the same `visual_concepts[0]` must not appear on more than **2 consecutive sentences** and must not be used more than **4 times across the entire job**. Every block of 5 sentences must contain at least 3 distinct `visual_concepts[0]` values. Actively track what you have already written — pick new scenes, angles, or settings as the script progresses. Never fall back to recycling a small set of generic concepts (`"shopper inspecting label"`, `"grocery store aisle"`, `"financial report pages"`, etc.) for sentences where the narration clearly calls for something more specific. Violating this rule exhausts the footage pool and causes the pipeline to produce black screens.
+
+#### Segment-aware visual selection (required)
+
+Before writing `visual_concepts` for any sentence, identify the **content segment** it belongs to. Different segment types require completely different visuals — never default to "narrator walking grocery aisle" or "observer perspective" outside the physical-observation segment.
+
+| Segment | What the narration is actually about | Correct visuals | NEVER use |
+|---|---|---|---|
+| **Physical observation** | Narrator literally walking a store, noticing gaps, reading shelf tags | store aisle walk, shopper behavior, shelf close-up, empty shelf gap | — |
+| **Named product / brand** | A specific product or company is named (Kellogg's Corn Pops, Hostess Snow Balls, etc.) | Use `content_track: "named"` with the brand/product as `visual_concepts[0]` | generic store walk |
+| **Corporate strategy** | Portfolio optimization, SKU rationalization, earnings filings, market decisions | corporate boardroom, earnings presentation, business documents, executive meeting | store aisle, "observer perspective" |
+| **Food science / storage** | Shelf life, freezer storage, how to store a product, temperature, expiry | pantry shelf stocked, freezer bag food storage, labeled jar pantry, food preservation | store walk |
+| **Historical analogy** | Past events used as context (beer consolidation 1970s, brand history, etc.) | archival-style footage, brewery interior, vintage product, old manufacturing | current store walk |
+| **Media / advertising critique** | Why news doesn't cover it, advertiser influence, trade press vs. consumer press | broadcast news studio, TV advertising, newspaper front page, media production | store walk |
+| **Agriculture / cooperative** | Dairy farms, cooperative structure, farmer-owned brands, supply chain origins | dairy farm, cow herd grazing, milk processing plant, butter manufacturing | generic grocery aisle |
+| **Audience engagement / outro** | Subscribe, comment, read this far, what to do next | wide outdoor establishing shot, community gathering, direct-camera moment | store walk |
+
+**"Observer perspective" is ONLY valid for the physical-observation segment.** If the narration is discussing corporate filings, food storage science, historical consolidation, media critique, or closing remarks, using "observer perspective" or "narrator walking grocery aisle" is an enrichment error.
+
+**Named product mandate:** Any sentence that names a specific product or brand (e.g. "Kellogg's Corn Pops", "Campbell's Chunky", "Land O Lakes butter") MUST use `content_track: "named"` with the product/brand name as `visual_concepts[0]`. These are the primary visual anchors of the video — they must be named lookups, not generic store b-roll.
 
 **Example (thematic, `video_topic = "grocery price inflation"`):**
 - Sentence: "I walked through the freezer aisle."
