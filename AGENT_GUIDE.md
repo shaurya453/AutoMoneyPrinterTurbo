@@ -37,7 +37,7 @@ Set `video_topic`, `video_type`, and (thematic only) `motif_palette` at the job 
 
 1–3 **subject-free local visual ideas**, specific → broad. "Subject-free" means do not repeat `video_topic`'s words — the pipeline appends it automatically. Each concept should be concrete and self-sufficient (3 words max).
 
-The pipeline builds a query ladder: `[concept[0], concept[0] + topic, concept[1], concept[1] + topic, ..., topic]` for thematic; `[concept[0] + topic, ...]` for named_entity.
+The pipeline builds a query ladder: `[concept[0], concept[0] + topic, concept[1], concept[1] + topic, ..., topic]` for thematic; `[concept[0], concept[0] + topic, concept[1], ...]` for named_entity (bare concept tried first so Google Images gets a clean product-name query).
 
 **Rules:**
 - `[0]` must describe something a camera would physically show — no abstract nouns
@@ -46,7 +46,13 @@ The pipeline builds a query ladder: `[concept[0], concept[0] + topic, concept[1]
 - Never force a niche `[0]` the sentence doesn't need — if generic b-roll communicates the beat, write toward the broader end
 - Disambiguate single words that could match unrelated domains (e.g. `"court"` → `"courtroom interior"`, `"scale"` → `"kitchen scale"`)
 - Disambiguate animal/insect names that are also brand names (e.g. `"firefly"` matches Firefly-branded LED bulbs; use `"firefly insect glowing"` or `"glowing beetle dark field"` instead). Same applies to `"jaguar"` (car), `"swift"` (programming language), `"python"` (software), etc.
-- **Variety rule (hard limit):** the same `visual_concepts[0]` must not appear on more than **2 consecutive sentences** and must not be used more than **4 times across the entire job**. Every block of 5 sentences must contain at least 3 distinct `visual_concepts[0]` values. Actively track what you have already written — pick new scenes, angles, or settings as the script progresses. Never fall back to recycling a small set of generic concepts (`"shopper inspecting label"`, `"grocery store aisle"`, `"financial report pages"`, etc.) for sentences where the narration clearly calls for something more specific. Violating this rule exhausts the footage pool and causes the pipeline to produce black screens.
+- **Variety rule (hard limit):**
+  - The same `visual_concepts[0]` must not appear on more than **2 consecutive sentences** and must not be used more than **4 times across the entire job**.
+  - **Numbered variants are NOT distinct.** `"empty shelf angle 5"` and `"empty shelf angle 6"` count as ONE concept. Do not append angle / view / shot / position / perspective numbers to bypass this limit — it is explicitly forbidden and will be detected.
+  - Every block of 5 sentences must contain at least 3 distinct `visual_concepts[0]` values.
+  - Never fall back to recycling a small set of generic concepts (`"shopper inspecting label"`, `"grocery store aisle"`, `"financial report pages"`, etc.) for sentences where the narration clearly calls for something more specific.
+  - **PRE-SUBMISSION AUDIT (required):** Before finalising your job.json, count the unique `visual_concepts[0]` values (collapsing any numbered variants into one). The count MUST be ≥ `max(15, ceil(sentence_count / 4))`. For 100 sentences → ≥ 25 unique concepts required. For 278 sentences → ≥ 70. If you fall short, go back and replace repeated concepts with visually distinct alternatives drawn from the segment table below.
+  - Violating this rule exhausts the footage pool. The result is the same footage appearing on screen for minutes at a time — not black screens, visible repetition.
 
 #### Segment-aware visual selection (required)
 
@@ -81,26 +87,31 @@ One sentence describing the shot — used by the CLIP relevance filter to rank a
 - Write the reaction *into* the scene: `"a shopper looking surprised reading a discontinued label in a supermarket aisle"` — not `"a person looking surprised"`
 - When the subject is an animal, insect, or organism that shares its name with a brand or product, name the biological category explicitly: `"a glowing firefly insect hovering above grass at night"` — not `"firefly light"` (matches Firefly-branded bulbs)
 - Required on every sentence including `media_type: "image"` ones
+- **No two sentences may share the same visual_caption** (exact or near-identical). Every caption must describe a shot a viewer could visually distinguish from every other sentence. Reusing captions defeats the CLIP relevance filter — it can no longer tell good candidates from bad when they all score against the same description.
 
 | Sentence | `visual_concepts` | `visual_caption` |
 |---|---|---|
 | "I walked into a Kroger" | `["Kroger storefront", "supermarket interior"]` | `"wide shot of a supermarket interior with aisles and shoppers"` |
 | "Tim Cook took the stage" | `["Tim Cook portrait"]` | `"Tim Cook speaking on a stage at a product event"` |
 
-### `must_show` and `avoid` (optional)
+### `must_show` and `avoid`
 
-Optional lists of plain-English keywords used to guide the VLM footage reviewer (when `vlm_verify_enabled = true` in config) and to pre-sort candidates by metadata match.
+Plain-English keywords passed to the VLM footage reviewer (enabled in config) and used to pre-sort candidates by metadata match. The VLM hard-rejects clips that don't satisfy `must_show`.
 
 ```jsonc
 "must_show": ["shopping cart", "grocery aisle"],   // footage MUST contain these
 "avoid": ["people's faces", "text overlays", "logos"]  // footage should avoid these
 ```
 
-**When to set these:**
-- Set `must_show` when a specific visual element is essential to the narration and generic b-roll would mislead (e.g. the sentence explicitly describes a shopping cart being pushed).
-- Set `avoid` when the topic makes certain image types likely to appear but wrong (e.g. a finance documentary should avoid meme-style charts; a nature doc should avoid cartoon wildlife).
-- Both fields are optional lists. Omit them (or set to `[]`) for most sentences — the VLM uses sensible defaults (avoid watermarks, text overlays, cartoons) when not set.
-- Do NOT use these as a substitute for `visual_concepts` — they are a refinement on top of the search query, not the query itself.
+**`must_show` is required (not optional) when:**
+- The narration explicitly names a physical object the viewer must literally see — e.g. "the barcode", "the original yellow box", "the price tag still in place", "the 9.9 oz can", "the nutrition label" → add those nouns to `must_show`.
+- The sentence uses `content_track: "named"` for a branded product — add the product name or its most identifying visual (packaging colour, logo shape) to `must_show` so the VLM confirms the correct item is on screen, not a similar competitor.
+
+**`must_show` is optional (leave `[]`) when:** the narration describes a general scene with no single mandatory visual element.
+
+**`avoid` — set when:** the topic makes certain image types likely but wrong (e.g. a finance documentary should avoid meme-style charts; a nature doc should avoid cartoon wildlife).
+
+Do NOT use either field as a substitute for `visual_concepts` — they are a filter on top of the search query, not the query itself.
 
 ### `content_track`
 
@@ -156,6 +167,11 @@ Optional lists of plain-English keywords used to guide the VLM footage reviewer 
 | "The ship disappeared beneath the waves" | `"ship sinking ocean"` | `"broll"` |
 
 Don't overuse `"named"` — it spends a Serper API call. Most sentences (70–80%) should be `"broll"`. For `named_entity` videos, use `"named"` only when the actual entity must be literally visible; use `"broll"` for atmosphere and background shots.
+
+**Named product visual detail:** For branded products, include the most visually identifying feature in `visual_concepts[0]` so the image search returns the right version:
+- BAD: `"Kellogg's Corn Pops"` — retrieves any image mentioning the brand, including current reformulated versions
+- GOOD: `"Kellogg's Corn Pops original yellow box cereal"` — anchors to the specific packaging
+Include packaging colour, shape, logo style, or edition ("original", "classic", "vintage") as needed. For `content_track: "named"` sentences, also add the product's key visual identifier to `must_show` (e.g. `"must_show": ["yellow box", "Corn Pops"]`).
 
 ### Graphic Cues
 

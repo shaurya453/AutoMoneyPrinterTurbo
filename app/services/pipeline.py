@@ -255,10 +255,17 @@ def _build_query_ladder(
         if not concept:
             continue
         if not video_topic or video_type == "named_entity":
-            # Named-entity: anchor every query; no topic: bare concept only.
-            q = f"{concept} {video_topic}".strip() if video_topic else concept
-            if q not in ladder:
-                ladder.append(q)
+            # Named-entity: bare concept first so image search engines (Serper/
+            # Google Images) receive a clean product-name query without the full
+            # video_topic appended (e.g. "Kellogg's Corn Pops yellow box" works
+            # far better than "Kellogg's Corn Pops yellow box vanishing American
+            # brands").  Topic-appended form is added as a second rung fallback.
+            q_bare = concept if video_topic else concept
+            q_topic = f"{concept} {video_topic}".strip() if video_topic else concept
+            if q_bare not in ladder:
+                ladder.append(q_bare)
+            if q_topic not in ladder and q_topic != q_bare:
+                ladder.append(q_topic)
         else:
             # Thematic: bare concept only. Appending the full topic string
             # produces long, over-specific queries ("supermarket aisle empty
@@ -1251,16 +1258,24 @@ def start(job_path: str) -> Optional[dict]:
             f"({image_clip_count / _total_clips:.0%} image)"
         )
 
-    # ---- Gap-fill: cover any shortfall with extra unique clips. combine_videos
-    # never repeats footage, so anything still missing after this is covered by
-    # the outro's frozen-last-frame extension instead. ----
-    if obtained_duration < audio_duration - 0.5 and _all_concepts:
+    # ---- Gap-fill: cover any shortfall with extra unique clips. ----
+    # Phase 1: cycle through the job's own concept pool (already assembled above).
+    # Phase 2: when that pool is exhausted, try a set of generic fallback terms
+    # that are deliberately different from what the job used, so we get fresh URLs.
+    _GENERIC_GAPFILL_FALLBACKS = [
+        "retail store interior", "city street pedestrians", "office workers meeting",
+        "nature landscape aerial", "documentary interview setting", "warehouse logistics",
+        "business presentation", "urban architecture", "market stall vendor",
+        "factory production line",
+    ]
+    if obtained_duration < audio_duration - 0.5 and (_all_concepts or _GENERIC_GAPFILL_FALLBACKS):
         max_gap_fill_attempts = len(_all_concepts) * 3 + 20
         attempts = 0
         logger.info(
             f"obtained {obtained_duration:.2f}s of {audio_duration:.2f}s — gap-filling with extra clips"
         )
-        while obtained_duration < audio_duration - 0.5 and attempts < max_gap_fill_attempts:
+        # Phase 1: job concept pool
+        while obtained_duration < audio_duration - 0.5 and attempts < max_gap_fill_attempts and _all_concepts:
             concept = _all_concepts[attempts % len(_all_concepts)]
             attempts += 1
             filler_sentence = {
@@ -1288,11 +1303,44 @@ def start(job_path: str) -> Optional[dict]:
                 ordered_clips.append(fetched[0])
                 planned_clip_durations.append(_CLIP_TARGET + trim_buffer)
                 obtained_duration += _CLIP_TARGET
+        # Phase 2: generic fallback terms — different from the job's concept pool
+        # so they produce fresh URLs even when the primary pool is completely dry.
         if obtained_duration < audio_duration - 0.5:
-            logger.warning(
-                f"gap-fill exhausted after {attempts} attempts — still "
-                f"{audio_duration - obtained_duration:.2f}s short; the outro "
-                f"outro loop will cover the remainder without repeating footage"
+            logger.info("gap-fill phase 1 exhausted — trying generic fallback terms")
+            for fb_concept in _GENERIC_GAPFILL_FALLBACKS:
+                if obtained_duration >= audio_duration - 0.5:
+                    break
+                filler_sentence = {
+                    "visual_concepts": [fb_concept],
+                    "media_type": "video",
+                    "content_track": "broll",
+                    "visual_caption": fb_concept,
+                }
+                fetched = _fetch_clip(
+                    sentence=filler_sentence,
+                    sent_duration=_CLIP_TARGET,
+                    trim_buffer=trim_buffer,
+                    source=video_source,
+                    video_aspect=video_aspect,
+                    clip_idx=clip_counter,
+                    clips_dir=clips_dir,
+                    used_urls=used_urls,
+                    video_topic=video_topic,
+                    video_type=video_type,
+                    recent_embeddings=recent_embs,
+                    dedup_threshold=dedup_threshold,
+                )
+                clip_counter += 1
+                if fetched:
+                    ordered_clips.append(fetched[0])
+                    planned_clip_durations.append(_CLIP_TARGET + trim_buffer)
+                    obtained_duration += _CLIP_TARGET
+        if obtained_duration < audio_duration - 0.5:
+            repeat_secs = audio_duration - obtained_duration
+            logger.error(
+                f"FOOTAGE POOL EXHAUSTED: {repeat_secs:.0f}s of narration has no visual coverage. "
+                f"The last clip will repeat for {repeat_secs:.0f}s. "
+                f"Fix: provide more diverse visual_concepts in the job JSON."
             )
         else:
             logger.info(f"gap-fill complete: {obtained_duration:.2f}s obtained")
