@@ -87,7 +87,7 @@ Optional lists of plain-English keywords used to guide the VLM footage reviewer 
 
 - **`"named"`** — `visual_concepts[0]` is a specific, uniquely identifiable entity that has a real-world name. Routes to Google Images (Serper) first. `media_type` is ignored for the primary fetch.
 - **`"broll"`** — generic scene, action, category, or location type. Routes to stock video/image sources.
-- **`"graphic"`** — animated motion-graphic segment (see Graphic Cues below).
+- **`"graphic"`** — **DISABLED. Do not use.** Set every sentence to `"broll"` or `"named"` instead. Do not set `graphic_type` on any sentence.
 
 **Decision rule:** if `visual_concepts[0]` is a *specific named thing that could be searched by name and return the right result*, use `"named"`. If it's a *category, scene, or general location type*, use `"broll"`.
 
@@ -139,6 +139,8 @@ Optional lists of plain-English keywords used to guide the VLM footage reviewer 
 Don't overuse `"named"` — it spends a Serper API call. Most sentences (70–80%) should be `"broll"`. For `named_entity` videos, use `"named"` only when the actual entity must be literally visible; use `"broll"` for atmosphere and background shots.
 
 ### Graphic Cues
+
+> **GRAPHICS DISABLED — skip this entire section.** Do not produce any `content_track: "graphic"` sentences or set `graphic_type` on any sentence. The Revideo renderer is offline. Tag every sentence as `"broll"` or `"named"` only.
 
 Two patterns — choose the right one for each use case.
 
