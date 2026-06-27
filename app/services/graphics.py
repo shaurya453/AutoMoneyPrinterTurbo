@@ -115,6 +115,10 @@ def render_graphic_clip(
         style:        Optional named style (e.g. "editorial", "callouts") — maps to a
                       specific variant, bypassing the no-consecutive rotation.
     """
+    if os.environ.get("REVIDEO_ENABLED", "1") == "0":
+        logger.info(f"Revideo disabled (REVIDEO_ENABLED=0) — skipping {graphic_type} render")
+        return None
+
     if not os.path.isfile(_RENDER_JS):
         logger.error(f"revideo-worker not found at {_RENDER_JS} — skipping graphic clip")
         return None
