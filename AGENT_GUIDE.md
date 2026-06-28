@@ -22,6 +22,9 @@ venv/bin/python sentence_prep.py --script "storage/tasks/My Video/script.txt" \
 
 Set `video_topic`, `video_type`, and (thematic only) `motif_palette` at the job root. Then rewrite every sentence's fields — do not trust the stubs.
 
+> **CRITICAL — `text` field must never be cleared.**
+> `sentence_prep.py` sets the `text` field to the narration text for each sentence. Whisper uses it for timestamp alignment. If you clear or omit `text` on any `broll` or `named` sentence, the entire pipeline breaks: every sentence gets a 2-second placeholder duration instead of its real duration, subtitles are empty, and a mass gap-fill produces 50+ irrelevant clips. **Never rebuild the sentences array from scratch. Patch only the fields listed below; leave `text` untouched.**
+
 ### `video_topic` and `video_type`
 
 **`video_topic`** — 2–6 word phrase for the video's subject (e.g. `"ultra-processed food industry"`). Appended to search queries and to `visual_caption` when scoring candidates.
@@ -94,9 +97,9 @@ One sentence describing the shot — used by the CLIP relevance filter to rank a
 | "I walked into a Kroger" | `["Kroger storefront", "supermarket interior"]` | `"wide shot of a supermarket interior with aisles and shoppers"` |
 | "Tim Cook took the stage" | `["Tim Cook portrait"]` | `"Tim Cook speaking on a stage at a product event"` |
 
-### `visual_effect` (optional)
+### `visual_effect`
 
-A mood-driven color grade applied to the clip during rendering. Leave blank (or omit) for neutral clips — most clips should have no effect.
+A mood-driven color grade applied to the clip during rendering. **Expected on ~15–25% of `broll`/`named` sentences** — assign at every distinct narrative beat (threat, revelation, nostalgia, etc.). Leave blank for purely informational or transitional clips.
 
 **You decide this during Phase 1 enrichment.** You wrote the script, so you know the emotional beat of each sentence. Assign the effect then, not in a separate pass.
 

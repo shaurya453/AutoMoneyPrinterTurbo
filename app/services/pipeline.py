@@ -322,7 +322,7 @@ def _fetch_video_clip(
     nsfw_frame_samples = int(config.app.get("nsfw_frame_samples", 4))
     relevance_frame_samples = int(config.app.get("relevance_video_frame_samples", 4))
     relevance_pool = config.app.get("relevance_video_pool", "mean")
-    margin = float(config.app.get("relevance_margin", 0.02))
+    margin = float(config.app.get("video_relevance_margin", config.app.get("relevance_margin", 0.04)))
     use_relevance = relevance.is_available() and not relevance.is_log_only()
     num_frames = max(nsfw_frame_samples, relevance_frame_samples)
     coverr_enabled = bool(config.app.get("coverr_enabled", True))
@@ -577,6 +577,13 @@ def _fetch_image_clip(
     width, height = VideoAspect(video_aspect).to_resolution()
     out_path = os.path.join(clips_dir, f"clip-{clip_idx:04d}.mp4")
 
+    # For Serper (Google Images), long verbose concept strings return nothing —
+    # use a short 3-word canonical entity name as the search query instead.
+    visual_concepts_for_serper = _get_visual_concepts(sentence)
+    serper_term = ""
+    if source_order and "serper" in source_order and visual_concepts_for_serper:
+        serper_term = " ".join(visual_concepts_for_serper[0].split()[:3])
+
     image_path = material.download_image(
         search_terms=search_terms,
         source_order=source_order,
@@ -590,6 +597,7 @@ def _fetch_image_clip(
         video_topic=video_topic,
         must_show=sentence.get("must_show") or [],
         avoid=sentence.get("avoid") or [],
+        serper_term=serper_term,
     )
     if not image_path:
         return None

@@ -82,6 +82,8 @@ def main():
     concept0_counts: dict = {}    # concept[0] → count
     enrichable: list = []         # (sentence_index, concept0) for non-graphic sentences
 
+    text_errors = []
+
     for i, sent in enumerate(sentences):
         track = sent.get("content_track", "broll")
         text = (sent.get("text") or "").strip()
@@ -89,6 +91,13 @@ def main():
         # Pure graphic sentences have no VO and no footage requirement
         if track == "graphic" and not text:
             continue
+
+        if track in ("broll", "named") and not text:
+            text_errors.append(
+                f"sentence {i} (track={track!r}): text field is empty — "
+                "Whisper cannot align; pipeline falls back to 2 s placeholder. "
+                "The agent must never clear the text field during enrichment."
+            )
 
         vc = sent.get("visual_concepts")
         if not vc or not isinstance(vc, list) or len(vc) == 0:
@@ -117,6 +126,15 @@ def main():
                 warnings.append(f"sentence {i}: visual_effect set on graphic sentence (ignored by pipeline)")
             elif effect not in _VALID_VISUAL_EFFECTS:
                 warnings.append(f"sentence {i}: unknown visual_effect={effect!r}")
+
+    # ── Text-field hard errors ───────────────────────────────────────────────
+    if text_errors:
+        print(
+            f"VALIDATION_ERROR: {len(text_errors)} sentence(s) have empty text; "
+            f"first: {text_errors[0]}",
+            flush=True,
+        )
+        sys.exit(1)
 
     # ── Effect aggregate checks ──────────────────────────────────────────────
     enrichable_tracks = [

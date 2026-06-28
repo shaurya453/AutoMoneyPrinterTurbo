@@ -919,6 +919,7 @@ def download_image(
     video_topic: str = "",
     must_show: List[str] = None,
     avoid: List[str] = None,
+    serper_term: str = "",
 ) -> str:
     """
     Search for a still image using multiple providers in priority order and
@@ -968,8 +969,12 @@ def download_image(
             # likely to block hotlinking (e.g. Akamai-protected CDNs) -- request
             # more candidates so a working one is likely among them.
             n = 10 if provider == "duckduckgo" else 6
+            # Serper (Google Images) works best with short, canonical entity
+            # names — verbose concept strings like "JBL L100 Century alnico
+            # drivers front view" return nothing. Use the short override when set.
+            query = serper_term if (provider == "serper" and serper_term) else term
             urls = [
-                url for url in fn(term, n=n)
+                url for url in fn(query, n=n)
                 if url and (used_urls is None or url not in used_urls)
             ]
             per_provider.append((provider, urls))
@@ -995,6 +1000,7 @@ def download_image(
     def _claim(url: str, term: str, provider: str, local: str, note: str = "") -> str:
         if used_urls is not None:
             used_urls.add(url)
+            used_urls.add(local)  # prevent same cached file reused via a different URL
         logger.info(f"image obtained via {provider} for '{term}': {local}{note}")
         return local
 
@@ -1013,6 +1019,12 @@ def download_image(
             for provider, url in iter_candidates:
                 local = save_image(url, save_dir)
                 if not local:
+                    continue
+
+                # Reject if this physical file was already used (same image
+                # reached via a different URL or a repeated cache hit).
+                if used_urls is not None and local in used_urls:
+                    logger.debug(f"skipping already-used cached image: {local}")
                     continue
 
                 with open(local, "rb") as fh:
