@@ -1,10 +1,10 @@
 # Agent Guide — MoneyPrinterTurbo Documentary Pipeline
 
 ```
-script.txt → sentence_prep.py → job.json → [YOU ENRICH] → (worker runs cli.py) → final.mp4
+script.txt → sentence_prep.py → job.json → [YOU ENRICH] → cli.py → final.mp4
 ```
 
-Read this file once, then enrich every sentence in `job.json`. Print `JOB_JSON_PATH:` when done. Do not run `cli.py`.
+Read this file once. Enrich every sentence in `job.json`. Print `JOB_JSON_PATH:` when done. Do not run `cli.py`.
 
 ---
 
@@ -20,467 +20,176 @@ venv/bin/python sentence_prep.py --script "storage/tasks/My Video/script.txt" \
 
 ## Step 2 — Enrich Every Sentence
 
-Set `video_topic`, `video_type`, and (thematic only) `motif_palette` at the job root. Then rewrite every sentence's fields — do not trust the stubs.
+Set `video_topic`, `video_type`, and (thematic only) `motif_palette` at the job root. Patch only the fields listed here on each sentence — **do not rebuild the array from scratch**.
 
-> **CRITICAL — `text` field must never be cleared.**
-> `sentence_prep.py` sets the `text` field to the narration text for each sentence. Whisper uses it for timestamp alignment. If you clear or omit `text` on any `broll` or `named` sentence, the entire pipeline breaks: every sentence gets a 2-second placeholder duration instead of its real duration, subtitles are empty, and a mass gap-fill produces 50+ irrelevant clips. **Never rebuild the sentences array from scratch. Patch only the fields listed below; leave `text` untouched.**
+> **CRITICAL — never clear `text`.**
+> `sentence_prep.py` writes each narration sentence into `text`. Whisper uses it for timestamp alignment. If you blank `text` on any `broll`/`named` sentence the entire pipeline breaks: every clip gets a 2-second placeholder, subtitles are empty, and 50+ irrelevant gap-fill clips are generated. **Leave `text` exactly as written. Patch only the fields below.**
 
-### `video_topic` and `video_type`
+---
 
-**`video_topic`** — 2–6 word phrase for the video's subject (e.g. `"ultra-processed food industry"`). Appended to search queries and to `visual_caption` when scoring candidates.
+### `video_topic` / `video_type`
 
-**`video_type`** — controls how `video_topic` is used in queries:
+**`video_topic`** — 2–6 word subject phrase (e.g. `"ultra-processed food industry"`). Appended to search queries automatically.
 
-| `video_type` | When to use | Query behavior |
+| `video_type` | When to use | Query behaviour |
 |---|---|---|
-| `"thematic"` | Abstract idea, trend, or category — no single object represents it | Bare concept tried first; topic folded in only as fallback |
+| `"thematic"` | Abstract idea, trend, or category | Bare concept tried first; topic folded in as fallback |
 | `"named_entity"` | One specific recurring subject — brand, product, person | Topic appended to every concept query |
+
+---
 
 ### `visual_concepts`
 
-1–3 **subject-free local visual ideas**, specific → broad. "Subject-free" means do not repeat `video_topic`'s words — the pipeline appends it automatically. Each concept should be concrete and self-sufficient (3 words max).
-
-The pipeline builds a query ladder: `[concept[0], concept[0] + topic, concept[1], concept[1] + topic, ..., topic]` for thematic; `[concept[0], concept[0] + topic, concept[1], ...]` for named_entity (bare concept tried first so Google Images gets a clean product-name query).
+1–3 concrete, **subject-free** local visual ideas, specific → broad (≤3 words each). Subject-free = do not repeat `video_topic` words — the pipeline appends them automatically.
 
 **Rules:**
-- `[0]` must describe something a camera would physically show — no abstract nouns
-- `[1]`/`[2]` must be genuinely broader than `[0]`, not near-duplicates
-- For thematic videos, `[0]` must be self-sufficient without the topic appended
-- Never force a niche `[0]` the sentence doesn't need — if generic b-roll communicates the beat, write toward the broader end
-- Disambiguate single words that could match unrelated domains (e.g. `"court"` → `"courtroom interior"`, `"scale"` → `"kitchen scale"`)
-- Disambiguate animal/insect names that are also brand names (e.g. `"firefly"` matches Firefly-branded LED bulbs; use `"firefly insect glowing"` or `"glowing beetle dark field"` instead). Same applies to `"jaguar"` (car), `"swift"` (programming language), `"python"` (software), etc.
-- **Variety rule (hard limit):**
-  - The same `visual_concepts[0]` must not appear on more than **2 consecutive sentences** and must not be used more than **4 times across the entire job**.
-  - **Numbered variants are NOT distinct.** `"empty shelf angle 5"` and `"empty shelf angle 6"` count as ONE concept. Do not append angle / view / shot / position / perspective numbers to bypass this limit — it is explicitly forbidden and will be detected.
-  - Every block of 5 sentences must contain at least 3 distinct `visual_concepts[0]` values.
-  - Never fall back to recycling a small set of generic concepts (`"shopper inspecting label"`, `"grocery store aisle"`, `"financial report pages"`, etc.) for sentences where the narration clearly calls for something more specific.
-  - **PRE-SUBMISSION AUDIT (required):** Before finalising your job.json, count the unique `visual_concepts[0]` values (collapsing any numbered variants into one). The count MUST be ≥ `max(15, ceil(sentence_count / 4))`. For 100 sentences → ≥ 25 unique concepts required. For 278 sentences → ≥ 70. If you fall short, go back and replace repeated concepts with visually distinct alternatives drawn from the segment table below.
-  - Violating this rule exhausts the footage pool. The result is the same footage appearing on screen for minutes at a time — not black screens, visible repetition.
+- `[0]` must describe what a camera physically shows — no abstract nouns (`"hope"` → `"sunrise over city"`)
+- `[1]`/`[2]` must be genuinely broader than `[0]`, not synonyms or near-duplicates
+- Disambiguate words that collide with unrelated domains: `"court"` → `"courtroom interior"`, `"bar"` → `"crowded bar interior"`, `"firefly"` → `"firefly insect glowing"`, `"jaguar"` → `"jaguar big cat"`, `"python"` → `"python snake coiled"` (animal/brand/software collisions are common)
+- **Variety limits (hard):** same `[0]` on ≤2 consecutive sentences and ≤4 times total. Numbered variants (`"shelf angle 5"`, `"shelf angle 6"`) count as ONE — forbidden.
+- **Pre-submission audit (required):** unique `[0]` count must be ≥ `max(15, ceil(N/4))`. For 100 sentences → ≥25 unique. Shortfall → replace repeated entries.
 
-#### Segment-aware visual selection (required)
+Match visuals to what the narration is **actually about** — not to the overall video theme:
+- Corporate strategy → boardroom, business documents, executive meeting (not store aisles)
+- Historical event → archival footage, vintage product, old manufacturing (not current footage)
+- Named product/person → `content_track: "named"` (see below)
+- Generic scene → describe the specific action or setting the sentence requires
 
-Before writing `visual_concepts` for any sentence, identify the **content segment** it belongs to. Different segment types require completely different visuals — never default to "narrator walking grocery aisle" or "observer perspective" outside the physical-observation segment.
-
-| Segment | What the narration is actually about | Correct visuals | NEVER use |
-|---|---|---|---|
-| **Physical observation** | Narrator literally walking a store, noticing gaps, reading shelf tags | store aisle walk, shopper behavior, shelf close-up, empty shelf gap | — |
-| **Named product / brand** | A specific product or company is named (Kellogg's Corn Pops, Hostess Snow Balls, etc.) | Use `content_track: "named"` with the brand/product as `visual_concepts[0]` | generic store walk |
-| **Corporate strategy** | Portfolio optimization, SKU rationalization, earnings filings, market decisions | corporate boardroom, earnings presentation, business documents, executive meeting | store aisle, "observer perspective" |
-| **Food science / storage** | Shelf life, freezer storage, how to store a product, temperature, expiry | pantry shelf stocked, freezer bag food storage, labeled jar pantry, food preservation | store walk |
-| **Historical analogy** | Past events used as context (beer consolidation 1970s, brand history, etc.) | archival-style footage, brewery interior, vintage product, old manufacturing | current store walk |
-| **Media / advertising critique** | Why news doesn't cover it, advertiser influence, trade press vs. consumer press | broadcast news studio, TV advertising, newspaper front page, media production | store walk |
-| **Agriculture / cooperative** | Dairy farms, cooperative structure, farmer-owned brands, supply chain origins | dairy farm, cow herd grazing, milk processing plant, butter manufacturing | generic grocery aisle |
-| **Audience engagement / outro** | Subscribe, comment, read this far, what to do next | wide outdoor establishing shot, community gathering, direct-camera moment | store walk |
-
-**"Observer perspective" is ONLY valid for the physical-observation segment.** If the narration is discussing corporate filings, food storage science, historical consolidation, media critique, or closing remarks, using "observer perspective" or "narrator walking grocery aisle" is an enrichment error.
-
-**Named product mandate:** Any sentence that names a specific product or brand (e.g. "Kellogg's Corn Pops", "Campbell's Chunky", "Land O Lakes butter") MUST use `content_track: "named"` with the product/brand name as `visual_concepts[0]`. These are the primary visual anchors of the video — they must be named lookups, not generic store b-roll.
-
-**Example (thematic, `video_topic = "grocery price inflation"`):**
-- Sentence: "I walked through the freezer aisle."
-- `visual_concepts`: `["frozen food aisle", "shopper with cart"]`
-- Query ladder: `["frozen food aisle", "frozen food aisle grocery price inflation", "shopper with cart", ..., "grocery price inflation"]`
+---
 
 ### `visual_caption`
 
-One sentence describing the shot — used by the CLIP relevance filter to rank and reject candidates. `video_topic` is appended automatically when scoring.
+One sentence describing the shot — used by the CLIP relevance filter to rank and reject candidates. `video_topic` is appended automatically.
 
-- Describes the **shot** (composition, subject, setting) — not a search query
-- Must be specific enough to distinguish good candidates from bad
-- Write the reaction *into* the scene: `"a shopper looking surprised reading a discontinued label in a supermarket aisle"` — not `"a person looking surprised"`
-- When the subject is an animal, insect, or organism that shares its name with a brand or product, name the biological category explicitly: `"a glowing firefly insect hovering above grass at night"` — not `"firefly light"` (matches Firefly-branded bulbs)
-- Required on every sentence including `media_type: "image"` ones
-- **No two sentences may share the same visual_caption** (exact or near-identical). Every caption must describe a shot a viewer could visually distinguish from every other sentence. Reusing captions defeats the CLIP relevance filter — it can no longer tell good candidates from bad when they all score against the same description.
+- Describes the **shot** (subject, setting, composition) — not a search query
+- Specific enough to reject off-topic stock: `"a worried shopper reading a discontinued label in a supermarket aisle"` — not `"a person looking surprised"`
+- Required on every sentence, including `media_type: "image"` ones
+- **No two sentences may share the same caption.** Duplicate captions break the relevance filter — it can't distinguish good from bad when all sentences score against the same description.
 
-| Sentence | `visual_concepts` | `visual_caption` |
-|---|---|---|
-| "I walked into a Kroger" | `["Kroger storefront", "supermarket interior"]` | `"wide shot of a supermarket interior with aisles and shoppers"` |
-| "Tim Cook took the stage" | `["Tim Cook portrait"]` | `"Tim Cook speaking on a stage at a product event"` |
+---
 
 ### `visual_effect`
 
-A mood-driven color grade applied to the clip during rendering. **Expected on ~15–25% of `broll`/`named` sentences** — assign at every distinct narrative beat (threat, revelation, nostalgia, etc.). Leave blank for purely informational or transitional clips.
+Mood color grade applied during rendering. **Expected on ~15–25% of `broll`/`named` sentences** — assign at distinct narrative beats. Leave blank for neutral or transitional clips. Decide now — you wrote the script and know the emotional beat of each sentence.
 
-**You decide this during Phase 1 enrichment.** You wrote the script, so you know the emotional beat of each sentence. Assign the effect then, not in a separate pass.
-
-| Value | Mood / Use case |
+| Value | Mood |
 |---|---|
-| `"threat"` | Danger, war, crime, conflict, violence |
-| `"cold"` | Tension, isolation, despair, winter, harsh environments |
-| `"warmth"` | Hope, triumph, joy, summer, celebration |
-| `"mystery"` | Supernatural, unknown, eerie, dread, conspiracy |
-| `"sepia"` | Historic, archival footage, nostalgia, past events |
-| `"tech"` | Digital, hacker culture, surveillance, data, cybersecurity |
-| `"money"` | Finance, wealth, economy, corporate power |
-| `"dream"` | Memory, fantasy, aspiration, soft-focus reflection |
-| `"noir"` | Crime drama, cynicism, moral decay, darkness |
-| `"nature"` | Environment, ecology, life, growth, biodiversity |
-| `"revelation"` | Discovery, breakthrough, truth unveiled, turning point |
-| `"news"` | Politics, power, broadcast news aesthetic, authority |
+| `"threat"` | Danger, conflict, violence |
+| `"cold"` | Tension, isolation, despair |
+| `"warmth"` | Hope, triumph, joy |
+| `"mystery"` | Eerie, unknown, conspiracy |
+| `"sepia"` | Historic, archival, nostalgia |
+| `"tech"` | Digital, surveillance, data |
+| `"money"` | Finance, wealth, corporate power |
+| `"dream"` | Memory, fantasy, aspiration |
+| `"noir"` | Crime, cynicism, moral decay |
+| `"nature"` | Ecology, life, growth |
+| `"revelation"` | Discovery, truth, turning point |
+| `"news"` | Politics, broadcast, authority |
 
-**Usage rules:**
-- Never set on graphic sentences (`content_track: "graphic"`)
-- No more than 3 consecutive sentences with the same effect value
-- `"sepia"` and `"noir"` are heavy treatments — use at most one of them in a video, not both
-- Effect must match the narrative beat; do not use it decoratively
+**Rules:** never set on `graphic` sentences. ≤3 consecutive same value. `sepia`+`noir` combined ≤1 per video.
 
-**Pre-submission audit (required):**
-- Count all effect-bearing `broll`/`named` sentences. Must be ≤30% of total. If over, remove excess (omit the field).
-- Scan for runs of >3 consecutive identical effects and break them up.
-- `sepia` + `noir` combined ≤1 per video.
+**Audit (required):** effect-bearing sentences ≤30% of all `broll`/`named`. Break any run of >3 identical effects.
 
-### `must_show` and `avoid`
-
-Plain-English keywords passed to the VLM footage reviewer (enabled in config) and used to pre-sort candidates by metadata match. The VLM hard-rejects clips that don't satisfy `must_show`.
-
-```jsonc
-"must_show": ["shopping cart", "grocery aisle"],   // footage MUST contain these
-"avoid": ["people's faces", "text overlays", "logos"]  // footage should avoid these
-```
-
-**`must_show` is required (not optional) when:**
-- The narration explicitly names a physical object the viewer must literally see — e.g. "the barcode", "the original yellow box", "the price tag still in place", "the 9.9 oz can", "the nutrition label" → add those nouns to `must_show`.
-- The sentence uses `content_track: "named"` for a branded product — add the product name or its most identifying visual (packaging colour, logo shape) to `must_show` so the VLM confirms the correct item is on screen, not a similar competitor.
-
-**`must_show` is optional (leave `[]`) when:** the narration describes a general scene with no single mandatory visual element.
-
-**`avoid` — set when:** the topic makes certain image types likely but wrong (e.g. a finance documentary should avoid meme-style charts; a nature doc should avoid cartoon wildlife).
-
-Do NOT use either field as a substitute for `visual_concepts` — they are a filter on top of the search query, not the query itself.
+---
 
 ### `content_track`
 
-- **`"named"`** — `visual_concepts[0]` is a specific, uniquely identifiable entity that has a real-world name. Routes to Google Images (Serper) first. `media_type` is ignored for the primary fetch.
-- **`"broll"`** — generic scene, action, category, or location type. Routes to stock video/image sources.
-- **`"graphic"`** — **DISABLED. Do not use.** Set every sentence to `"broll"` or `"named"` instead. Do not set `graphic_type` on any sentence.
+- **`"named"`** — `[0]` is a specific, uniquely identifiable entity. Routes to Google Images (Serper) first. `media_type` is ignored for the primary fetch.
+- **`"broll"`** — generic scene, action, category, or location. Routes to stock video/image sources.
+- **`"graphic"`** — **DISABLED. Do not use.** Tag every sentence `"broll"` or `"named"`.
 
-**Decision rule:** if `visual_concepts[0]` is a *specific named thing that could be searched by name and return the right result*, use `"named"`. If it's a *category, scene, or general location type*, use `"broll"`.
+**Decision rule:** if you can Google the entity by exact name and expect the right image, use `"named"`. If it's a category or scene type, use `"broll"`. **70–80% of sentences should be `"broll"`** — Serper quota is finite.
 
-#### Named entity types — use `"named"` for these
+**Use `"named"` for:** named people (portraits), branded products/SKUs, company logos/HQ, specific vehicles/aircraft/ships, named buildings/landmarks, historical events, named documents/laws/reports, named artworks, species with a distinctive look.
 
-| Category | Examples | `visual_concepts[0]` pattern |
-|---|---|---|
-| **Person** | Elon Musk, Marie Curie, Steve Jobs, Barack Obama | `"<Full Name> portrait"` or `"<Full Name> speaking"` |
-| **Branded product / SKU** | iPhone 15 Pro, Kellogg's Corn Flakes, Nike Air Max | `"<product name>"` |
-| **Company / brand** | Tesla, Apple, NASA, OpenAI | `"<company> logo"` or `"<company> headquarters"` |
-| **Specific vehicle model** | SR-71 Blackbird, Ford Mustang GT500, Space Shuttle Challenger | `"<vehicle name>"` |
-| **Named aircraft / ship / spacecraft** | USS Enterprise, Titanic, Apollo 11 lunar module | `"<craft name>"` |
-| **Named building / structure** | Eiffel Tower, Burj Khalifa, Empire State Building | `"<building name>"` |
-| **Named location / landmark** | Times Square, Grand Canyon, Chernobyl exclusion zone | `"<landmark name>"` |
-| **Named country / city (when identity matters)** | Tokyo skyline, Vatican City, Silicon Valley campus | `"<place name> skyline"` or `"<place name> aerial"` |
-| **Historical event** | Apollo 11 moon landing, D-Day Normandy, Berlin Wall fall | `"<event name> photograph"` or `"<event name> footage"` |
-| **Named document / law / report** | Magna Carta, Declaration of Independence, GDPR regulation | `"<document name>"` |
-| **Named film / book / album / game** | Titanic 1997 film poster, Dark Side of the Moon album cover | `"<title> <medium>"` |
-| **Named scientific concept with a known diagram** | DNA double helix diagram, Periodic Table of Elements | `"<concept> diagram"` |
-| **Named organism (species with a common image)** | Giant Panda, Blue Whale, Great White Shark | `"<species name>"` — NOT combined with a commercial object |
-| **Named artwork / photograph** | Mona Lisa painting, Earthrise NASA photograph | `"<artwork name> <artist/source>"` |
-| **Logo / flag / emblem** | NASA logo, US flag, United Nations emblem | `"<entity> logo"` or `"<entity> flag"` |
+**Stay on `"broll"` for:** generic location types, named places used as atmosphere (real photos are usually watermarked), generic actions where identity doesn't matter, a company's generic product category.
 
-#### When to stay on `"broll"` instead
+**Named product detail:** include the identifying visual in `[0]`:
+- BAD: `"Kellogg's Corn Pops"` — returns any version
+- GOOD: `"Kellogg's Corn Pops original yellow box"` — anchors to specific packaging
 
-| Scenario | Why `"broll"` | Example |
-|---|---|---|
-| Generic location type | Not a named place — no unique image exists | `"busy city street"`, `"hospital corridor"` |
-| Named place as backdrop / atmosphere | Serper returns watermarked editorial photos; b-roll reads more naturally | `"modern office interior"` instead of `"Google office"` |
-| Generic action involving a named thing | The action matters, not the specific entity | `"scientist examining sample"` not `"Marie Curie in lab"` (unless the script explicitly invokes her) |
-| Any company's generic product category | Use category b-roll unless the specific brand is being named | `"electric car charging"` instead of `"Tesla charging"` when script says "an EV" |
-| Named person doing a generic action | Only use `"named"` when their face/identity is the point | `"person giving keynote speech"` unless the speaker is the story |
-
-#### Named entity examples
+For `"named"` branded products, also add the key visual identifier to `must_show`.
 
 | Sentence | `visual_concepts[0]` | `content_track` |
 |---|---|---|
 | "Elon Musk unveiled the Cybertruck" | `"Elon Musk portrait"` | `"named"` |
 | "Tesla dominates EV sales" | `"Tesla logo"` | `"named"` |
 | "The SR-71 flew at Mach 3.2" | `"SR-71 Blackbird aircraft"` | `"named"` |
-| "Apollo 11 touched down on the moon" | `"Apollo 11 moon landing photograph"` | `"named"` |
 | "The Eiffel Tower was built in 1889" | `"Eiffel Tower Paris"` | `"named"` |
-| "Raphaël Dubois discovered luciferase" | `"Raphaël Dubois scientist portrait"` | `"named"` |
 | "I walked through the freezer aisle" | `"frozen food aisle"` | `"broll"` |
 | "Cars lined up for miles" | `"cars in traffic jam"` | `"broll"` |
-| "A scientist worked late into the night" | `"scientist in lab at night"` | `"broll"` |
-| "The ship disappeared beneath the waves" | `"ship sinking ocean"` | `"broll"` |
-
-Don't overuse `"named"` — it spends a Serper API call. Most sentences (70–80%) should be `"broll"`. For `named_entity` videos, use `"named"` only when the actual entity must be literally visible; use `"broll"` for atmosphere and background shots.
-
-**Named product visual detail:** For branded products, include the most visually identifying feature in `visual_concepts[0]` so the image search returns the right version:
-- BAD: `"Kellogg's Corn Pops"` — retrieves any image mentioning the brand, including current reformulated versions
-- GOOD: `"Kellogg's Corn Pops original yellow box cereal"` — anchors to the specific packaging
-Include packaging colour, shape, logo style, or edition ("original", "classic", "vintage") as needed. For `content_track: "named"` sentences, also add the product's key visual identifier to `must_show` (e.g. `"must_show": ["yellow box", "Corn Pops"]`).
-
-### Graphic Cues
-
-> **GRAPHICS DISABLED — skip this entire section.** Do not produce any `content_track: "graphic"` sentences or set `graphic_type` on any sentence. The Revideo renderer is offline. Tag every sentence as `"broll"` or `"named"` only.
-
-Two patterns — choose the right one for each use case.
-
-#### Pattern 1 — Structural graphic (silent, standalone)
-
-A sentence slot with no narration. Plays in its own time window.
-
-| Field | Value |
-|---|---|
-| `text` | `""` |
-| `content_track` | `"graphic"` |
-| `graphic_type` | see table below |
-| `duration` | clip length in seconds |
-| `variables` | type-specific key/value object |
-
-Do NOT include this slot in `video_script`.
-
-#### Pattern 2 — Narrated graphic (plays during VO)
-
-The graphic is the visual for a normal narration sentence. Duration derived from Whisper — do NOT set `duration`. Requires `visual_concepts` and `visual_caption` as footage fallback if render fails.
-
-| Field | Value |
-|---|---|
-| `text` | the narration sentence (non-empty) |
-| `content_track` | `"broll"` or `"named"` |
-| `graphic_type` | see table below |
-| `variables` | type-specific key/value object |
-| `visual_concepts` | required — footage fallback |
-| `visual_caption` | required — footage fallback |
-
-#### Supported `graphic_type` values
-
-| `graphic_type` | What it renders | Required `variables` | Optional |
-|---|---|---|---|
-| `"title_card"` | Animated title on dark background | `title` (≤10 words) | `subtitle`, `style` |
-| `"infographic"` | Animated chart with value labels | `title`, `labels` (string[]), `values` (number[]) | `unit`, `style` |
-| `"transition"` | Section divider, fades in/out | `label` (≤4 words) | `sublabel`, `style` |
-| `"list"` | Animated list — bullets, numbers, bars, or cards | `items` (string[], 2–6) | `title`, `style` |
-
-#### Duration (Pattern 1 only)
-
-| `graphic_type` | Duration |
-|---|---|
-| `"title_card"` | 5.0 s |
-| `"infographic"` | 10.0 s (4+ data points); 8.0 s (2–3 data points) |
-| `"transition"` | 3.0 s |
-| `"list"` | 6 s (2–3 items); 8 s (4–5 items); 10 s (6 items) |
-
-#### Style hint — when to use each variant
-
-Add `"style": "<name>"` to request a specific variant. If omitted, the pipeline rotates through variants automatically to avoid consecutive repeats. Unknown style names fall back to rotation.
-
-**`title_card` styles:**
-
-| `style` | What you get | Best for |
-|---|---|---|
-| `"minimal"` | Title fades in centred on dark bg, subtitle fades below | Clean intros, general use, emotional quotes |
-| `"kinetic"` | Title glides upward while fading in; white rule wipes beneath | High-energy openers, modern tech/finance tone |
-| `"framed"` | Thin vertical bar draws down left edge; title and subtitle slide in | Structured documentary feel, multi-chapter videos |
-| `"editorial"` | Title slides in from right; warm gold accent rule | Journalism, long-form investigative, historical |
-
-**`infographic` styles:**
-
-| `style` | What you get | Best for |
-|---|---|---|
-| `"bars"` | Vertical bar chart, staggered growth | Comparing values of similar magnitude; 3–8 categories |
-| `"horizontal"` | Horizontal bars from a vertical axis | Long category labels that won't fit below a vertical bar |
-| `"lollipop"` | Thin stems with a dot at the tip, spring pop | Sparse data where spacing matters; 3–8 categories |
-| `"callouts"` | Large bold numbers count up from zero; category label beneath | 2–3 big standalone stats where the number IS the story |
-
-**`transition` styles:**
-
-| `style` | What you get | Best for |
-|---|---|---|
-| `"line"` | Short accent line grows from centre; label fades in | Minimal, general-purpose section break |
-| `"sweep"` | Deep-navy panel sweeps in from left, sweeps out to right | Cinematic chapter turns, dramatic time jumps |
-| `"brackets"` | L-shaped brackets draw in from opposing corners | Precision/technical tone, structured editorial |
-| `"crosshair"` | Crosshair lines grow from centre, dim to near-invisible; text appears on grid | Data journalism, surveillance, investigative tone |
-
-**`list` styles:**
-
-| `style` | What you get | Best for |
-|---|---|---|
-| `"bullets"` | Coloured square bullets; rows slide in from left, staggered | General-purpose, unordered, up to 6 items |
-| `"numbered"` | Cyan zero-padded numbers ("01.", "02."…); rows drop from above | Ordered steps, ranked lists, how-to sequences |
-| `"cascade"` | Coloured bar sweeps full width behind each row; text fades on top | Dramatic reveals, highlight-reel style, up to 6 items |
-| `"grid"` | Bordered card grid with accent number badge top-left | 4–6 items where you want equal visual weight per item |
-
-#### When to insert a graphic cue
-
-For each sentence, ask yourself the four questions below. Do not look for specific keywords — reason about what the viewer needs at that moment.
-
-| Question to ask yourself | `graphic_type` | Budget |
-|---|---|---|
-| **Is this sentence orienting the viewer to a new topic, chapter, or numbered item in a series?** Any sentence that introduces and names a new segment in a sequence qualifies, regardless of phrasing. Examples: "Number one, Kellogg's Corn Pops…" · "First, the Roman period…" · "Step one:…" · "Part two covers…" · "The next brand is…" · "Starting with…" · any all-caps or title-case heading. Rule of thumb: if a viewer landing mid-video would think "ah, this is a new section," it needs a title card. | `"title_card"` Pattern 2 | **Required — 1 per heading, no exceptions** |
-| **Must the viewer track or compare specific numbers to understand this sentence?** Two or more concrete quantities — prices, percentages, years, counts — placed side by side for comparison. A single isolated statistic does not qualify; it must require visual comparison to land. | `"infographic"` | 0–2 (fits in remaining budget) |
-| **Does this sentence introduce a parallel set of items the narrator will enumerate?** "Here are five ways…" · "There are three reasons…" · "The key ingredients are…" · "These are the steps…" · "I found six examples…". **Immediately collapse all following item sentences into `variables.items` and delete them from `sentences`** — see "Handling list content" below. **CRITICAL: only use list when every individual item is a single short sentence. If any item needs two or more sentences of narration, skip list entirely and leave all items as regular broll.** | `"list"` | 0–1 (fits in remaining budget) |
-| **Is there a genuine narrative leap that b-roll cannot convey — a jump in time, location, or tone?** Only real structural pivots qualify, not every paragraph break. Never at the first or last sentence. | `"transition"` Pattern 1 | 0–2 (fits in remaining budget) |
-
-**Budget rule: chapter/section heading title cards are always required — tag every one. Infographic, list, and transition entries together must not push the total above 5. If heading title cards alone fill the budget, skip other graphic types for that video.**
-
-#### Handling list content split across multiple sentences
-
-`sentence_prep.py` creates one stub sentence per item when the script enumerates points. The agent must **merge these back into a single list graphic** — they must NOT remain as separate broll entries.
-
-**Recognition signs:** consecutive sentences that form a set ("First…", "Second…", "Another…", numbered/lettered items, or parallel structure where each sentence names one distinct thing).
-
-**Before starting: check item length.** Count how many sentences each item takes to narrate. If ANY single item spans two or more sentences, **do not use list** — leave the intro and all item sentences as regular broll/named entries. List is only appropriate when every item fits in one short sentence.
-
-**How to merge (single-sentence items only):**
-
-1. Identify the **intro sentence** — the one that sets up the list (e.g. "Here are five ways to save money.").
-2. Strip **every** item sentence to its core phrase (no "First, they…" preamble). Put **all of them** in `variables.items` — never leave any item as a remaining broll entry; missing items make the list appear incomplete.
-3. **Delete ALL the individual item sentences** from `sentences` entirely — remove every item stub, not just some. Zero item sentences should remain after the list entry.
-4. Create **one** `list` graphic entry using the intro sentence:
-   - **Pattern 2 (preferred):** set `graphic_type: "list"` on the intro sentence. The graphic plays while narrator reads the intro. Set `visual_concepts` and `visual_caption` as footage fallback.
-   - **Pattern 1 (alternative):** keep the intro sentence as a plain broll entry and add a separate silent `"text": ""` list slot after it with `duration` set.
-
-**Example — before (stubs from sentence_prep):**
-```jsonc
-{ "text": "Here are five ways ultra-processed foods hook consumers." },
-{ "text": "First, they add excessive sugar." },
-{ "text": "Second, they use artificial flavors." },
-{ "text": "Third, they engineer the perfect crunch." },
-{ "text": "Fourth, they hit the bliss point with fat and salt." },
-{ "text": "Fifth, they make the packaging irresistible." }
-```
-
-**After (Pattern 2 — one entry, five item stubs removed):**
-```jsonc
-{
-  "text": "Here are five ways ultra-processed foods hook consumers.",
-  "content_track": "broll",
-  "graphic_type": "list",
-  "variables": {
-    "title": "How Ultra-Processed Foods Hook You",
-    "items": [
-      "Excessive added sugar",
-      "Artificial flavors",
-      "Engineered crunch texture",
-      "Fat-salt-sugar bliss point",
-      "Irresistible packaging"
-    ],
-    "style": "bullets"
-  },
-  "visual_concepts": ["processed snack products shelf", "junk food close-up"],
-  "visual_caption": "close-up of brightly coloured processed snack packaging on a supermarket shelf"
-}
-```
-
-#### Graphic cue rules
-
-- `title_card`: `title` ≤10 words. `subtitle` 3–6 words or `""`. For chapter headings, use the chapter name as `title` and `"chapter N"` as `subtitle` (e.g. `title: "A Glowing Obsession"`, `subtitle: "chapter two"`). Non-chapter title cards must be quotable and specific — not just interesting.
-- `infographic`: `labels` and `values` must be same length. `values` must be positive. 2–8 data points. `title` = metric + scope (e.g. `"Global EV Sales (M units, 2023)"`). Use `"callouts"` for 2–3 standalone stats; use `"bars"`, `"horizontal"`, or `"lollipop"` for side-by-side comparisons. Use `"horizontal"` when any label is longer than ~3 words.
-- `transition`: `label` ≤4 words, title case. `sublabel` ≤6 words, lower case, or omit. Only for real narrative pivots — not every paragraph break, and not for chapter headings (use `title_card` Pattern 2 for those).
-- `list`: 2–6 items. **Only use when every item is a single short sentence** — if any item requires two or more sentences to narrate, skip list and use regular broll for all items. Don't use for two items that differ numerically — use `"infographic"` with `"callouts"` style instead. Use `"numbered"` when order matters; `"grid"` for 4–6 equal-weight items; `"cascade"` for a dramatic reveal effect; `"bullets"` for general unordered lists. **Delete every individual item sentence from `sentences` after extracting them into `variables.items` — leave zero item stubs behind** (see "Handling list content split across multiple sentences" above).
 
 ---
 
-### `motif_palette` and `assigned_motif` (thematic videos only)
+### `must_show` / `avoid`
 
-**`motif_palette`** (job root) — 4–8 distinct visual anchors covering the theme. Each motif must be visually distinct, concrete, and searchable on its own.
+Keywords passed to the VLM reviewer. The VLM hard-rejects clips missing a `must_show` item.
 
-```jsonc
-// credit card scams:
-"motif_palette": [
-  "ATM machine cash withdrawal",
-  "phishing text message on phone",
-  "hooded figure at laptop",
-  "worried person reading bank statement",
-  "padlock on credit card",
-  "bank fraud alert notification"
-]
-```
-
-**`assigned_motif`** (per sentence) — which motif drives this sentence's `visual_concepts`.
-- Never assign the same motif to two consecutive sentences.
-- Distribute palette as evenly as possible.
-- Translate the motif into a specific scene description for `visual_concepts`.
-
-| `assigned_motif` | `visual_concepts` | `visual_caption` |
-|---|---|---|
-| `"worried person reading bank statement"` | `["person inspecting bank statement at kitchen table", "reviewing financial documents"]` | `"close-up of a worried person scanning a bank statement at a kitchen table"` |
-| `"hooded figure at laptop"` | `["hooded person typing on laptop in dark room", "cybercriminal at computer"]` | `"silhouette of a hooded figure hunched over a laptop in a dimly lit room"` |
+- **`must_show` required when:** narration names a specific physical object the viewer must see, or sentence is `"named"` for a branded product (add product name + key visual).
+- **`must_show` optional (`[]`) when:** general scene with no single mandatory element.
+- **`avoid`:** set when the topic makes wrong image types likely (meme charts in a finance doc; cartoon wildlife in a nature doc).
 
 ---
 
 ### `media_type`
 
-Per-sentence preference (`"video"` or `"image"`). If the preferred type finds nothing, the pipeline retries with the other. Ignored for `content_track: "named"` (always image via Serper first).
-
 | Use `"image"` for | Use `"video"` for |
 |---|---|
-| Named products, brands, SKUs | Scenes, locations, environments |
-| Named people (portraits) | Landmarks used as backdrop |
-| Logos, screenshots, documents | Generic action (walking, traffic) |
-| Maps, artworks, historical photos | Processes (manufacturing, surgery) |
-| Microscopy, diagrams, archival stills | Nature in motion, machinery, crowds |
+| Named products, brands, portraits | Scenes, environments, locations |
+| Logos, documents, historical photos | Actions, processes, crowds, nature in motion |
 
-For places the narration is *set in or passing through*, use `"broll"` + `"video"` — a real storefront photo is usually watermarked; generic store interior video reads naturally as b-roll.
-
-### `max_image_ratio` (job root)
-
-Controls how much of the video can be still images. Set this at the job root based on content type — there is no pipeline-level cap; the agent's value is the only constraint.
-
-| Content type | `max_image_ratio` | Rationale |
-|---|---|---|
-| Historical / archival (events, people, eras) | `1.0` | Best material is photographs; video b-roll would be generic filler |
-| Scientific / nature documentary | `1.0` | Microscopy, diagrams, wildlife stills often beat generic b-roll |
-| General thematic / explainer | `0.6` | Mix of b-roll and stills; video keeps it dynamic |
-| Lifestyle / travel / action | `0.3` | Motion is the point; images feel static |
-| Named entity (product, brand, person) | `1.0` | Default is already image; Serper delivers them |
-
-These are starting points — adjust within a job if a particular section is unusually image-heavy or video-heavy. The ratio is enforced as a soft cap: when exceeded, the pipeline retries that clip as video before falling back to image.
+Ignored for `content_track: "named"` (always image). For real places the narration passes through, prefer `"broll"` + `"video"` — storefront photos are usually watermarked.
 
 ---
 
-## Step 2 — Full Job JSON (reference)
+### `max_image_ratio` (job root)
+
+| Content type | Value |
+|---|---|
+| Historical/archival, named-entity, scientific | `1.0` |
+| General thematic / explainer | `0.6` |
+| Lifestyle / travel / action | `0.3` |
+
+---
+
+### `motif_palette` / `assigned_motif` (thematic only)
+
+**`motif_palette`** (job root) — 4–8 visually distinct, concrete, searchable anchors covering the theme.
+
+**`assigned_motif`** (per sentence) — which palette entry drives `visual_concepts`. Never the same on consecutive sentences. Distribute evenly. Translate the motif into a specific scene description for `visual_concepts`.
+
+---
+
+## Job JSON Reference
 
 ```jsonc
 {
   "task_id": "auto-generated-uuid",
-  "video_script": "Full narration only — no graphic text",
+  "video_script": "Narration only — no graphic text",
   "video_topic": "ultra-processed food industry",
   "video_type": "thematic",
-  "max_image_ratio": 0.6,                                 // set per content type — see media_type section
+  "max_image_ratio": 0.6,
   "motif_palette": ["ATM machine cash withdrawal", ...],  // thematic only
 
   "sentences": [
-    // Narration sentence
     {
-      "text": "The sentence as it appears in the script.",
-      "visual_concepts": ["concrete scene description", "broader local idea"],
-      "content_track": "broll",       // "named" | "broll" | "graphic"
-      "visual_caption": "what the camera should show, one sentence",
-      "visual_effect": "",            // optional — mood color grade; see visual_effect section
-      "media_type": "video",          // "video" | "image"
-      "assigned_motif": "...",        // thematic only
-      "must_show": [],                // optional — keywords footage MUST contain
-      "avoid": []                     // optional — keywords footage should avoid
-    },
-    // Pattern 1 graphic (silent)
-    {
-      "text": "",
-      "content_track": "graphic",
-      "graphic_type": "transition",
-      "duration": 3.0,
-      "variables": { "label": "The Collapse", "sublabel": "2008" }
-    },
-    // Pattern 2 graphic (narrated — no duration)
-    {
-      "text": "China led with 8.1 million EVs, Europe 3.2 million, the US 1.4 million.",
-      "content_track": "broll",
-      "graphic_type": "infographic",
-      "variables": {
-        "title": "Global EV Sales (M units, 2023)",
-        "labels": ["China", "Europe", "USA"],
-        "values": [8.1, 3.2, 1.4],
-        "unit": "M units",
-        "style": "bars"
-      },
-      "visual_concepts": ["electric vehicle factory production line", "EV assembly plant"],
-      "visual_caption": "rows of electric cars on a modern assembly line"
+      "text": "The sentence as it appears in the script.",  // NEVER modify this field
+      "visual_concepts": ["concrete scene description", "broader fallback"],
+      "content_track": "broll",        // "broll" | "named"  (graphic DISABLED)
+      "visual_caption": "one sentence describing the shot",
+      "visual_effect": "",             // see table above — 15–25% of sentences
+      "media_type": "video",           // "video" | "image"
+      "assigned_motif": "...",         // thematic only
+      "must_show": [],
+      "avoid": []
     }
   ],
 
   "voice_name": "en-US-AriaNeural",
   "voice_rate": 1.0,
   "video_aspect": "16:9",
-  "video_source": "pexels",           // "pexels" | "pixabay"
+  "video_source": "pexels",
   "subtitle_enabled": true,
   "subtitle_position": "bottom",
   "font_name": "Inter_18pt-SemiBold.ttf",
@@ -494,32 +203,21 @@ These are starting points — adjust within a job if a particular section is unu
 }
 ```
 
-**BGM options:**
-- Online fetch: `"bgm_search_term": "cinematic documentary score"`, `"bgm_file": "random"`
-- Random local: `"bgm_search_term": ""`, `"bgm_file": "random"`
-- No BGM: `"bgm_search_term": ""`, `"bgm_file": "none"`
-
-Match `bgm_search_term` to the video's tone: `"tense thriller score"`, `"uplifting corporate background"`, `"melancholic piano"`, etc. Don't leave it generic for videos with a strong emotional arc.
+Match `bgm_search_term` to tone: `"tense thriller score"`, `"uplifting corporate background"`, `"melancholic piano"`. Don't leave it generic on emotional content.
 
 ---
 
 ## Step 2.5 — Review Pass (mandatory)
 
-Re-read the entire sentences list as a quality audit:
-
-- Does `visual_concepts[0]` describe something a camera would physically show for *that specific sentence*?
-- **Thematic cold-reader check**: if `visual_concepts[0]` is searched alone (no topic), are results useful?
-- **Named-entity cold-reader check**: if `visual_concepts[0]` + `video_topic` were typed into search, would results match?
-- Does any `visual_concepts` entry repeat `video_topic`'s own words? It shouldn't.
-- Do `[1]`/`[2]` get progressively broader than `[0]`, or are they near-duplicates?
-- Is every specific named product/person/place marked `"named"`? Is every generic scene `"broll"`?
-- Is `max_image_ratio` set at the job root and appropriate for the content type?
-- **Motif-rotation check**: are any two consecutive sentences assigned the same motif? Swap if so.
-- **Graphic review**: Pattern 1 has `text: ""` and `duration` set; Pattern 2 has real `text`, no `duration`, and `visual_concepts`/`visual_caption` set. Total ≤5 graphic entries.
-- **Graphic coverage check**: read every sentence and ask: (a) does this orient the viewer to a new section or numbered item ("Number one…", "First…", "Step N…", "Part N…", "The next/first/second…", any heading)? — if yes, it **must** have `graphic_type: "title_card"`, no exceptions; (b) does it introduce a parallel list? (c) does it compare specific numbers side by side? (d) does it mark a genuine narrative leap? For (b)–(d), add the graphic type if the total budget (≤5 minus heading count) allows. Confirm every Pattern 2 `title_card` still has real `text` so TTS speaks it.
-- **Style check**: does each graphic's `style` match the content? Long labels → `"horizontal"` infographic; 4–6 list items with equal weight → `"grid"`; ordered steps → `"numbered"`; 2–3 standalone stats → `"callouts"`.
-- **Concept-repetition check**: scan the entire sentences list for any visual_concepts pair that appears more than 3 times. Replace every overused entry with a distinct alternative that fits that sentence's specific narration beat.
-- **Effect audit**: count effect-bearing sentences. If >30% of broll/named sentences have an effect, remove the excess. Scan for runs of >3 consecutive identical effects and break them up. Confirm `sepia`+`noir` combined ≤1 in the video.
+- Is `[0]` physically showable for *that specific sentence* (not just the video theme)?
+- No `video_topic` words repeated in any `visual_concepts` entry?
+- `[1]`/`[2]` genuinely broader than `[0]` — not synonyms?
+- Every named entity marked `"named"`? Every generic scene `"broll"`?
+- Any two sentences sharing the same `visual_caption`? (must be zero)
+- `max_image_ratio` set at job root?
+- No two consecutive sentences with the same `assigned_motif`? (thematic)
+- Unique `[0]` count ≥ `max(15, ceil(N/4))`?
+- Effects: ≤30% of broll/named; no run >3 identical; sepia+noir combined ≤1?
 
 ---
 
@@ -535,35 +233,16 @@ Do NOT run `cli.py`. The worker runs it automatically.
 
 ## Common Mistakes
 
-- **Trusting stub visual concepts** — rewrite all of them
-- **Abstract `visual_concepts`** — describe what a camera lens physically shows; `"hope"` → `"sunrise over city"`
-- **Repeating `video_topic` words in `visual_concepts`** — the pipeline appends topic automatically; repeating produces garbled queries
-- **Ambiguous single-word concepts** — `"court"`, `"bar"`, `"scale"` match unrelated domains; always disambiguate
-- **Brand-name collision on animal names** — `"firefly bulb"` returns Firefly-branded LED products; `"jaguar"` returns the car; use the biological category: `"firefly insect glowing"`, `"jaguar big cat"`, etc.
-- **Chapter headings left as plain b-roll** — sentences like "CHAPTER TWO — A Glowing Obsession" must use Pattern 2 `title_card` (TTS speaks the heading, graphic plays simultaneously); they stay in `video_script` and keep their `text`; do NOT use Pattern 1 (which silences the VO)
-- **Near-duplicate fallbacks** — `[1]`/`[2]` must be genuinely broader than `[0]`, not synonyms
-- **Wrong `video_type`** — `"thematic"` for abstract/category videos; `"named_entity"` for one specific recurring subject
-- **Overusing `"named"`** — each call spends a Serper quota; use for genuinely specific entities only
-- **Using `"named"` for scenes/locations** — a real Kroger photo is usually watermarked; use `"broll"` + `"video"` instead
-- **Generic emotion captions** — `"a person looking surprised"` matches off-topic stock; describe the on-topic scene the reaction happens *during*
-- **Vague `visual_caption`** — `"a video clip"` or `"relevant footage"` can't distinguish good candidates from bad
-- **Copying `visual_caption` from `visual_concepts`** — the caption describes the shot; `visual_concepts` are API queries
-- **Leaving `bgm_search_term` blank on emotional content** — music significantly improves impact; match it to the tone
-- **Graphic `text` not empty (Pattern 1)** — `text` must be `""` for silent graphic slots
-- **Graphic content in `video_script`** — `video_script` is narration only; graphic slots have no spoken words
-- **Setting `duration` on a Pattern 2 graphic** — duration is derived from Whisper; don't set it
-- **Missing `visual_concepts`/`visual_caption` on Pattern 2 graphic** — these are the footage fallback if render fails
-- **Title card at start or end of video** — mid-video only; pipeline handles fade-in/out at edges
-- **Title card for a merely interesting sentence** — must be quotable, specific, and impactful; when in doubt, skip
-- **Infographic for a single statistic** — use `title_card` or `"callouts"` style instead; infographics need ≥2 labeled values
-- **Infographic with long labels but `"bars"` style** — use `"horizontal"` when labels exceed ~3 words; vertical bars clip label text
-- **`list` for two numerically differing items** — use `"infographic"` with `"callouts"` style instead
-- **`list` when items have multi-sentence narration** — if the narrator elaborates on item A for 2–3 sentences, a condensed label in the list won't match; skip list entirely and use regular broll for all items
-- **Leaving some item sentences in `sentences` after creating a list** — ALL item sentences must be deleted; partial deletion makes the list look incomplete (only 1 item shows instead of all)
-- **`labels` and `values` arrays of different lengths** — must match exactly
-- **More than 8 infographic data points** — too small to read; split if needed
-- **Transition `label` longer than 4 words** — it's a section marker, not a sentence
-- **Transition for every topic shift** — only for major structural breaks (time jump, location, narrative phase)
-- **More than 5 graphic entries total** — cut to the most impactful ones; the hard limit is ≤5
-- **Using `"grid"` style for fewer than 4 list items** — grid cards look sparse; use `"bullets"` or `"cascade"` for 2–3 items
-- **Omitting `style` when content has a clear fit** — don't leave the pipeline to guess; if labels are long, write `"horizontal"`; if it's a step sequence, write `"numbered"`
+- **Clearing `text`** — catastrophic pipeline failure; never touch it
+- **Abstract `visual_concepts`** — `"hope"` → `"sunrise over city horizon"`
+- **Repeating `video_topic` words in concepts** — pipeline appends them; repeating garbles queries
+- **Ambiguous single words** — `"court"` → `"courtroom interior"`, `"bar"` → `"crowded bar interior"`
+- **Brand/animal/software name collisions** — `"firefly"` → `"firefly insect glowing"`, `"jaguar"` → `"jaguar big cat"`, `"python"` → `"python snake coiled"`
+- **Numbered concept variants** — `"shelf angle 5"` ≡ `"shelf angle 6"` — explicitly forbidden, detected by validator
+- **Near-duplicate `[1]`/`[2]`** — must widen the search, not restate `[0]`
+- **Wrong `video_type`** — `"thematic"` for abstract categories; `"named_entity"` for one specific recurring subject
+- **Overusing `"named"`** — spends Serper quota; 70–80% should be `"broll"`
+- **`"named"` for scenes or locations** — storefront photos are watermarked; use `"broll"` + `"video"` instead
+- **Generic or copied `visual_caption`** — must describe the specific shot precisely; never copy from `visual_concepts`
+- **Duplicate `visual_caption`** — every sentence needs a visually distinct description
+- **Missing `bgm_search_term`** on emotional content — match it to the tone; don't leave it generic
