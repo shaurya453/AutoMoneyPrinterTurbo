@@ -4,7 +4,6 @@ import json
 import math
 import os
 import random
-import gc
 import shutil
 import subprocess
 from contextlib import redirect_stdout
@@ -23,7 +22,7 @@ from moviepy import (
     afx,
     vfx,
 )
-from moviepy.video.tools.subtitles import SubtitlesClip
+from moviepy.video.tools.subtitles import file_to_subtitles as _parse_srt
 from PIL import Image, ImageDraw, ImageFont
 
 from app.config import config
@@ -534,15 +533,17 @@ _BG_BRIGHTNESS = 0.5
 _BG_BLUR_FRACTION = 0.06  # downscale-then-upscale blur strength
 
 _PAN_Z = 1.04                    # zoom factor: subtle 4% motion, minimal content crop at peak zoom
-_PAN_TRAVEL = 1 - 1 / _PAN_Z    # fraction of image traversed by panning ≈ 0.038
 
 _KEN_BURNS_ANIMATIONS = ("pan_lr", "pan_rl", "zoom_in", "pan_ud")
 _last_ken_burns_animation: str | None = None
 
 
-def _pick_animation() -> str:
+def _pick_animation(allowed: list[str] | None = None) -> str:
     global _last_ken_burns_animation
-    pool = [a for a in _KEN_BURNS_ANIMATIONS if a != _last_ken_burns_animation]
+    pool_source = list(allowed) if allowed else list(_KEN_BURNS_ANIMATIONS)
+    pool = [a for a in pool_source if a != _last_ken_burns_animation]
+    if not pool:
+        pool = pool_source  # single-entry pool: allow repeat rather than crash
     choice = random.choice(pool)
     _last_ken_burns_animation = choice
     return choice
@@ -603,7 +604,15 @@ def apply_ken_burns(
     frame_scale: float = 1.0,
     animation: str = "zoom_in",
 ):
-    """MoviePy Ken Burns fallback with pan/zoom animations and ease-out timing."""
+    """MoviePy Ken Burns fallback with pan/zoom animations and ease-out timing.
+
+    frame_scale >= 1.0 → cover mode (landscape): image fills the full frame via
+    cover-crop; pan/zoom travels across the natural overflow area with no
+    blurred background visible.
+
+    frame_scale < 1.0 → FIT mode (portrait): image is letterboxed to
+    frame_scale of the frame on a blurred+darkened background.
+    """
     from moviepy.video.VideoClip import VideoClip as _VideoClip
     from PIL import Image as _PILImage
 
@@ -611,7 +620,45 @@ def apply_ken_burns(
         img = f.convert("RGB")
         img.load()
         src_w, src_h = img.size
-        bg_arr = _blur_and_darken(np.array(_cover_crop_image(img, width, height)))
+
+    # ── Cover mode (landscape, full-frame fill) ───────────────────────────────
+    if frame_scale >= 1.0:
+        cover_scale = max(width / src_w, height / src_h)
+        cv_w = max(int(round(src_w * cover_scale)), width)
+        cv_h = max(int(round(src_h * cover_scale)), height)
+        cover_arr = np.array(img.resize((cv_w, cv_h), _PILImage.LANCZOS))
+        h_excess = max(0, cv_w - width)
+        v_excess = max(0, cv_h - height)
+
+        def make_frame_cover(t: float) -> np.ndarray:
+            p = t / max(duration, 1e-6)
+            pe = 1.0 - (1.0 - p) ** 2  # ease-out
+
+            if animation == "zoom_in":
+                z = 1.0 + (_PAN_Z - 1.0) * pe
+                cw = max(1, int(width / z))
+                ch = max(1, int(height / z))
+                x0 = (cv_w - cw) // 2
+                y0 = (cv_h - ch) // 2
+                crop = _PILImage.fromarray(cover_arr[y0:y0 + ch, x0:x0 + cw])
+                return np.array(crop.resize((width, height), _PILImage.LANCZOS))
+            elif animation == "pan_lr":
+                x0 = min(int(h_excess * pe), max(0, cv_w - width))
+                y0 = v_excess // 2
+            elif animation == "pan_rl":
+                x0 = min(int(h_excess * (1.0 - p) ** 2), max(0, cv_w - width))
+                y0 = v_excess // 2
+            else:  # pan_ud
+                x0 = h_excess // 2
+                y0 = min(int(v_excess * pe), max(0, cv_h - height))
+
+            return cover_arr[y0:y0 + height, x0:x0 + width].copy()
+
+        clip = _VideoClip(make_frame_cover, duration=duration)
+        return clip.with_fps(fps)
+
+    # ── FIT mode (portrait, blurred background) ───────────────────────────────
+    bg_arr = _blur_and_darken(np.array(_cover_crop_image(img, width, height)))
 
     fg_budget_w = width * frame_scale
     fg_budget_h = height * frame_scale
@@ -692,14 +739,16 @@ def _render_ken_burns_ffmpeg(
     animation: str = "zoom_in",
 ) -> str:
     """
-    FFmpeg Ken Burns: blurred background + centered image with ease-out pan/zoom.
+    FFmpeg Ken Burns renderer.
 
-    Pre-resizes the image to a 2× canvas (cover-crop, lanczos) in PIL, then uses
-    FFmpeg crop(t) + 2:1 scale(lanczos) per frame.  The 2:1 downscale interpolates
-    fractional crop positions → smooth sub-pixel motion with no zoompan quantization.
+    frame_scale < 1.0 (portrait): FIT-scales the image to frame_scale of the
+    frame, centers it on a blurred+darkened background — no content is cropped.
 
-    Animations: pan_lr/pan_rl/pan_ud use static crop dimensions (x/y vary per frame).
-    zoom_in uses eval=frame so w/h/x/y all vary per frame for smooth magnification.
+    frame_scale >= 1.0 (landscape): COVER-CROPs to fill the full frame with no
+    background visible. Pan/zoom travel uses the image's natural cover-crop
+    overflow (pixels that extend past the frame edge) for content-aware motion.
+    Pan animations at 2× PIL scale give sub-pixel smooth motion via 2:1 lanczos
+    downscale. zoom_in uses 8× zoompan for the same reason.
     """
     import tempfile
     from PIL import Image as _PILImage
@@ -711,33 +760,110 @@ def _render_ken_burns_ffmpeg(
         img = f.convert("RGB")
         img.load()
         src_w, src_h = img.size
-        bg_arr = _blur_and_darken(np.array(_cover_crop_image(img, width, height)))
 
-    # Fit image into the foreground budget (frame_scale of screen).
-    fg_budget_w = width * frame_scale
-    fg_budget_h = height * frame_scale
-    # Always fit inside the foreground budget — no cover-crop, no content clipping.
-    # Landscape gets blurred bars on sides; portrait gets blurred bars on top/bottom.
-    fit_scale = min(fg_budget_w / src_w, fg_budget_h / src_h)
-    # Round to even for libx264 compatibility.
-    fit_w = int(fit_scale * src_w / 2) * 2
-    fit_h = int(fit_scale * src_h / 2) * 2
-
-    # Centered overlay offset; static because foreground size never changes.
-    fg_x = (width - fit_w) // 2
-    fg_y = (height - fit_h) // 2
+    dur = max(duration, 0.001)
+    eot = f"(1-pow(1-t/{dur:.6f},2))"  # ease-out quadratic: 0→1, fast start
 
     tmp_pre = tmp_bg = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-            tmp_bg = f.name
+        # ── Cover mode: landscape fill, no background ─────────────────────────
+        if frame_scale >= 1.0:
+            cover_scale = max(width / src_w, height / src_h)
+
+            if animation == "zoom_in":
+                # Cover-crop to exact frame size, then 8× zoompan adds _PAN_Z extra zoom.
+                canvas_img = _cover_crop_image(img, width, height)
+                _uz = 8
+                up_w, up_h = width * _uz, height * _uz
+                total_frames = max(int(round(duration * fps)), 1)
+                d_minus_1 = max(total_frames - 1, 1)
+                z_expr = f"1.0+{_PAN_Z - 1.0:.4f}*(1-pow(1-on/{d_minus_1},2))"
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
+                    tmp_pre = fh.name
+                canvas_img.save(tmp_pre)
+                vf = (
+                    f"scale={up_w}:{up_h}:flags=lanczos,"
+                    f"zoompan=z='{z_expr}':x='iw/2-iw/(2*zoom)':y='ih/2-ih/(2*zoom)':"
+                    f"d={total_frames}:s={width}x{height}:fps={fps}"
+                )
+
+            elif animation in ("pan_lr", "pan_rl", "pan_ud"):
+                # Resize to cover dimensions at 2× scale; FFmpeg crop(t) + 2:1 lanczos
+                # scale gives sub-pixel smooth travel at output resolution.
+                cw2 = max(int(src_w * cover_scale * 2 / 2) * 2, width * 2)
+                ch2 = max(int(src_h * cover_scale * 2 / 2) * 2, height * 2)
+                h_excess2 = cw2 - width * 2
+                v_excess2 = ch2 - height * 2
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
+                    tmp_pre = fh.name
+                img.resize((cw2, ch2), _PILImage.LANCZOS).save(tmp_pre)
+
+                if animation == "pan_lr":
+                    vf = (
+                        f"crop=w={width * 2}:h={height * 2}"
+                        f":x='{h_excess2}*{eot}':y={v_excess2 // 2},"
+                        f"scale={width}:{height}:flags=lanczos"
+                    )
+                elif animation == "pan_rl":
+                    vf = (
+                        f"crop=w={width * 2}:h={height * 2}"
+                        f":x='{h_excess2}*(1-{eot})':y={v_excess2 // 2},"
+                        f"scale={width}:{height}:flags=lanczos"
+                    )
+                else:  # pan_ud
+                    vf = (
+                        f"crop=w={width * 2}:h={height * 2}"
+                        f":x={h_excess2 // 2}:y='{v_excess2}*{eot}',"
+                        f"scale={width}:{height}:flags=lanczos"
+                    )
+
+            else:  # static (cover) — safety fallback; landscape path won't request this
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
+                    tmp_pre = fh.name
+                _cover_crop_image(img, width, height).save(tmp_pre)
+                vf = f"scale={width}:{height}:flags=lanczos"
+
+            cmd = [
+                ffmpeg_bin, "-y",
+                "-sws_flags", "lanczos",
+                "-f", "image2", "-loop", "1", "-t", str(duration), "-i", tmp_pre,
+                "-vf", vf,
+                "-t", str(duration), "-r", str(fps),
+                "-c:v", codec, "-preset", "fast", "-an",
+                "-threads", str(threads), output_path,
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if proc.returncode != 0:
+                logger.warning(f"FFmpeg Ken Burns cover ({animation}) stderr: {proc.stderr[-600:]}")
+                return ""
+            return output_path if os.path.exists(output_path) else ""
+
+        # ── FIT mode: portrait, blurred background ────────────────────────────
+        bg_arr = _blur_and_darken(np.array(_cover_crop_image(img, width, height)))
+
+        # Fit image into the foreground budget (frame_scale of screen).
+        fg_budget_w = width * frame_scale
+        fg_budget_h = height * frame_scale
+        # Always fit inside the foreground budget — no cover-crop, no content clipping.
+        # Portrait images get blurred bars on the sides or top/bottom.
+        fit_scale = min(fg_budget_w / src_w, fg_budget_h / src_h)
+        # Round to even for libx264 compatibility.
+        fit_w = int(fit_scale * src_w / 2) * 2
+        fit_h = int(fit_scale * src_h / 2) * 2
+
+        # Centered overlay offset; static because foreground size never changes.
+        fg_x = (width - fit_w) // 2
+        fg_y = (height - fit_h) // 2
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
+            tmp_bg = fh.name
         _PILImage.fromarray(bg_arr).save(tmp_bg)
 
         # Static path — portrait images displayed with no animation.
         if animation == "static":
             pre_resized = img.resize((fit_w, fit_h), _PILImage.LANCZOS)
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-                tmp_pre = f.name
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
+                tmp_pre = fh.name
             pre_resized.save(tmp_pre)
             filter_complex = f"[1:v][0:v]overlay=x={fg_x}:y={fg_y}"
             cmd = [
@@ -746,12 +872,9 @@ def _render_ken_burns_ffmpeg(
                 "-f", "image2", "-loop", "1", "-t", str(duration), "-i", tmp_pre,
                 "-f", "image2", "-loop", "1", "-t", str(duration), "-i", tmp_bg,
                 "-filter_complex", filter_complex,
-                "-t", str(duration),
-                "-r", str(fps),
-                "-c:v", codec, "-preset", "fast",
-                "-an",
-                "-threads", str(threads),
-                output_path,
+                "-t", str(duration), "-r", str(fps),
+                "-c:v", codec, "-preset", "fast", "-an",
+                "-threads", str(threads), output_path,
             ]
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             if proc.returncode != 0:
@@ -762,8 +885,8 @@ def _render_ken_burns_ffmpeg(
         # Fade path — gentle fade in/out, no pan/zoom.
         if animation == "fade":
             pre_resized = img.resize((fit_w, fit_h), _PILImage.LANCZOS)
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-                tmp_pre = f.name
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
+                tmp_pre = fh.name
             pre_resized.save(tmp_pre)
             fade_d = min(0.4, duration * 0.15)
             fade_out_st = max(0.0, duration - fade_d)
@@ -779,12 +902,9 @@ def _render_ken_burns_ffmpeg(
                 "-f", "image2", "-loop", "1", "-t", str(duration), "-i", tmp_pre,
                 "-f", "image2", "-loop", "1", "-t", str(duration), "-i", tmp_bg,
                 "-filter_complex", filter_complex,
-                "-t", str(duration),
-                "-r", str(fps),
-                "-c:v", codec, "-preset", "fast",
-                "-an",
-                "-threads", str(threads),
-                output_path,
+                "-t", str(duration), "-r", str(fps),
+                "-c:v", codec, "-preset", "fast", "-an",
+                "-threads", str(threads), output_path,
             ]
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             if proc.returncode != 0:
@@ -792,20 +912,12 @@ def _render_ken_burns_ffmpeg(
                 return ""
             return output_path if os.path.exists(output_path) else ""
 
-        # --- scale + crop(t) + scale approach for all pan/zoom animations ---
-        # Pre-resize to 2× canvas in PIL (cover-crop → lanczos).  FFmpeg crop
-        # evaluates x/y as float t-expressions per frame; the 2:1 lanczos downscale
-        # blends neighbouring pixels for smooth sub-pixel motion.
-        dur = max(duration, 0.001)
-        eot = f"(1-pow(1-t/{dur:.6f},2))"  # ease-out quadratic: 0→1, fast start
-
+        # Pan/zoom FIT animations — 2× canvas + crop(t) + overlay on blurred background.
         if animation == "pan_lr":
-            # 2× canvas wider by _PAN_Z to give horizontal pan travel.
             cw = int(fit_w * 2 * _PAN_Z / 2) * 2
             ch = fit_h * 2
             travel = cw - fit_w * 2
             canvas_img = _cover_crop_image(img, cw, ch)
-            # x/y are re-evaluated per frame by default; w/h are static.
             filter_fg = (
                 f"[0:v]crop=w={fit_w * 2}:h={ch}:x='{travel}*{eot}':y=0,"
                 f"scale={fit_w}:{fit_h}:flags=lanczos[fg]"
@@ -815,7 +927,6 @@ def _render_ken_burns_ffmpeg(
             ch = fit_h * 2
             travel = cw - fit_w * 2
             canvas_img = _cover_crop_image(img, cw, ch)
-            # Reversed ease-out: starts at travel (right), decelerates to 0 (left).
             filter_fg = (
                 f"[0:v]crop=w={fit_w * 2}:h={ch}:x='{travel}*(1-{eot})':y=0,"
                 f"scale={fit_w}:{fit_h}:flags=lanczos[fg]"
@@ -829,10 +940,7 @@ def _render_ken_burns_ffmpeg(
                 f"[0:v]crop=w={cw}:h={fit_h * 2}:x=0:y='{travel}*{eot}',"
                 f"scale={fit_w}:{fit_h}:flags=lanczos[fg]"
             )
-        else:  # zoom_in — crop filter doesn't support dynamic w/h; use 8× zoompan instead.
-            # At 8× upscale the per-frame position error is ≤1/8 output pixel,
-            # which is imperceptible for a uniform magnification change (unlike pans
-            # where lateral drift is much more visible).
+        else:  # zoom_in — 8× zoompan for sub-pixel accuracy.
             _uz = 8
             up_w = fit_w * _uz
             up_h = fit_h * _uz
@@ -846,8 +954,8 @@ def _render_ken_burns_ffmpeg(
                 f"d={total_frames}:s={fit_w}x{fit_h}:fps={fps}[fg]"
             )
 
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-            tmp_pre = f.name
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
+            tmp_pre = fh.name
         canvas_img.save(tmp_pre)
 
         filter_complex = f"{filter_fg};[1:v][fg]overlay=x={fg_x}:y={fg_y}"
@@ -857,17 +965,15 @@ def _render_ken_burns_ffmpeg(
             "-f", "image2", "-loop", "1", "-t", str(duration), "-i", tmp_pre,
             "-f", "image2", "-loop", "1", "-t", str(duration), "-i", tmp_bg,
             "-filter_complex", filter_complex,
-            "-t", str(duration),
-            "-r", str(fps),
-            "-c:v", codec, "-preset", "fast",
-            "-an",
-            "-threads", str(threads),
-            output_path,
+            "-t", str(duration), "-r", str(fps),
+            "-c:v", codec, "-preset", "fast", "-an",
+            "-threads", str(threads), output_path,
         ]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if proc.returncode != 0:
             logger.warning(f"FFmpeg Ken Burns stderr: {proc.stderr[-600:]}")
             return ""
+
     finally:
         for p in (tmp_pre, tmp_bg):
             if p:
@@ -890,18 +996,50 @@ def render_ken_burns_clip(
     """
     Render a Ken Burns clip from image_path to an MP4 at output_path.
     Returns output_path on success, '' on failure.
+
+    Portrait images (h ≥ w): FIT-scaled to 95% of frame, centered on a
+    blurred background, no animation — unchanged from before.
+
+    Landscape images (w > h): cover-crop fills the full frame; animation is
+    chosen randomly from a pool derived from the image's aspect-ratio overflow:
+      - zoom_in: always available (adds 4% extra zoom on the cover-cropped base)
+      - pan_lr / pan_rl: when the image is wider than the frame (h_excess > 2%)
+      - pan_ud: when the image is taller than the frame after cover-scale (v_excess > 2%)
+    Consecutive landscape clips get different animation types (no-repeat tracking).
     """
     from PIL import Image as _PILImg
     with _PILImg.open(image_path) as _im:
-        _is_landscape = _im.width > _im.height
-    # Landscape: subtle zoom_in (4% travel, full image FIT-scaled, 95% of frame).
-    # Portrait: static display (no animation, just FIT image on blurred background).
-    animation = "zoom_in" if _is_landscape else "static"
-    # Prefer FFmpeg (sub-pixel smooth zoom) over MoviePy (integer rounding jitter).
+        is_landscape = _im.width > _im.height
+        img_w, img_h = _im.width, _im.height
+
+    if not is_landscape:
+        # Portrait: unchanged — FIT at 95%, blurred background, static.
+        frame_scale, animation = 0.95, "static"
+    else:
+        # Landscape: cover-crop + random animation from overflow-derived pool.
+        cover_scale = max(width / img_w, height / img_h)
+        h_excess = max(0.0, img_w * cover_scale - width)
+        v_excess = max(0.0, img_h * cover_scale - height)
+
+        allowed = ["zoom_in"]
+        if h_excess > width * 0.02:
+            allowed.extend(["pan_lr", "pan_rl"])
+        if v_excess > height * 0.02:
+            allowed.append("pan_ud")
+
+        animation = _pick_animation(allowed)
+        frame_scale = 1.0
+        logger.info(
+            f"Ken Burns: landscape cover-mode, animation={animation}, "
+            f"h_excess={h_excess:.0f}px, v_excess={v_excess:.0f}px, "
+            f"pool={allowed}"
+        )
+
+    # Prefer FFmpeg (sub-pixel smooth motion) over MoviePy (integer rounding jitter).
     try:
         result = _render_ken_burns_ffmpeg(
             image_path, duration, width, height, output_path, threads,
-            frame_scale=0.95,
+            frame_scale=frame_scale,
             animation=animation,
         )
         if result:
@@ -910,7 +1048,7 @@ def render_ken_burns_clip(
     except Exception as exc:
         logger.warning(f"FFmpeg Ken Burns exception for {image_path}: {exc} — falling back to MoviePy")
 
-    clip = apply_ken_burns(image_path, duration, width, height, frame_scale=0.95, animation=animation)
+    clip = apply_ken_burns(image_path, duration, width, height, frame_scale=frame_scale, animation=animation)
     try:
         _write_videofile_with_codec_fallback(
             clip,
@@ -993,7 +1131,6 @@ def close_clip(clip):
         logger.error(f"failed to close clip: {str(e)}")
     
     del clip
-    gc.collect()
 
 def delete_files(files: List[str] | str):
     if isinstance(files, str):
@@ -1032,9 +1169,8 @@ def get_bgm_file(bgm_type: str = "random", bgm_file: str = ""):
         return resolved_bgm_file
 
     if bgm_type == "random":
-        suffix = "*.mp3"
         song_dir = utils.song_dir()
-        files = glob.glob(os.path.join(song_dir, suffix))
+        files = glob.glob(os.path.join(song_dir, "*.mp3"))
         # 当背景音乐目录为空时，直接回退为“不使用 BGM”，避免 random.choice([]) 抛异常。
         if not files:
             logger.warning(f"no bgm files found in song directory: {song_dir}")
@@ -1166,51 +1302,101 @@ def combine_videos(
         )
 
         clip_file = None
+        clip_w = subclipped_item.width
+        clip_h = subclipped_item.height
+        src_start = subclipped_item.start_time
+        src_end = subclipped_item.end_time
+
+        shuffle_side = random.choice(["left", "right", "top", "bottom"])
+        transition_func = _TRANSITION_DISPATCH.get(transition_value)
+        if transition_func == "shuffle":
+            transition_func = random.choice(_SHUFFLE_TRANSITIONS)
+
+        # Compute snap duration (frame-aligned planned duration) for both paths.
+        raw_dur = src_end - src_start
+        if planned_clip_durations and i < len(planned_clip_durations):
+            _planned = planned_clip_durations[i]
+            _n_frames = max(1, round(_planned * fps))
+            _snap_dur = _n_frames / fps
+            if raw_dur > _snap_dur + 0.001:
+                raw_dur = _snap_dur
+        raw_dur = max(0.1, raw_dur)
+
         try:
-            clip = _open_video_clip_quietly(subclipped_item.file_path).subclipped(
-                subclipped_item.start_time, subclipped_item.end_time
-            )
-            # Snap to frame-aligned planned duration so per-clip stream-copy epsilon
-            # doesn't accumulate as A/V sync drift across long videos.  Only clamp
-            # when the clip is LONGER than planned; if it's short, leave it as-is.
-            if planned_clip_durations and i < len(planned_clip_durations):
-                _planned = planned_clip_durations[i]
-                _n_frames = max(1, round(_planned * fps))
-                _snap_dur = _n_frames / fps
-                if clip.duration > _snap_dur + 0.001:
-                    clip = clip.subclipped(0, _snap_dur)
-            clip_duration = clip.duration
-            # Not all videos are same size, so we need to resize them
-            clip_w, clip_h = clip.size
-            clip = _resize_clip_to_aspect(clip, video_width, video_height)
+            if transition_func is None:
+                # FFmpeg-direct path: bypasses MoviePy's ffmpeg-pipe reader which
+                # can produce a black first frame during decoder initialization.
+                clip_file = f"{output_dir}/temp-clip-{i+1}.mp4"
+                codec = _get_configured_video_codec()
+                if clip_w != video_width or clip_h != video_height:
+                    _scale = max(video_width / clip_w, video_height / clip_h)
+                    _sw = int(round(clip_w * _scale / 2)) * 2
+                    _sh = int(round(clip_h * _scale / 2)) * 2
+                    _cx = (_sw - video_width) // 2
+                    _cy = (_sh - video_height) // 2
+                    vf = (f"scale={_sw}:{_sh}:flags=lanczos,"
+                          f"crop={video_width}:{video_height}:{_cx}:{_cy},"
+                          f"fps={fps}")
+                else:
+                    vf = f"fps={fps}"
+                ff_cmd = [
+                    utils.get_ffmpeg_binary(), "-y",
+                    "-ss", str(src_start), "-i", subclipped_item.file_path,
+                    "-t", f"{raw_dur:.6f}",
+                    "-vf", vf,
+                    "-c:v", codec, *_fast_preset_args(codec),
+                    "-pix_fmt", "yuv420p",
+                    "-threads", str(threads or os.cpu_count() or 4),
+                    "-an", clip_file,
+                ]
+                result = subprocess.run(ff_cmd, capture_output=True, text=True, timeout=300)
+                if result.returncode != 0:
+                    logger.error(
+                        f"FFmpeg direct clip failed (skipping clip): "
+                        f"{result.stderr[-300:]}"
+                    )
+                    if os.path.exists(clip_file):
+                        os.remove(clip_file)
+                    clip_file = None
+                    continue
 
-            shuffle_side = random.choice(["left", "right", "top", "bottom"])
-            transition_func = _TRANSITION_DISPATCH.get(transition_value)
-            if transition_func == "shuffle":
-                transition_func = random.choice(_SHUFFLE_TRANSITIONS)
-            if transition_func:
+                clip_duration_saved = raw_dur
+                if clip_duration_saved < 0.1:
+                    logger.warning(
+                        f"skipping degenerate clip ({clip_duration_saved:.3f}s): "
+                        f"{subclipped_item.file_path}"
+                    )
+                    continue
+
+            else:
+                # MoviePy path: per-clip transition requires a clip object.
+                clip = _open_video_clip_quietly(subclipped_item.file_path).subclipped(
+                    src_start, src_end
+                )
+                if raw_dur < (src_end - src_start) - 0.001:
+                    clip = clip.subclipped(0, raw_dur)
+                clip_w, clip_h = clip.size
+                clip = _resize_clip_to_aspect(clip, video_width, video_height)
                 clip = transition_func(clip, shuffle_side)
-
-            if clip.duration > max_clip_duration:
-                clip = clip.subclipped(0, max_clip_duration)
-
-            # wirte clip to temp file
-            clip_file = f"{output_dir}/temp-clip-{i+1}.mp4"
-            _write_videofile_with_codec_fallback(
-                clip,
-                clip_file,
-                codec=_get_configured_video_codec(),
-                logger=None,
-                fps=fps,
-            )
-
-            # Store clip duration before closing
-            clip_duration_saved = clip.duration
-            if clip_duration_saved < 0.1:
-                logger.warning(f"skipping degenerate clip ({clip_duration_saved:.3f}s): {subclipped_item.file_path}")
+                if clip.duration > max_clip_duration:
+                    clip = clip.subclipped(0, max_clip_duration)
+                clip_file = f"{output_dir}/temp-clip-{i+1}.mp4"
+                _write_videofile_with_codec_fallback(
+                    clip,
+                    clip_file,
+                    codec=_get_configured_video_codec(),
+                    logger=None,
+                    fps=fps,
+                )
+                clip_duration_saved = clip.duration
+                if clip_duration_saved < 0.1:
+                    logger.warning(
+                        f"skipping degenerate clip ({clip_duration_saved:.3f}s): "
+                        f"{subclipped_item.file_path}"
+                    )
+                    close_clip(clip)
+                    continue
                 close_clip(clip)
-                continue
-            close_clip(clip)
 
             processed_clips.append(
                 SubClippedVideoClip(
@@ -1674,21 +1860,11 @@ def generate_video(
         [afx.MultiplyVolume(params.voice_volume)]
     )
 
-    def make_textclip(text):
-        return TextClip(
-            text=text,
-            font=font_path,
-            font_size=params.font_size,
-        )
-
     if subtitle_path and os.path.exists(subtitle_path):
-        sub = SubtitlesClip(
-            subtitles=subtitle_path, encoding="utf-8", make_textclip=make_textclip
-        )
-        text_clips = []
-        for item in sub.subtitles:
-            clip = create_text_clip(subtitle_item=item)
-            text_clips.append(clip)
+        text_clips = [
+            create_text_clip(item)
+            for item in _parse_srt(subtitle_path, encoding="utf-8")
+        ]
 
         if params.subtitle_highlight and font_path:
             highlight_clips = _build_word_highlight_clips(
