@@ -556,6 +556,7 @@ def _fetch_image_clip(
     clip_idx: int,
     clips_dir: str,
     used_urls: set,
+    effect: str = "",
     caption_prompt: str = "",
     query_ladder: Optional[List[str]] = None,
     video_topic: str = "",
@@ -599,6 +600,7 @@ def _fetch_image_clip(
         width=width,
         height=height,
         output_path=out_path,
+        effect=effect,
     )
     if not result:
         logger.warning(f"clip {clip_idx}: Ken Burns render failed")
@@ -622,6 +624,7 @@ def _fetch_clip(
     video_type: str = "thematic",
     recent_embeddings: Optional[Any] = None,
     dedup_threshold: float = 0.92,
+    visual_effect: str = "",
 ) -> Optional[Tuple[str, bool]]:
     """
     Fetch a clip (stock video or Ken Burns image) for one sentence.
@@ -686,11 +689,12 @@ def _fetch_clip(
     args_image = (sentence, sent_duration, trim_buffer, video_aspect, clip_idx, clips_dir, used_urls, caption_prompt, query_ladder)
     dedup_kw = {"recent_embeddings": recent_embeddings, "dedup_threshold": dedup_threshold}
     topic_kw = {"video_topic": video_topic}
+    image_kw = {"effect": visual_effect}
 
     if content_track == "named":
         # Named/specific subjects are always served as images via Serper,
         # regardless of media_type or the image-ratio cap's preference flip.
-        result = _fetch_image_clip(*args_image, source_order=named_source_order, **dedup_kw, **topic_kw)
+        result = _fetch_image_clip(*args_image, source_order=named_source_order, **dedup_kw, **topic_kw, **image_kw)
         primary, fallback_name, is_image = "image", "video", True
     elif video_type == "named_entity":
         # For named_entity broll, respect media_type but route image requests
@@ -703,7 +707,7 @@ def _fetch_clip(
             else sentence.get("media_type") == "image"
         )
         if is_image:
-            result = _fetch_image_clip(*args_image, source_order=named_source_order, **dedup_kw, **topic_kw)
+            result = _fetch_image_clip(*args_image, source_order=named_source_order, **dedup_kw, **topic_kw, **image_kw)
             primary, fallback_name = "image", "video"
         else:
             result = _fetch_video_clip(*args_video, **dedup_kw, **topic_kw)
@@ -715,7 +719,7 @@ def _fetch_clip(
             else sentence.get("media_type") == "image"
         )
         if is_image:
-            result = _fetch_image_clip(*args_image, source_order=None, **dedup_kw, **topic_kw)
+            result = _fetch_image_clip(*args_image, source_order=None, **dedup_kw, **topic_kw, **image_kw)
             primary, fallback_name = "image", "video"
         else:
             result = _fetch_video_clip(*args_video, **dedup_kw, **topic_kw)
@@ -738,6 +742,7 @@ def _fetch_clip(
             source_order=(named_source_order if use_named_order else None),
             **dedup_kw,
             **topic_kw,
+            **image_kw,
         )
     if result:
         return result, (fallback_name == "image")
@@ -757,7 +762,7 @@ def _fetch_clip(
                 logger.info(f"clip {clip_idx}: used topic-wide fallback concepts {extra_concepts[:3]}")
                 return video_fb, False
             fb_named_order = named_source_order if video_type == "named_entity" else None
-            image_fb = _fetch_image_clip(*args_image_fb, source_order=fb_named_order, **dedup_kw, **topic_kw)
+            image_fb = _fetch_image_clip(*args_image_fb, source_order=fb_named_order, **dedup_kw, **topic_kw, **image_kw)
             if image_fb:
                 logger.info(f"clip {clip_idx}: used topic-wide fallback concepts {extra_concepts[:3]}")
                 return image_fb, True
@@ -1216,6 +1221,7 @@ def start(job_path: str) -> Optional[dict]:
                         f"({image_clip_count}/{total_so_far or 1} so far) — trying video first"
                     )
 
+            visual_effect = sent.get("visual_effect", "")
             fetched = _fetch_clip(
                 sentence=sent,
                 sent_duration=clip_duration,
@@ -1231,10 +1237,18 @@ def start(job_path: str) -> Optional[dict]:
                 video_type=video_type,
                 recent_embeddings=recent_embs,
                 dedup_threshold=dedup_threshold,
+                visual_effect=visual_effect,
             )
             clip_counter += 1
             if fetched:
                 clip_path, used_image = fetched
+                content_track_sent = sent.get("content_track", "broll")
+                if visual_effect and content_track_sent in ("broll", "named"):
+                    effected_path = clip_path.replace(".mp4", f"_{visual_effect}.mp4")
+                    clip_path = video.apply_visual_effect(
+                        clip_path, visual_effect, effected_path,
+                        threads=os.cpu_count() or 4,
+                    )
                 ordered_clips.append(clip_path)
                 planned_clip_durations.append(clip_duration + trim_buffer)
                 got_any = True

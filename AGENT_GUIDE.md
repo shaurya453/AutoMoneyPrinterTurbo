@@ -94,6 +94,38 @@ One sentence describing the shot — used by the CLIP relevance filter to rank a
 | "I walked into a Kroger" | `["Kroger storefront", "supermarket interior"]` | `"wide shot of a supermarket interior with aisles and shoppers"` |
 | "Tim Cook took the stage" | `["Tim Cook portrait"]` | `"Tim Cook speaking on a stage at a product event"` |
 
+### `visual_effect` (optional)
+
+A mood-driven color grade applied to the clip during rendering. Leave blank (or omit) for neutral clips — most clips should have no effect.
+
+**You decide this during Phase 1 enrichment.** You wrote the script, so you know the emotional beat of each sentence. Assign the effect then, not in a separate pass.
+
+| Value | Mood / Use case |
+|---|---|
+| `"threat"` | Danger, war, crime, conflict, violence |
+| `"cold"` | Tension, isolation, despair, winter, harsh environments |
+| `"warmth"` | Hope, triumph, joy, summer, celebration |
+| `"mystery"` | Supernatural, unknown, eerie, dread, conspiracy |
+| `"sepia"` | Historic, archival footage, nostalgia, past events |
+| `"tech"` | Digital, hacker culture, surveillance, data, cybersecurity |
+| `"money"` | Finance, wealth, economy, corporate power |
+| `"dream"` | Memory, fantasy, aspiration, soft-focus reflection |
+| `"noir"` | Crime drama, cynicism, moral decay, darkness |
+| `"nature"` | Environment, ecology, life, growth, biodiversity |
+| `"revelation"` | Discovery, breakthrough, truth unveiled, turning point |
+| `"news"` | Politics, power, broadcast news aesthetic, authority |
+
+**Usage rules:**
+- Never set on graphic sentences (`content_track: "graphic"`)
+- No more than 3 consecutive sentences with the same effect value
+- `"sepia"` and `"noir"` are heavy treatments — use at most one of them in a video, not both
+- Effect must match the narrative beat; do not use it decoratively
+
+**Pre-submission audit (required):**
+- Count all effect-bearing `broll`/`named` sentences. Must be ≤30% of total. If over, remove excess (omit the field).
+- Scan for runs of >3 consecutive identical effects and break them up.
+- `sepia` + `noir` combined ≤1 per video.
+
 ### `must_show` and `avoid`
 
 Plain-English keywords passed to the VLM footage reviewer (enabled in config) and used to pre-sort candidates by metadata match. The VLM hard-rejects clips that don't satisfy `must_show`.
@@ -411,6 +443,7 @@ These are starting points — adjust within a job if a particular section is unu
       "visual_concepts": ["concrete scene description", "broader local idea"],
       "content_track": "broll",       // "named" | "broll" | "graphic"
       "visual_caption": "what the camera should show, one sentence",
+      "visual_effect": "",            // optional — mood color grade; see visual_effect section
       "media_type": "video",          // "video" | "image"
       "assigned_motif": "...",        // thematic only
       "must_show": [],                // optional — keywords footage MUST contain
@@ -483,6 +516,7 @@ Re-read the entire sentences list as a quality audit:
 - **Graphic coverage check**: read every sentence and ask: (a) does this orient the viewer to a new section or numbered item ("Number one…", "First…", "Step N…", "Part N…", "The next/first/second…", any heading)? — if yes, it **must** have `graphic_type: "title_card"`, no exceptions; (b) does it introduce a parallel list? (c) does it compare specific numbers side by side? (d) does it mark a genuine narrative leap? For (b)–(d), add the graphic type if the total budget (≤5 minus heading count) allows. Confirm every Pattern 2 `title_card` still has real `text` so TTS speaks it.
 - **Style check**: does each graphic's `style` match the content? Long labels → `"horizontal"` infographic; 4–6 list items with equal weight → `"grid"`; ordered steps → `"numbered"`; 2–3 standalone stats → `"callouts"`.
 - **Concept-repetition check**: scan the entire sentences list for any visual_concepts pair that appears more than 3 times. Replace every overused entry with a distinct alternative that fits that sentence's specific narration beat.
+- **Effect audit**: count effect-bearing sentences. If >30% of broll/named sentences have an effect, remove the excess. Scan for runs of >3 consecutive identical effects and break them up. Confirm `sepia`+`noir` combined ≤1 in the video.
 
 ---
 

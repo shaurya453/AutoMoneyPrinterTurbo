@@ -20,11 +20,21 @@ Warnings (exit 0, logged by worker):
   - concept[0] used > 4 times total (AGENT_GUIDE hard limit)
   - Same concept[0] on > 2 consecutive enrichable sentences
   - Unique concept[0] count below max(15, ceil(N/4)) for videos ≥ 20 sentences
+  - Unknown visual_effect value on any sentence
+  - visual_effect set on a graphic sentence
+  - Effect-bearing sentences exceed 30% of broll/named sentences
+  - Same visual_effect on > 3 consecutive broll/named sentences
+  - Both 'sepia' and 'noir' used in the same video
 """
 
 import json
 import math
 import sys
+
+_VALID_VISUAL_EFFECTS = frozenset({
+    "threat", "cold", "warmth", "mystery", "sepia", "tech",
+    "money", "dream", "noir", "nature", "revelation", "news",
+})
 
 
 def main():
@@ -100,6 +110,45 @@ def main():
                 )
             else:
                 seen_captions[caption] = i
+
+        effect = (sent.get("visual_effect") or "").strip()
+        if effect:
+            if track == "graphic":
+                warnings.append(f"sentence {i}: visual_effect set on graphic sentence (ignored by pipeline)")
+            elif effect not in _VALID_VISUAL_EFFECTS:
+                warnings.append(f"sentence {i}: unknown visual_effect={effect!r}")
+
+    # ── Effect aggregate checks ──────────────────────────────────────────────
+    enrichable_tracks = [
+        (sent.get("visual_effect") or "").strip()
+        for sent in sentences
+        if sent.get("content_track", "broll") in ("broll", "named")
+    ]
+    effect_bearing = [e for e in enrichable_tracks if e and e in _VALID_VISUAL_EFFECTS]
+    if enrichable_tracks:
+        pct = len(effect_bearing) / len(enrichable_tracks)
+        if pct > 0.30:
+            warnings.append(
+                f"visual_effect overuse: {len(effect_bearing)}/{len(enrichable_tracks)} "
+                f"broll/named sentences have effects ({pct:.0%} > 30% limit)"
+            )
+
+    # Same effect on > 3 consecutive broll/named sentences
+    eff_run, eff_run_val, eff_run_start = 1, "", 0
+    for j in range(1, len(enrichable_tracks)):
+        if enrichable_tracks[j] and enrichable_tracks[j] == enrichable_tracks[j - 1]:
+            eff_run += 1
+            if eff_run > 3 and eff_run == 4:
+                warnings.append(
+                    f"visual_effect consecutive run >3: {enrichable_tracks[j]!r} "
+                    f"starting near broll/named sentence index {j - 2}"
+                )
+        else:
+            eff_run = 1
+
+    used_effects = set(effect_bearing)
+    if "sepia" in used_effects and "noir" in used_effects:
+        warnings.append("both 'sepia' and 'noir' effects used — pick at most one per video")
 
     # Only consider enrichable slots that actually have a concept[0]
     enrichable_with_c0 = [(idx, c0) for idx, c0 in enrichable if c0 is not None]

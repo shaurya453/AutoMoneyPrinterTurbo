@@ -537,14 +537,37 @@ _PAN_Z = 1.04                    # zoom factor: subtle 4% motion, minimal conten
 _KEN_BURNS_ANIMATIONS = ("pan_lr", "pan_rl", "zoom_in", "pan_ud")
 _last_ken_burns_animation: str | None = None
 
+_VALID_VISUAL_EFFECTS = frozenset({
+    "threat", "cold", "warmth", "mystery", "sepia", "tech",
+    "money", "dream", "noir", "nature", "revelation", "news",
+})
 
-def _pick_animation(allowed: list[str] | None = None) -> str:
+# Soft animation bias per mood effect — entries within the allowed pool are
+# duplicated by their weight, so the random pick naturally favours them without
+# overriding geometry constraints or the no-consecutive-repeat rule.
+_EFFECT_ANIM_WEIGHTS: dict[str, dict[str, int]] = {
+    "threat":     {"zoom_in": 3},
+    "cold":       {"pan_ud": 2},
+    "mystery":    {"pan_ud": 3},
+    "warmth":     {"zoom_in": 2},
+    "dream":      {"zoom_in": 2},
+    "revelation": {"zoom_in": 3},
+    "sepia":      {"pan_lr": 3},
+    "noir":       {"zoom_in": 2},
+}
+
+
+def _pick_animation(allowed: list[str] | None = None, effect: str = "neutral") -> str:
     global _last_ken_burns_animation
     pool_source = list(allowed) if allowed else list(_KEN_BURNS_ANIMATIONS)
-    pool = [a for a in pool_source if a != _last_ken_burns_animation]
-    if not pool:
-        pool = pool_source  # single-entry pool: allow repeat rather than crash
-    choice = random.choice(pool)
+    weights = _EFFECT_ANIM_WEIGHTS.get(effect, {})
+    weighted: list[str] = []
+    for a in pool_source:
+        if a != _last_ken_burns_animation:
+            weighted.extend([a] * weights.get(a, 1))
+    if not weighted:
+        weighted = pool_source  # single-entry pool: allow repeat rather than crash
+    choice = random.choice(weighted)
     _last_ken_burns_animation = choice
     return choice
 
@@ -992,6 +1015,7 @@ def render_ken_burns_clip(
     height: int,
     output_path: str,
     threads: int = 2,
+    effect: str = "",
 ) -> str:
     """
     Render a Ken Burns clip from image_path to an MP4 at output_path.
@@ -1027,7 +1051,7 @@ def render_ken_burns_clip(
         if v_excess > height * 0.02:
             allowed.append("pan_ud")
 
-        animation = _pick_animation(allowed)
+        animation = _pick_animation(allowed, effect)
         frame_scale = 1.0
         logger.info(
             f"Ken Burns: landscape cover-mode, animation={animation}, "
@@ -1064,6 +1088,111 @@ def render_ken_burns_clip(
     finally:
         close_clip(clip)
     return output_path if os.path.exists(output_path) else ""
+
+
+def _build_effect_filter(effect: str) -> tuple[str, bool]:
+    """Return (filter_string, is_complex_graph) for the named mood effect.
+
+    is_complex_graph=True means the caller must use -filter_complex + -map [out]
+    instead of -vf (needed for the 'dream' split-blend chain).
+    Returns ('', False) for unknown or neutral effects.
+    """
+    _EFFECT_FILTERS: dict[str, str] = {
+        "threat":
+            "curves=r='0/0 0.5/0.62 1/1':g='0/0 0.5/0.45 1/0.85':b='0/0 0.5/0.4 1/0.8',"
+            "vignette=PI/4.5",
+        "cold":
+            "hue=s=0.65,"
+            "curves=r='0/0 1/0.82':g='0/0 1/0.92':b='0/0 1/1.15'",
+        "warmth":
+            "curves=r='0/0 0.5/0.58 1/1':g='0/0 0.5/0.53 1/0.97':b='0/0 1/0.82',"
+            "hue=s=1.3",
+        "mystery":
+            "hue=s=0.35,"
+            "curves=r='0/0 1/0.85':b='0/0 1/1.1',"
+            "gblur=sigma=1.8",
+        "sepia":
+            "hue=s=0,"
+            "curves=r='0/0 0.5/0.55 1/1':g='0/0 0.5/0.45 1/0.88':b='0/0 0.5/0.35 1/0.7',"
+            "noise=alls=8:allf=t",
+        "tech":
+            "curves=g='0/0 1/1.1':r='0/0 1/0.9':b='0/0 1/0.88',"
+            "noise=alls=6:allf=t",
+        "money":
+            "curves=g='0/0 1/1.1':r='0/0 1/0.95':b='0/0 1/0.85',"
+            "hue=s=1.1",
+        # dream uses a split-blend for glow — requires -filter_complex
+        "dream":
+            "[0:v]split[_a][_b];"
+            "[_b]gblur=sigma=15,format=yuv420p[_bg];"
+            "[_a][_bg]blend=all_mode=screen:all_opacity=0.3,"
+            "hue=s=1.2[out]",
+        "noir":
+            "hue=s=0.1,"
+            "vignette=PI/3.5,"
+            "curves=all='0/0 0.15/0 0.85/1 1/1'",
+        "nature":
+            "curves=g='0/0 0.5/0.55 1/1.05':r='0/0 0.5/0.52 1/1':b='0/0 1/0.9',"
+            "hue=s=1.15",
+        "revelation":
+            "hue=s=1.4,"
+            "curves=all='0/0 0.2/0.1 0.8/1 1/1',"
+            "vignette=PI/6",
+        "news":
+            "curves=all='0/0 0.1/0 0.9/1 1/1':r='0/0 1/1.05':b='0/0 1/0.95'",
+    }
+    f = _EFFECT_FILTERS.get(effect, "")
+    is_complex = effect == "dream"
+    return f, is_complex
+
+
+def apply_visual_effect(
+    clip_path: str,
+    effect: str,
+    output_path: str,
+    threads: int = 4,
+) -> str:
+    """Apply a named mood effect to clip_path via a fast FFmpeg re-encode.
+
+    Returns output_path on success, clip_path unchanged on failure or unknown effect.
+    Audio streams are passed through with -c:a copy; silent clips handled gracefully.
+    """
+    if effect not in _VALID_VISUAL_EFFECTS:
+        return clip_path
+
+    filter_str, is_complex = _build_effect_filter(effect)
+    if not filter_str:
+        return clip_path
+
+    codec = _get_configured_video_codec()
+    base_cmd = [
+        utils.get_ffmpeg_binary(), "-y",
+        "-i", clip_path,
+    ]
+    if is_complex:
+        filter_args = ["-filter_complex", filter_str, "-map", "[out]"]
+    else:
+        filter_args = ["-vf", filter_str]
+
+    cmd = [
+        *base_cmd,
+        *filter_args,
+        "-map", "0:a?", "-c:a", "copy",
+        "-c:v", codec, *_fast_preset_args(codec),
+        "-pix_fmt", "yuv420p",
+        "-threads", str(threads),
+        output_path,
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            logger.error(f"apply_visual_effect({effect}) failed: {result.stderr[-300:]}")
+            return clip_path
+        return output_path
+    except Exception as exc:
+        logger.error(f"apply_visual_effect({effect}) exception: {exc}")
+        return clip_path
 
 
 def _open_video_clip_quietly(video_path: str, audio: bool = False) -> VideoFileClip:
