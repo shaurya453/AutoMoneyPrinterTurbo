@@ -79,7 +79,7 @@ def passes(result: Optional[float]) -> bool:
     """None → fail-open (accept). Float → accept if score >= vlm_threshold."""
     if result is None:
         return True
-    threshold = float(config.app.get("vlm_threshold", 0.35))
+    threshold = float(config.app.get("vlm_threshold", 0.55))
     return result >= threshold
 
 
@@ -117,7 +117,7 @@ def verify_image(
         return None
 
     model = str(config.app.get("vlm_model", "gpt-4.1-nano"))
-    threshold = float(config.app.get("vlm_threshold", 0.35))
+    threshold = float(config.app.get("vlm_threshold", 0.55))
 
     must_show_str = ", ".join(must_show) if must_show else "anything relevant"
     avoid_str = ", ".join(avoid) if avoid else "watermarks, text overlays, cartoons"
@@ -131,13 +131,14 @@ def verify_image(
         f"Should show: {must_show_str}\n"
         f"Avoid: {avoid_str}\n\n"
         "Scoring guide:\n"
-        "  0.8–1.0 — clearly on-topic, strong visual match\n"
-        "  0.5–0.7 — thematically related, acceptable b-roll even if not a perfect match\n"
-        "  0.2–0.4 — loosely related or too generic for this topic\n"
-        "  0.0–0.1 — clearly wrong, offensive, or contains watermarks/heavy text/cartoons\n\n"
-        "Be lenient: footage that is thematically relevant to the overall topic is acceptable "
-        "even if it doesn't match the visual intent word-for-word. "
-        "Only score below 0.3 if the image is clearly wrong for this documentary.\n\n"
+        "  0.8–1.0 — clearly matches the visual intent and narration; exactly what was asked for\n"
+        "  0.6–0.7 — close match; right subject, minor framing or context difference\n"
+        "  0.4–0.5 — same broad category but wrong specific subject (e.g. generic speaker when a named model was asked for)\n"
+        "  0.2–0.3 — loosely related or too generic; could belong to hundreds of different videos\n"
+        "  0.0–0.1 — clearly wrong, unrelated, offensive, watermarked, cartoon, or heavy text overlay\n\n"
+        "Be strict about specificity: if the visual intent names a specific product, person, or place, "
+        "generic category footage scores 0.4 or below — not acceptable as a substitute. "
+        "Generic footage is only acceptable when the narration itself is generic.\n\n"
         'Return JSON only: {"accepted": true/false, "score": 0.0-1.0, "reason": "short string"}'
     )
 
