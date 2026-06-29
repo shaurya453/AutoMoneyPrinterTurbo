@@ -1249,9 +1249,10 @@ def apply_visual_effect(
     ]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        result = subprocess.run(cmd, capture_output=True, timeout=300)
         if result.returncode != 0:
-            logger.error(f"apply_visual_effect({effect}) failed: {result.stderr[-400:]}")
+            stderr = result.stderr.decode("utf-8", errors="replace")[-400:]
+            logger.error(f"apply_visual_effect({effect}) failed: {stderr}")
             return clip_path
         return output_path
     except Exception as exc:
