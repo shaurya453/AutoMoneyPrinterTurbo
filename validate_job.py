@@ -21,7 +21,7 @@ Warnings (exit 0, logged by worker):
   - concept[0] used > 4 times total (AGENT_GUIDE hard limit)
   - Same concept[0] on > 2 consecutive enrichable sentences
   - Unique concept[0] count below max(15, ceil(N/4)) for videos ≥ 20 sentences
-  - Unknown visual_effect value on any sentence
+  - Unknown visual_effect value on any sentence (valid: threat/cold/warmth/mystery/sepia/tech/hacker_tech/dream/noir/nature/revelation)
   - visual_effect set on a graphic sentence
   - Effect-bearing sentences exceed 30% of broll/named sentences
   - Same visual_effect on > 3 consecutive broll/named sentences
@@ -33,8 +33,8 @@ import math
 import sys
 
 _VALID_VISUAL_EFFECTS = frozenset({
-    "threat", "cold", "warmth", "mystery", "sepia", "tech",
-    "money", "dream", "noir", "nature", "revelation", "news",
+    "threat", "cold", "warmth", "mystery", "sepia",
+    "tech", "hacker_tech", "dream", "noir", "nature", "revelation",
 })
 
 
@@ -172,6 +172,8 @@ def main():
     used_effects = set(effect_bearing)
     if "sepia" in used_effects and "noir" in used_effects:
         warnings.append("both 'sepia' and 'noir' effects used — pick at most one per video")
+    if "tech" in used_effects and "hacker_tech" in used_effects:
+        warnings.append("both 'tech' and 'hacker_tech' effects used — pick at most one per video")
 
     # Only consider enrichable slots that actually have a concept[0]
     enrichable_with_c0 = [(idx, c0) for idx, c0 in enrichable if c0 is not None]

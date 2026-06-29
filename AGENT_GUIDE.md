@@ -70,24 +70,23 @@ One sentence describing the shot — used by the CLIP relevance filter to rank a
 
 ### `visual_effect`
 
-Mood color grade applied during rendering. **Expected on ~15–25% of `broll`/`named` sentences** — assign at distinct narrative beats. Leave blank for neutral or transitional clips. Decide now — you wrote the script and know the emotional beat of each sentence.
+Motion overlay composited during rendering — each effect is a looping MP4 blended over the clip at screen mode. **Expected on ~15–25% of `broll`/`named` sentences** — assign at distinct narrative beats. Leave blank for neutral or transitional clips. Decide now — you wrote the script and know the emotional beat of each sentence.
 
-| Value | Mood |
-|---|---|
-| `"threat"` | Danger, conflict, violence |
-| `"cold"` | Tension, isolation, despair |
-| `"warmth"` | Hope, triumph, joy |
-| `"mystery"` | Eerie, unknown, conspiracy |
-| `"sepia"` | Historic, archival, nostalgia |
-| `"tech"` | Digital, surveillance, data |
-| `"money"` | Finance, wealth, corporate power |
-| `"dream"` | Memory, fantasy, aspiration |
-| `"noir"` | Crime, cynicism, moral decay |
-| `"nature"` | Ecology, life, growth |
-| `"revelation"` | Discovery, truth, turning point |
-| `"news"` | Politics, broadcast, authority |
+| Value | Overlay | When to use |
+|---|---|---|
+| `"threat"` | Blood splatter clusters | Danger, conflict, violence, harm |
+| `"cold"` | Falling snow particles | Tension, isolation, despair, winter |
+| `"warmth"` | Golden sun rays | Hope, triumph, joy, prosperity |
+| `"mystery"` | Drifting fog wisps | Eerie, unknown, conspiracy, dread |
+| `"sepia"` | Film grain + dust scratches | Historic, archival, nostalgia |
+| `"tech"` | Scan-line flicker | Digital, surveillance, data, systems |
+| `"hacker_tech"` | Heavy scan-line / glitch | Hacking, advanced architecture, tech used maliciously |
+| `"dream"` | Soft bokeh light orbs | Memory, fantasy, aspiration |
+| `"noir"` | Rain streaks | Crime, cynicism, moral decay, shadows |
+| `"nature"` | Dust motes + light shafts | Ecology, life, growth, outdoors |
+| `"revelation"` | Lens flare burst | Discovery, truth, turning point, exposure |
 
-**Rules:** never set on `graphic` sentences. ≤3 consecutive same value. `sepia`+`noir` combined ≤1 per video.
+**Rules:** never set on `graphic` sentences. ≤3 consecutive same value. `sepia`+`noir` combined ≤1 per video. `tech` and `hacker_tech` combined count ≤1 per video (pick the right severity for the moment).
 
 **Audit (required):** effect-bearing sentences ≤30% of all `broll`/`named`. Break any run of >3 identical effects.
 
@@ -277,7 +276,7 @@ Match `bgm_search_term` to tone: `"tense thriller score"`, `"uplifting corporate
 - `max_image_ratio` set at job root?
 - No two consecutive sentences with the same `assigned_motif`? (thematic)
 - Unique `[0]` count ≥ `max(15, ceil(N/4))`?
-- Effects: ≤30% of broll/named; no run >3 identical; sepia+noir combined ≤1?
+- Effects: ≤30% of broll/named; no run >3 identical; sepia+noir combined ≤1; tech+hacker_tech combined ≤1?
 - Opening title_card on the intro sentence; optional closing title_card on the final sentence only?
 - No title_cards anywhere mid-video?
 - title_card `subtitle` is a viewer-facing tagline — not an internal label?
