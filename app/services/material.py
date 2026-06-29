@@ -1032,10 +1032,15 @@ def download_image(
 
                 if not nsfw.passes(nsfw.is_nsfw_image(image_bytes)):
                     logger.info(f"rejected NSFW image candidate: {url}")
-                    try:
-                        os.remove(local)
-                    except Exception:
-                        pass
+                    # Guard: don't delete a file we're holding as a fallback —
+                    # same base-URL can produce the same cached path for a
+                    # different URL variant, and deleting it would orphan the
+                    # fallback pointer returned at the end of _try().
+                    if local != fallback_path and local != vlm_fallback_path:
+                        try:
+                            os.remove(local)
+                        except Exception:
+                            pass
                     continue
 
                 if vlm.is_enabled():
@@ -1048,7 +1053,9 @@ def download_image(
                         # Track as last-resort fallback instead of deleting unconditionally —
                         # mirrors the relevance fallback so VLM rejection never forces video.
                         if vlm_score is not None and vlm_score > vlm_fallback_score:
-                            if vlm_fallback_path and vlm_fallback_path != local:
+                            # Don't delete vlm_fallback_path if it's also held as the
+                            # relevance fallback — both pointers would be orphaned.
+                            if vlm_fallback_path and vlm_fallback_path != local and vlm_fallback_path != fallback_path:
                                 try:
                                     os.remove(vlm_fallback_path)
                                 except Exception:
@@ -1057,10 +1064,11 @@ def download_image(
                             vlm_fallback_path, vlm_fallback_url = local, url
                             vlm_fallback_provider, vlm_fallback_term = provider, term
                         else:
-                            try:
-                                os.remove(local)
-                            except Exception:
-                                pass
+                            if local != fallback_path and local != vlm_fallback_path:
+                                try:
+                                    os.remove(local)
+                                except Exception:
+                                    pass
                         continue
 
                 dedup_emb = None
@@ -1070,10 +1078,11 @@ def download_image(
                         dedup_emb, recent_embeddings, dedup_threshold
                     ):
                         logger.info(f"skipping near-duplicate image candidate: {url}")
-                        try:
-                            os.remove(local)
-                        except Exception:
-                            pass
+                        if local != fallback_path and local != vlm_fallback_path:
+                            try:
+                                os.remove(local)
+                            except Exception:
+                                pass
                         continue
 
                 if not use_relevance:
