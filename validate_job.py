@@ -15,6 +15,7 @@ Hard errors (exit 1):
 Warnings (exit 0, logged by worker):
   - video_topic missing
   - video_type not thematic/named_entity
+  - content_track='graphic' used (Pattern 1 removed; use broll + graphic_type instead)
   - Any broll/named sentence missing visual_concepts or visual_caption
   - Duplicate visual_caption across sentences
   - concept[0] used > 4 times total (AGENT_GUIDE hard limit)
@@ -88,8 +89,12 @@ def main():
         track = sent.get("content_track", "broll")
         text = (sent.get("text") or "").strip()
 
-        # Pure graphic sentences have no VO and no footage requirement
-        if track == "graphic" and not text:
+        if track == "graphic":
+            text_errors.append(
+                f"sentence {i}: content_track='graphic' is no longer supported. "
+                "All graphics must be narrated (Pattern 2): keep content_track as 'broll', "
+                "set graphic_type and variables, leave text as the narration."
+            )
             continue
 
         if track in ("broll", "named") and not text:

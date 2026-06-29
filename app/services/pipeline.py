@@ -906,37 +906,19 @@ def start(job_path: str) -> Optional[dict]:
     # ------------------------------------------------------------------ #
     logger.info("aligning sentences with faster-whisper")
 
-    # Graphic sentences have no spoken text — exclude them from Whisper alignment,
-    # then re-insert with placeholder timestamps so the rest of the pipeline is unaffected.
-    _graphic_idxs: set = {i for i, s in enumerate(sentences) if s.get("content_track") == "graphic"}
-    _narration_sents = [s for i, s in enumerate(sentences) if i not in _graphic_idxs]
-
     word_timings: List[Tuple[str, float, float]] = []
     if os.environ.get("SKIP_WHISPER") == "1":
         logger.info("SKIP_WHISPER=1 → using uniform distribution for timings")
-        _narration_timings = _uniform_timestamps(_narration_sents, audio_duration)
+        timings = _uniform_timestamps(sentences, audio_duration)
     else:
         try:
-            _narration_timings, word_timings = _get_sentence_timestamps(audio_file, _narration_sents)
+            timings, word_timings = _get_sentence_timestamps(audio_file, sentences)
         except Exception as exc:
             logger.warning(
                 f"whisper failed ({exc}), falling back to uniform distribution "
                 f"— word-level subtitle highlights will be disabled"
             )
-            _narration_timings = _uniform_timestamps(_narration_sents, audio_duration)
-
-    # Re-merge graphic sentences back at their original positions with (0.0, 0.0) placeholders.
-    # Pass 1 below overrides their duration from sent["duration"].
-    timings = []
-    _narration_iter = iter(_narration_timings)
-    for _i, _s in enumerate(sentences):
-        if _i in _graphic_idxs:
-            timings.append((_s, 0.0, 0.0))
-        else:
-            try:
-                timings.append(next(_narration_iter))
-            except StopIteration:
-                timings.append((_s, audio_duration, audio_duration))
+            timings = _uniform_timestamps(sentences, audio_duration)
 
     # ------------------------------------------------------------------ #
     # 3. Per-sentence clip download + trim                                #
@@ -951,16 +933,6 @@ def start(job_path: str) -> Optional[dict]:
     used_urls: set = set()  # tracks clip URLs used this run to prevent reuse
     total_sentences = len(timings)
 
-    # Warn early if a graphic sentence is at the very start or end — combine_videos
-    # fills only to audio_duration, so end-positioned graphics are silently dropped;
-    # start-positioned graphics consume visual time before any narration begins.
-    if timings and timings[0][0].get("content_track") == "graphic":
-        logger.warning("graphic sentence at position 0 — it will consume visual time before narration begins")
-    if timings and timings[-1][0].get("content_track") == "graphic":
-        logger.warning(
-            f"graphic sentence at position {len(timings)-1} (last) — "
-            "combine_videos fills to audio_duration; this clip will likely be dropped"
-        )
     # Video sentences: download multiple ~4-second clips to cover the sentence
     # duration without repeating footage.
     # Image sentences: capped at _IMAGE_CLIP_MAX seconds each — long sentences
@@ -992,15 +964,6 @@ def start(job_path: str) -> Optional[dict]:
         start_k = max(rel_starts[idx], cum_end)
         if idx + 1 < len(timings):
             next_rel = rel_starts[idx + 1]
-            # Pure graphic sentences carry (0.0, 0.0) placeholder timestamps.
-            # Using one as target_end_k collapses raw_total to zero, forcing the
-            # _MIN_VISUAL_DUR floor and pushing cum_end ahead of the audio timeline.
-            # Skip past any contiguous pure graphics to find the next narrated boundary.
-            if timings[idx + 1][0].get("content_track") == "graphic":
-                for j in range(idx + 2, len(timings)):
-                    if rel_starts[j] > 0:
-                        next_rel = rel_starts[j]
-                        break
             target_end_k = max(next_rel, start_k)
         else:
             target_end_k = max(audio_duration, start_k)
@@ -1036,13 +999,6 @@ def start(job_path: str) -> Optional[dict]:
         durations = [total / num_clips] * num_clips
         cum_end = start_k + total
 
-        # Graphic clips use their explicit duration, not the Whisper-derived window.
-        if sent.get("content_track") == "graphic":
-            total = float(sent.get("duration", 5.0))
-            durations = [total]
-            is_image = False
-            cum_end = start_k + total
-
         clip_plans.append({
             "sent": sent,
             "is_image": is_image,
@@ -1053,9 +1009,8 @@ def start(job_path: str) -> Optional[dict]:
     # Extend the last clip's slot by outro_tail so the combined video naturally
     # reaches audio_duration + outro_tail without the outro step having to loop
     # the last clip from the beginning (which caused visible repetition).
-    # Graphics have a fixed Revideo-rendered duration — don't extend them.
     _OUTRO_TAIL = 2.0
-    if clip_plans and clip_plans[-1]["sent"].get("content_track") != "graphic":
+    if clip_plans:
         clip_plans[-1]["durations"][-1] += _OUTRO_TAIL
 
     # Crossfade trim-buffer padding is only consumed when combine_videos will
@@ -1112,35 +1067,6 @@ def start(job_path: str) -> Optional[dict]:
         )
 
         got_any = False
-
-        # Graphic sentences are rendered by Revideo, not fetched from stock sources.
-        if sent.get("content_track") == "graphic":
-            from app.services import graphics as _graphics
-            gfx_dur = durations[0]
-            gfx_path = os.path.join(clips_dir, f"clip-{clip_counter:04d}.mp4")
-            clip_counter += 1
-            w, h = video_aspect.to_resolution()
-            rendered = _graphics.render_graphic_clip(
-                graphic_type=sent.get("graphic_type", "title_card"),
-                out_path=gfx_path,
-                duration=gfx_dur,
-                width=w,
-                height=h,
-                fps=30,
-                variables=sent.get("variables", {}),
-                style=sent.get("variables", {}).get("style"),
-            )
-            if rendered:
-                ordered_clips.append(rendered)
-                planned_clip_durations.append(gfx_dur)
-                got_any = True
-                obtained_duration += gfx_dur
-                video_clip_count += 1
-            else:
-                logger.warning(f"sentence {idx+1}: graphic render failed — skipping")
-            if not got_any:
-                logger.warning(f"sentence {idx+1}: skipping — no clip available")
-            continue
 
         # Narrated graphic — sentence has real VO text AND graphic_type set.
         # Render a Revideo clip sized to the full Whisper-derived sentence duration
