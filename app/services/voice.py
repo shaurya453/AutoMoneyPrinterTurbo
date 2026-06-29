@@ -309,7 +309,10 @@ def stream_edge_tts_chunks(
 
 def _split_text_for_tts(text: str, max_chars: int = _TTS_CHUNK_MAX_CHARS) -> list:
     """Split text into chunks ≤ max_chars at sentence boundaries."""
-    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    # Collapse mid-sentence newlines (AI line-wrapping) into spaces so edge-tts
+    # doesn't treat them as paragraph breaks with sentence-final prosody.
+    text = re.sub(r'\s*\n\s*', ' ', text).strip()
+    sentences = re.split(r'(?<=[.!?])\s+', text)
     chunks, current = [], ""
     for sentence in sentences:
         candidate = (current + " " + sentence).strip() if current else sentence
