@@ -1103,23 +1103,23 @@ def _build_effect_filter(effect: str) -> tuple[str, bool]:
             "vignette=PI/4.5",
         "cold":
             "hue=s=0.65,"
-            "curves=r='0/0 1/0.82':g='0/0 1/0.92':b='0/0 1/1.15'",
+            "colorchannelmixer=rr=0.82:gg=0.92:bb=1.15",
         "warmth":
             "curves=r='0/0 0.5/0.58 1/1':g='0/0 0.5/0.53 1/0.97':b='0/0 1/0.82',"
             "hue=s=1.3",
         "mystery":
             "hue=s=0.35,"
-            "curves=r='0/0 1/0.85':b='0/0 1/1.1',"
+            "colorchannelmixer=rr=0.85:bb=1.1,"
             "gblur=sigma=1.8",
         "sepia":
             "hue=s=0,"
             "curves=r='0/0 0.5/0.55 1/1':g='0/0 0.5/0.45 1/0.88':b='0/0 0.5/0.35 1/0.7',"
             "noise=alls=8:allf=t",
         "tech":
-            "curves=g='0/0 1/1.1':r='0/0 1/0.9':b='0/0 1/0.88',"
+            "colorchannelmixer=rr=0.9:gg=1.1:bb=0.88,"
             "noise=alls=6:allf=t",
         "money":
-            "curves=g='0/0 1/1.1':r='0/0 1/0.95':b='0/0 1/0.85',"
+            "colorchannelmixer=rr=0.95:gg=1.1:bb=0.85,"
             "hue=s=1.1",
         # dream uses a split-blend for glow — requires -filter_complex
         "dream":
@@ -1132,14 +1132,16 @@ def _build_effect_filter(effect: str) -> tuple[str, bool]:
             "vignette=PI/3.5,"
             "curves=all='0/0 0.15/0 0.85/1 1/1'",
         "nature":
-            "curves=g='0/0 0.5/0.55 1/1.05':r='0/0 0.5/0.52 1/1':b='0/0 1/0.9',"
-            "hue=s=1.15",
+            "curves=g='0/0 0.5/0.55 1/1':r='0/0 0.5/0.52 1/1':b='0/0 1/0.9',"
+            "hue=s=1.15,"
+            "colorchannelmixer=gg=1.05",
         "revelation":
             "hue=s=1.4,"
             "curves=all='0/0 0.2/0.1 0.8/1 1/1',"
             "vignette=PI/6",
         "news":
-            "curves=all='0/0 0.1/0 0.9/1 1/1':r='0/0 1/1.05':b='0/0 1/0.95'",
+            "curves=all='0/0 0.1/0 0.9/1 1/1',"
+            "colorchannelmixer=rr=1.05:bb=0.95",
     }
     f = _EFFECT_FILTERS.get(effect, "")
     is_complex = effect == "dream"
