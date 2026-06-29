@@ -23,8 +23,8 @@ Warnings (exit 0, logged by worker):
   - Unique concept[0] count below max(15, ceil(N/4)) for videos ≥ 20 sentences
   - Unknown visual_effect value on any sentence (valid: threat/cold/warmth/mystery/sepia/tech/hacker_tech/dream/noir/nature/revelation)
   - visual_effect set on a graphic sentence
-  - Effect-bearing sentences exceed 30% of broll/named sentences
-  - Same visual_effect on > 3 consecutive broll/named sentences
+  - Effect-bearing sentences exceed 20% of broll/named sentences
+  - Any two adjacent broll/named sentences both carry a visual_effect
   - Both 'sepia' and 'noir' used in the same video
 """
 
@@ -152,24 +152,20 @@ def main():
     effect_bearing = [e for e in enrichable_tracks if e and e in _VALID_VISUAL_EFFECTS]
     if enrichable_tracks:
         pct = len(effect_bearing) / len(enrichable_tracks)
-        if pct > 0.30:
+        if pct > 0.20:
             warnings.append(
                 f"visual_effect overuse: {len(effect_bearing)}/{len(enrichable_tracks)} "
-                f"broll/named sentences have effects ({pct:.0%} > 30% limit)"
+                f"broll/named sentences have effects ({pct:.0%} > 20% limit)"
             )
 
-    # Same effect on > 3 consecutive broll/named sentences
-    eff_run, eff_run_val, eff_run_start = 1, "", 0
+    # Any two adjacent broll/named sentences both carrying an effect
     for j in range(1, len(enrichable_tracks)):
-        if enrichable_tracks[j] and enrichable_tracks[j] == enrichable_tracks[j - 1]:
-            eff_run += 1
-            if eff_run > 3 and eff_run == 4:
-                warnings.append(
-                    f"visual_effect consecutive run >3: {enrichable_tracks[j]!r} "
-                    f"starting near broll/named sentence index {j - 2}"
-                )
-        else:
-            eff_run = 1
+        if enrichable_tracks[j] and enrichable_tracks[j - 1]:
+            warnings.append(
+                f"visual_effect on adjacent sentences: {enrichable_tracks[j - 1]!r} then "
+                f"{enrichable_tracks[j]!r} — separate effect sentences with ≥2 plain sentences"
+            )
+            break  # one warning is enough to flag the problem
 
     used_effects = set(effect_bearing)
     if "sepia" in used_effects and "noir" in used_effects:

@@ -86,9 +86,13 @@ Motion overlay composited during rendering — each effect is a looping MP4 blen
 | `"nature"` | Dust motes + light shafts | Ecology, life, growth, outdoors |
 | `"revelation"` | Lens flare burst | Discovery, truth, turning point, exposure |
 
-**Rules:** never set on `graphic` sentences. ≤3 consecutive same value. `sepia`+`noir` combined ≤1 per video. `tech` and `hacker_tech` combined count ≤1 per video (pick the right severity for the moment).
+**Rules:**
+- Never set on `graphic` sentences.
+- **Never on two consecutive sentences** — regardless of whether the effects are different types. Always separate any two effect-bearing sentences with ≥2 plain (no-effect) sentences in between.
+- `sepia`+`noir` combined ≤1 per video. `tech`+`hacker_tech` combined ≤1 per video.
+- Use only when the emotional beat **strongly** calls for it — to accentuate the specific image on screen. Don't assign effects decoratively or mechanically to fill a quota.
 
-**Audit (required):** effect-bearing sentences ≤30% of all `broll`/`named`. Break any run of >3 identical effects.
+**Audit (required):** effect-bearing sentences ≤20% of all `broll`/`named`. Confirm no two adjacent sentences both carry effects. `sepia`+`noir` combined ≤1. `tech`+`hacker_tech` combined ≤1.
 
 ---
 
@@ -99,6 +103,16 @@ Motion overlay composited during rendering — each effect is a looping MP4 blen
 - **`"graphic"`** — animated graphic rendered by Revideo (title card, infographic, transition, list). See Graphic Cues section below.
 
 **Decision rule:** if you can Google the entity by exact name and expect the right image, use `"named"`. If it's a category or scene type, use `"broll"`. **70–80% of sentences should be `"broll"`** — Serper quota is finite.
+
+**Entity continuity (critical):** once the narration names a specific entity and you assign `"named"`, keep `"named"` with that entity's visuals for every subsequent sentence that still discusses the same entity — even if those sentences don't repeat the name. Only revert to `"broll"` when the narration has genuinely moved on to a different topic or entity. This applies to all named entity types: products, speakers, people, brands, cities, dishes, etc.
+
+Example — a speaker review that names the KEF LS50 Meta then keeps discussing it:
+| Sentence | `visual_concepts[0]` | `content_track` |
+|---|---|---|
+| "The KEF LS50 Meta costs twelve hundred dollars." | `"KEF LS50 Meta speaker pair"` | `"named"` |
+| "It uses a Uni-Q driver array at its heart." | `"KEF LS50 Meta driver detail"` | `"named"` ← still on the same product |
+| "The cabinet is surprisingly compact." | `"KEF LS50 Meta cabinet side view"` | `"named"` ← still on the same product |
+| "Next up is the Focal Aria 906." | `"Focal Aria 906 speaker"` | `"named"` ← new entity, new named track |
 
 **Use `"named"` for:** named people (portraits), branded products/SKUs, company logos/HQ, specific vehicles/aircraft/ships, named buildings/landmarks, historical events, named documents/laws/reports, named artworks, species with a distinctive look.
 
@@ -143,13 +157,18 @@ All graphics are **narrated** — the graphic plays on screen while the narrator
 
 | Trigger | Type | Budget |
 |---|---|---|
-| Sentence that introduces what the video covers ("today we're looking at…", "here are the X…") | `title_card` | 1 (opening only) |
-| Final narration sentence (optional outro card) | `title_card` | 1 (closing only) |
+| **Sentence index 0** — the very first sentence of the job, introducing what the video covers | `title_card` | 1 (opening only) |
+| **Last sentence of the job** — optional outro card | `title_card` | 1 (closing only) |
 | 2+ quantities the viewer must compare side by side | `infographic` | 0–2 |
 | Parallel enumerable items where every item is a single short sentence | `list` | 0–1 |
 | Genuine narrative leap — time jump, location shift, major tone change | `transition` | 0–2 |
 
 **Budget rule:** max 2 title_cards total (one opening, one closing). Infographic + list + transition combined ≤ 3. Total graphics ≤ 5.
+
+**title_card false triggers — these must NEVER produce a title_card:**
+- Any phrase that sounds like a mid-video marker: "halfway through", "half time", "we're at the halfway point", "in the middle of our list", "we've reached number five", "as we continue", "let's keep going", "moving on"
+- Chapter or section headings mid-video
+- Any sentence that is not sentence index 0 or the final sentence of the job
 
 **Handling list items:** `sentence_prep.py` creates one stub per enumerated item. Merge them:
 1. Extract every item to its core phrase and collect in `variables.items`.
@@ -276,7 +295,7 @@ Match `bgm_search_term` to tone: `"tense thriller score"`, `"uplifting corporate
 - `max_image_ratio` set at job root?
 - No two consecutive sentences with the same `assigned_motif`? (thematic)
 - Unique `[0]` count ≥ `max(15, ceil(N/4))`?
-- Effects: ≤30% of broll/named; no run >3 identical; sepia+noir combined ≤1; tech+hacker_tech combined ≤1?
+- Effects: ≤20% of broll/named; no two adjacent sentences both have effects; sepia+noir combined ≤1; tech+hacker_tech combined ≤1?
 - Opening title_card on the intro sentence; optional closing title_card on the final sentence only?
 - No title_cards anywhere mid-video?
 - title_card `subtitle` is a viewer-facing tagline — not an internal label?
@@ -315,7 +334,9 @@ Do NOT run `cli.py`. The worker runs it automatically.
 - **`content_track: "graphic"` with empty `text`** — silent standalone graphics are not supported; all graphics must be narrated (`content_track: "broll"` + `graphic_type`)
 - **Missing `visual_concepts`/`visual_caption` on a graphic sentence** — these are the footage fallback if Revideo render fails
 - **`subtitle` as a structural label** — `"countdown intro"`, `"midpoint break"`, `"chapter 1"` are wrong; write a viewer-facing tagline or use `""`
-- **title_card mid-video** — only the opening intro sentence and the final outro sentence may have a title_card
+- **title_card mid-video** — only sentence index 0 (opening) and the final sentence (optional outro) may have a title_card. VO phrases like "halfway through", "half time", "middle of the list", "let's keep going" are NOT triggers — ignore them
+- **Named entity continuity** — after naming a product, person, or brand, keep `content_track: "named"` with that entity's visuals for every sentence that still discusses it. Don't revert to broll while the same entity is still on screen
+- **Effects on consecutive sentences** — never place a visual_effect on two adjacent sentences; always separate effect sentences with ≥2 plain sentences between them
 - **Leaving list item stubs in `sentences`** — ALL item stubs must be deleted; partial deletion shows fewer items than scripted
 - **`list` for multi-sentence items** — if any item needs 2+ sentences of narration, skip list and use regular broll for all
 - **`list` for two numerically differing items** — use `"infographic"` `"callouts"` instead
