@@ -95,6 +95,11 @@ def main():
                 "All graphics must be narrated (Pattern 2): keep content_track as 'broll', "
                 "set graphic_type and variables, leave text as the narration."
             )
+            effect_on_graphic = (sent.get("visual_effect") or "").strip()
+            if effect_on_graphic:
+                warnings.append(
+                    f"sentence {i}: visual_effect={effect_on_graphic!r} set on graphic sentence (ignored by pipeline)"
+                )
             continue
 
         if track in ("broll", "named") and not text:
@@ -126,11 +131,8 @@ def main():
                 seen_captions[caption] = i
 
         effect = (sent.get("visual_effect") or "").strip()
-        if effect:
-            if track == "graphic":
-                warnings.append(f"sentence {i}: visual_effect set on graphic sentence (ignored by pipeline)")
-            elif effect not in _VALID_VISUAL_EFFECTS:
-                warnings.append(f"sentence {i}: unknown visual_effect={effect!r}")
+        if effect and effect not in _VALID_VISUAL_EFFECTS:
+            warnings.append(f"sentence {i}: unknown visual_effect={effect!r}")
 
     # ── Text-field hard errors ───────────────────────────────────────────────
     if text_errors:

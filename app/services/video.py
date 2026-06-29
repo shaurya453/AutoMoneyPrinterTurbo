@@ -1259,6 +1259,18 @@ def apply_visual_effect(
         result = subprocess.run(cmd, capture_output=True, timeout=300)
         if result.returncode != 0:
             stderr = result.stderr.decode("utf-8", errors="replace")[-400:]
+            # FFmpeg sometimes receives SIGTERM from the process manager after
+            # encoding completes but before it exits cleanly.  If the output
+            # file exists and its duration is within 10% of the target, treat
+            # it as a success rather than discarding a valid encode.
+            if os.path.exists(output_path):
+                got_dur = _probe_duration(output_path)
+                if got_dur and abs(got_dur - clip_dur) / clip_dur < 0.10:
+                    logger.warning(
+                        f"apply_visual_effect({effect}) non-zero exit but output is valid "
+                        f"({got_dur:.2f}s ≈ {clip_dur:.2f}s) — using it"
+                    )
+                    return output_path
             logger.error(f"apply_visual_effect({effect}) failed: {stderr}")
             return clip_path
         return output_path
