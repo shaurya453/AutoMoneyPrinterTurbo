@@ -549,17 +549,17 @@ _OVERLAY_DIR = os.path.normpath(
 # Per-effect overlay config: file basename + FFmpeg blend mode + opacity.
 # All overlays use a black background; screen blend treats black as transparent.
 _EFFECT_OVERLAYS: dict[str, dict] = {
-    "threat":      {"file": "threat_blood.mp4",     "mode": "screen", "opacity": 0.70},
-    "cold":        {"file": "cold_snow.mp4",         "mode": "screen", "opacity": 0.75},
-    "mystery":     {"file": "mystery_fog.mp4",       "mode": "screen", "opacity": 0.38},
-    "dream":       {"file": "dream_bokeh.mp4",       "mode": "screen", "opacity": 0.50},
-    "warmth":      {"file": "warmth_rays.mp4",       "mode": "screen", "opacity": 0.55},
-    "revelation":  {"file": "revelation_flare.mp4",  "mode": "screen", "opacity": 0.60},
-    "noir":        {"file": "noir_rain.mp4",         "mode": "screen", "opacity": 0.60},
-    "sepia":       {"file": "sepia_grain.mp4",       "mode": "screen", "opacity": 0.45},
-    "nature":      {"file": "nature_dust.mp4",       "mode": "screen", "opacity": 0.40},
-    "tech":        {"file": "tech_scanlines.mp4",    "mode": "screen", "opacity": 0.20},
-    "hacker_tech": {"file": "hacker_tech.mp4",       "mode": "screen", "opacity": 0.35},
+    "threat":      {"file": "threat_blood.mp4",     "mode": "screen",   "opacity": 1.0},
+    "cold":        {"file": "cold_snow.mp4",         "mode": "screen",   "opacity": 1.0},
+    "mystery":     {"file": "mystery_fog.mp4",       "mode": "screen",   "opacity": 1.0},
+    "dream":       {"file": "dream_bokeh.mp4",       "mode": "screen",   "opacity": 1.0},
+    "warmth":      {"file": "warmth_rays.mp4",       "mode": "screen",   "opacity": 1.0},
+    "revelation":  {"file": "revelation_flare.mp4",  "mode": "screen",   "opacity": 1.0},
+    "noir":        {"file": "noir_rain.mp4",         "mode": "screen",   "opacity": 1.0},
+    "sepia":       {"file": "sepia_grain.mp4",       "mode": "multiply", "opacity": 1.0},
+    "nature":      {"file": "nature_dust.mp4",       "mode": "screen",   "opacity": 1.0},
+    "tech":        {"file": "tech_scanlines.mp4",    "mode": "screen",   "opacity": 1.0},
+    "hacker_tech": {"file": "hacker_tech.mp4",       "mode": "screen",   "opacity": 1.0},
 }
 
 # Soft animation bias per mood effect — entries within the allowed pool are
@@ -1196,8 +1196,12 @@ def apply_visual_effect(
     chains: list[str] = []
 
     # Scale each overlay copy to the clip resolution.
+    # Keep in gbrp (planar RGB) so the blend operates in RGB colour space,
+    # matching what Filmora and other NLEs do. Blending in YUV applies the
+    # screen/multiply formula to offset chroma channels and introduces a
+    # colour cast (typically purple/teal).
     for i in range(n_loops):
-        chains.append(f"[{i}:v]scale={width}:{height},format=yuv420p[_s{i}]")
+        chains.append(f"[{i}:v]scale={width}:{height},format=gbrp[_s{i}]")
 
     # Chain xfade transitions between consecutive overlay copies.
     # At each join point the outgoing copy fades to black while the incoming
@@ -1225,10 +1229,13 @@ def apply_visual_effect(
     else:
         chains.append(f"[{prev}]null[_ov]")
 
-    # Screen-blend overlay on top of the clip.
+    # Convert clip to gbrp so the blend runs in RGB colour space, then
+    # blend, then convert the result back to yuv420p for the encoder.
+    chains.append(f"[{clip_idx}:v]format=gbrp[_clip]")
     chains.append(
-        f"[{clip_idx}:v][_ov]"
-        f"blend=all_mode={blend_mode}:all_opacity={opacity}"
+        f"[_clip][_ov]"
+        f"blend=all_mode={blend_mode}:all_opacity={opacity},"
+        f"format=yuv420p"
         f"[out]"
     )
 
