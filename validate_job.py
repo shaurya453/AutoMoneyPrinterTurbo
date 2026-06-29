@@ -17,6 +17,7 @@ Warnings (exit 0, logged by worker):
   - video_topic missing
   - video_type not thematic/named_entity
   - title_card used more than once (exactly 1 allowed per video)
+  - graphic sentence missing variables dict (would render blank)
   - Any broll/named sentence missing visual_concepts or visual_caption
   - Duplicate visual_caption across sentences
   - concept[0] used > 4 times total (AGENT_GUIDE hard limit)
@@ -104,8 +105,15 @@ def main():
                 )
             continue
 
-        if sent.get("graphic_type") == "title_card":
+        gtype = sent.get("graphic_type")
+        if gtype == "title_card":
             title_card_indices.append(i)
+        if gtype and not isinstance(sent.get("variables"), dict):
+            warnings.append(
+                f"sentence {i}: graphic_type={gtype!r} has no 'variables' dict — "
+                "graphic will render blank. All fields (title, label, items, style, etc.) "
+                "must be inside variables: {}"
+            )
 
         if track in ("broll", "named") and not text:
             text_errors.append(

@@ -139,7 +139,9 @@ For `"named"` branded products, also add the key visual identifier to `must_show
 
 All graphics are **narrated** — the graphic plays on screen while the narrator speaks. Keep the narration in `text` and in `video_script`. Set `content_track: "broll"`, `graphic_type`, and `variables` on the sentence. Do NOT set `duration` — Whisper derives it. Add `visual_concepts` and `visual_caption` as footage fallback if render fails.
 
-| `graphic_type` | Required `variables` |
+**ALL fields below must be placed inside a `"variables": {}` object on the sentence — not at the top level.** The pipeline reads `sent["variables"]`; top-level `title`, `style`, etc. are silently ignored and the graphic renders blank.
+
+| `graphic_type` | Fields inside `variables` |
 |---|---|
 | `"title_card"` | `title` (≤10 words), optional `subtitle`, `style` |
 | `"infographic"` | `title`, `labels[]`, `values[]`, optional `unit`, `style` |
@@ -247,6 +249,20 @@ Ignored for `content_track: "named"` (always image). For real places the narrati
       "avoid": []
     },
     // Narrated graphic — text stays in video_script; no duration field
+    // title_card example — ALL fields inside variables, nothing at top level
+    {
+      "text": "Today we're counting down ten products that defy their price tags.",
+      "content_track": "broll",
+      "graphic_type": "title_card",
+      "variables": {
+        "title": "Ten Products That Defy Their Price Tags",
+        "subtitle": "Hidden Value, Revealed",
+        "style": "editorial"
+      },
+      "visual_concepts": ["product display shelf", "retail store interior"],
+      "visual_caption": "a sleek product display in a well-lit showroom"
+    },
+    // infographic example
     {
       "text": "China led with 8.1 million EVs, Europe 3.2 million, the US 1.4 million.",
       "content_track": "broll",
@@ -328,6 +344,7 @@ Do NOT run `cli.py`. The worker runs it automatically.
 - **Generic or copied `visual_caption`** — must describe the specific shot precisely; never copy from `visual_concepts`
 - **Duplicate `visual_caption`** — every sentence needs a visually distinct description
 - **Missing `bgm_search_term`** on emotional content — match it to the tone; don't leave it generic
+- **Graphic fields at the top level of the sentence** — `title`, `subtitle`, `style`, `label`, `items`, etc. MUST be inside `"variables": {}`. Placing them at the top level of the sentence makes them invisible to the renderer; the graphic renders completely blank
 - **`duration` on a graphic sentence** — Whisper derives it; setting it overrides and desyncs audio
 - **`content_track: "graphic"` with empty `text`** — silent standalone graphics are not supported; all graphics must be narrated (`content_track: "broll"` + `graphic_type`)
 - **Missing `visual_concepts`/`visual_caption` on a graphic sentence** — these are the footage fallback if Revideo render fails
