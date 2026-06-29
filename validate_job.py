@@ -16,6 +16,7 @@ Warnings (exit 0, logged by worker):
   - video_topic missing
   - video_type not thematic/named_entity
   - content_track='graphic' used (Pattern 1 removed; use broll + graphic_type instead)
+  - title_card used more than once (exactly 1 allowed per video)
   - Any broll/named sentence missing visual_concepts or visual_caption
   - Duplicate visual_caption across sentences
   - concept[0] used > 4 times total (AGENT_GUIDE hard limit)
@@ -82,6 +83,7 @@ def main():
     seen_captions: dict = {}      # caption → first sentence index
     concept0_counts: dict = {}    # concept[0] → count
     enrichable: list = []         # (sentence_index, concept0) for non-graphic sentences
+    title_card_indices: list = [] # sentence indices that use graphic_type="title_card"
 
     text_errors = []
 
@@ -101,6 +103,9 @@ def main():
                     f"sentence {i}: visual_effect={effect_on_graphic!r} set on graphic sentence (ignored by pipeline)"
                 )
             continue
+
+        if sent.get("graphic_type") == "title_card":
+            title_card_indices.append(i)
 
         if track in ("broll", "named") and not text:
             text_errors.append(
@@ -142,6 +147,13 @@ def main():
             flush=True,
         )
         sys.exit(1)
+
+    # ── Title card count check ───────────────────────────────────────────────
+    if len(title_card_indices) > 1:
+        warnings.append(
+            f"title_card used {len(title_card_indices)} times (sentences {title_card_indices}) — "
+            "exactly 1 allowed per video; remove the extras"
+        )
 
     # ── Effect aggregate checks ──────────────────────────────────────────────
     enrichable_tracks = [
