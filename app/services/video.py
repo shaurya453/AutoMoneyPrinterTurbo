@@ -1614,9 +1614,16 @@ def wrap_text(text, max_width, font="Arial", fontsize=60):
         left, top, right, bottom = font.getbbox(inner_text)
         return right - left, bottom - top
 
-    width, height = get_text_size(text)
+    # Use typographic line height from font metrics rather than the ink
+    # bounding box: getbbox() measures only ink pixels (~22 px for Inter 30 pt)
+    # but PIL's renderer uses ascent+descent (~35 px).  For multi-line subtitles
+    # the difference compounds per line and causes visible bottom cropping.
+    ascent, descent = font.getmetrics()
+    true_line_h = ascent + descent
+
+    width, _ = get_text_size(text)
     if width <= max_width:
-        return text, height
+        return text, true_line_h
 
     def split_long_token(token):
         # 当一个 token 本身就超宽时（常见于中文无空格长句，或英文超长单词），
@@ -1660,9 +1667,7 @@ def wrap_text(text, max_width, font="Arial", fontsize=60):
         lines.append(current)
 
     result = "\n".join(line.strip() for line in lines if line.strip()).strip()
-    _, line_h = get_text_size("A")
-    height = len(lines) * line_h
-    return result, height
+    return result, len(lines) * true_line_h
 
 
 def _hex_to_rgb(color: str) -> tuple[int, int, int]:
@@ -1787,7 +1792,7 @@ def _build_word_highlight_clips(
 
         lines = wrapped_txt.split("\n")
         line_count = len(lines)
-        clip_h = int(txt_height + vertical_padding + (interline * line_count))
+        clip_h = int(txt_height + vertical_padding + interline * max(0, line_count - 1))
         base_y = _subtitle_base_y(clip_h)
 
         w_norm = _norm(w_text)
@@ -1894,11 +1899,9 @@ def generate_video(
         interline = int(params.font_size * 0.25)
         line_count = wrapped_txt.count("\n") + 1
         vertical_padding = int(params.font_size * 0.35)
-        # MoviePy 在 `method=label` 下会自动收缩文本框高度，遇到多行字幕、
-        # 描边或背景色时，容易把最后一行的下半部分裁掉。这里显式传入
-        # 一个更保守的高度，把行间距和额外上下留白一并算进去，保证字幕
-        # 背景框与文字本身都能完整渲染出来。
-        clip_h = int(txt_height + vertical_padding + (interline * line_count))
+        # interline is spacing between lines — N lines have N-1 gaps, not N.
+        # txt_height already uses getmetrics() line height so no further fudge needed.
+        clip_h = int(txt_height + vertical_padding + interline * max(0, line_count - 1))
         bg_color = resolve_subtitle_background_color()
         rounded_bg_enabled = bool(
             getattr(params, "rounded_subtitle_background", False) and bg_color
