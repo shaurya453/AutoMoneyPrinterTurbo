@@ -542,6 +542,25 @@ _VALID_VISUAL_EFFECTS = frozenset({
     "money", "dream", "noir", "nature", "revelation", "news",
 })
 
+_OVERLAY_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "resource", "overlays")
+)
+
+# Per-effect overlay config: file basename + FFmpeg blend mode + opacity.
+# All overlays have a black background; screen blend makes black transparent.
+_EFFECT_OVERLAYS: dict[str, dict] = {
+    "threat":     {"file": "threat_blood.mp4",     "mode": "screen", "opacity": 0.70},
+    "cold":       {"file": "cold_snow.mp4",         "mode": "screen", "opacity": 0.75},
+    "mystery":    {"file": "mystery_fog.mp4",       "mode": "screen", "opacity": 0.38},
+    "dream":      {"file": "dream_bokeh.mp4",       "mode": "screen", "opacity": 0.50},
+    "warmth":     {"file": "warmth_rays.mp4",       "mode": "screen", "opacity": 0.55},
+    "revelation": {"file": "revelation_flare.mp4",  "mode": "screen", "opacity": 0.60},
+    "noir":       {"file": "noir_rain.mp4",         "mode": "screen", "opacity": 0.60},
+    "sepia":      {"file": "sepia_grain.mp4",       "mode": "screen", "opacity": 0.45},
+    "nature":     {"file": "nature_dust.mp4",       "mode": "screen", "opacity": 0.40},
+    "tech":       {"file": "tech_scanlines.mp4",    "mode": "screen", "opacity": 0.20},
+}
+
 # Soft animation bias per mood effect — entries within the allowed pool are
 # duplicated by their weight, so the random pick naturally favours them without
 # overriding geometry constraints or the no-consecutive-repeat rule.
@@ -1152,12 +1171,15 @@ def apply_visual_effect(
     clip_path: str,
     effect: str,
     output_path: str,
+    width: int = 1920,
+    height: int = 1080,
     threads: int = 4,
 ) -> str:
     """Apply a named mood effect to clip_path via a fast FFmpeg re-encode.
 
-    Returns output_path on success, clip_path unchanged on failure or unknown effect.
-    Audio streams are passed through with -c:a copy; silent clips handled gracefully.
+    Combines a color-grade filter chain with an optional motion overlay (screen
+    blend, black background).  Returns output_path on success, clip_path on any
+    failure or unknown effect.  Audio is passed through unchanged.
     """
     if effect not in _VALID_VISUAL_EFFECTS:
         return clip_path
@@ -1166,25 +1188,80 @@ def apply_visual_effect(
     if not filter_str:
         return clip_path
 
-    codec = _get_configured_video_codec()
-    base_cmd = [
-        utils.get_ffmpeg_binary(), "-y",
-        "-i", clip_path,
-    ]
-    if is_complex:
-        filter_args = ["-filter_complex", filter_str, "-map", "[out]"]
-    else:
-        filter_args = ["-vf", filter_str]
+    # Resolve overlay file (optional — falls back gracefully if not generated yet)
+    overlay_cfg = _EFFECT_OVERLAYS.get(effect)
+    overlay_path: str | None = None
+    if overlay_cfg:
+        candidate = os.path.join(_OVERLAY_DIR, overlay_cfg["file"])
+        if os.path.exists(candidate):
+            overlay_path = candidate
 
-    cmd = [
-        *base_cmd,
-        *filter_args,
-        "-map", "0:a?", "-c:a", "copy",
-        "-c:v", codec, *_fast_preset_args(codec),
-        "-pix_fmt", "yuv420p",
-        "-threads", str(threads),
-        output_path,
-    ]
+    codec = _get_configured_video_codec()
+
+    if overlay_path:
+        blend_mode = overlay_cfg["mode"]
+        opacity = overlay_cfg["opacity"]
+
+        # Probe the clip's duration so -t can bound the infinite overlay loop.
+        clip_duration: float | None = None
+        try:
+            _pr = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=nk=1:nw=1", clip_path],
+                capture_output=True, text=True, timeout=15,
+            )
+            clip_duration = float(_pr.stdout.strip())
+        except Exception:
+            pass
+
+        # Build a single filter_complex that:
+        # 1. grades [1:v] (the clip) → [_graded]
+        # 2. scales [0:v] (overlay) to match clip resolution → [_ov]
+        # 3. blends [_graded] + [_ov] → [out]
+        if is_complex:
+            # dream: existing chain already uses [0:v]; remap to [1:v]
+            grade_chain = filter_str.replace("[0:v]", "[1:v]", 1)
+            # rename terminal [out] to [_graded] so we can continue the graph
+            if grade_chain.endswith("[out]"):
+                grade_chain = grade_chain[: -len("[out]")] + "[_graded]"
+        else:
+            grade_chain = f"[1:v]{filter_str}[_graded]"
+
+        ov_scale = f"[0:v]scale={width}:{height},format=yuv420p[_ov]"
+        blend = f"[_graded][_ov]blend=all_mode={blend_mode}:all_opacity={opacity}[out]"
+        combined = f"{grade_chain};{ov_scale};{blend}"
+
+        duration_args = ["-t", str(clip_duration)] if clip_duration else []
+        cmd = [
+            utils.get_ffmpeg_binary(), "-y",
+            "-stream_loop", "-1", "-i", overlay_path,
+            "-i", clip_path,
+            "-filter_complex", combined,
+            "-map", "[out]",
+            "-map", "1:a?", "-c:a", "copy",
+            "-c:v", codec, *_fast_preset_args(codec),
+            "-pix_fmt", "yuv420p",
+            "-threads", str(threads),
+            *duration_args,
+            output_path,
+        ]
+    else:
+        # No overlay file — color grade only (original path)
+        if is_complex:
+            filter_args = ["-filter_complex", filter_str, "-map", "[out]"]
+        else:
+            filter_args = ["-vf", filter_str]
+
+        cmd = [
+            utils.get_ffmpeg_binary(), "-y",
+            "-i", clip_path,
+            *filter_args,
+            "-map", "0:a?", "-c:a", "copy",
+            "-c:v", codec, *_fast_preset_args(codec),
+            "-pix_fmt", "yuv420p",
+            "-threads", str(threads),
+            output_path,
+        ]
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)

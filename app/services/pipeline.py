@@ -1179,8 +1179,10 @@ def start(job_path: str) -> Optional[dict]:
                 content_track_sent = sent.get("content_track", "broll")
                 if visual_effect and content_track_sent in ("broll", "named"):
                     effected_path = clip_path.replace(".mp4", f"_{visual_effect}.mp4")
+                    eff_w, eff_h = video_aspect.to_resolution()
                     clip_path = video.apply_visual_effect(
                         clip_path, visual_effect, effected_path,
+                        width=eff_w, height=eff_h,
                         threads=os.cpu_count() or 4,
                     )
                 ordered_clips.append(clip_path)
