@@ -11,11 +11,11 @@ Hard errors (exit 1):
   - JSON can't be parsed
   - video_script missing or empty
   - sentences missing or empty
+  - content_track='graphic' used (no longer supported; use broll + graphic_type)
 
 Warnings (exit 0, logged by worker):
   - video_topic missing
   - video_type not thematic/named_entity
-  - content_track='graphic' used (Pattern 1 removed; use broll + graphic_type instead)
   - title_card used more than once (exactly 1 allowed per video)
   - Any broll/named sentence missing visual_concepts or visual_caption
   - Duplicate visual_caption across sentences

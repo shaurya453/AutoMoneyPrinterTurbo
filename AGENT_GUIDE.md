@@ -70,7 +70,7 @@ One sentence describing the shot — used by the CLIP relevance filter to rank a
 
 ### `visual_effect`
 
-Motion overlay composited during rendering — each effect is a looping MP4 blended over the clip at screen mode. **Expected on ~15–25% of `broll`/`named` sentences** — assign at distinct narrative beats. Leave blank for neutral or transitional clips. Decide now — you wrote the script and know the emotional beat of each sentence.
+Motion overlay composited during rendering — each effect is a looping MP4 blended over the clip at screen mode. **Target ≤20% of `broll`/`named` sentences** — assign only at distinct narrative beats where the effect genuinely accentuates what's on screen. Leave blank for neutral or transitional clips. Decide now — you wrote the script and know the emotional beat of each sentence.
 
 | Value | Overlay | When to use |
 |---|---|---|
