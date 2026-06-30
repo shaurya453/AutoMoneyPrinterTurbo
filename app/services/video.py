@@ -1111,8 +1111,8 @@ def render_ken_burns_clip(
     return output_path if os.path.exists(output_path) else ""
 
 
-_OVERLAY_FADE_DUR  = 0.5   # seconds — fade-in at start, fade-out at end of overlay
-_OVERLAY_XFADE_DUR = 0.5   # seconds — crossfade at each loop join point
+_OVERLAY_FADE_DUR   = 0.5   # seconds — fade-in at start, fade-out at end of accent window
+_OVERLAY_ACCENT_DUR = 2.5   # seconds — how long the overlay stays on screen
 
 
 def _probe_duration(path: str) -> float | None:
@@ -1136,16 +1136,16 @@ def apply_visual_effect(
     height: int = 1080,
     threads: int = 4,
 ) -> str:
-    """Composite a motion overlay onto clip_path via FFmpeg screen blend.
+    """Composite a motion overlay as a 2-3 second accentuator at the start of clip_path.
 
-    The overlay is trimmed or crossfade-looped to exactly match clip_path's
-    duration, then faded in/out over _OVERLAY_FADE_DUR seconds before blending.
+    The overlay is trimmed to _OVERLAY_ACCENT_DUR seconds (clamped to the clip
+    and overlay durations), faded in at 0 and faded out at the end of the accent
+    window, then blended onto the clip.  The remainder of the clip plays clean.
 
-    When the clip is longer than the overlay:
-      - Each loop copy is introduced via -itsoffset so its PTS starts at the
-        right timeline position.
-      - Adjacent copies are joined with xfade=transition=fade so there is no
-        hard cut at the loop point.
+    The neutral-color pad that fills the rest of the clip is chosen so that the
+    blend is a mathematical identity after the accent window ends:
+      - screen blend: pad with black  (screen(clip, 0) = clip)
+      - multiply blend: pad with white (multiply(clip, 1) = clip)
 
     Returns output_path on success, clip_path unchanged on any failure.
     Audio is passed through unchanged.
@@ -1171,67 +1171,47 @@ def apply_visual_effect(
     blend_mode = overlay_cfg["mode"]
     opacity    = overlay_cfg["opacity"]
 
-    # Clamp fade so it never exceeds 25% of the clip (handles very short clips).
-    fade  = min(_OVERLAY_FADE_DUR,  clip_dur / 4)
-    xfade = min(_OVERLAY_XFADE_DUR, ov_dur   / 4)
-
-    # How many overlay copies are needed?
-    # Each copy advances the timeline by (ov_dur - xfade) seconds because the
-    # last xfade-seconds of one copy overlap with the first xfade-seconds of
-    # the next via a crossfade.
-    step    = ov_dur - xfade          # effective advance per copy
-    n_loops = max(1, math.ceil(clip_dur / step)) if clip_dur > ov_dur else 1
-
-    # ── Build FFmpeg input list ─────────────────────────────────────────────
-    # n_loops copies of the overlay (staggered with -itsoffset), then the clip.
-    ff_inputs: list[str] = []
-    for i in range(n_loops):
-        if i > 0:
-            ff_inputs += ["-itsoffset", f"{step * i:.6f}"]
-        ff_inputs += ["-i", overlay_path]
-    ff_inputs += ["-i", clip_path]
-    clip_idx = n_loops   # index of the clip in the FFmpeg input list
+    # Accent window: use at most _OVERLAY_ACCENT_DUR seconds of the overlay,
+    # clamped to the overlay and clip durations so nothing overruns.
+    accent = min(_OVERLAY_ACCENT_DUR, ov_dur, clip_dur)
+    # Clamp fade so it never exceeds 25% of the accent window.
+    fade   = min(_OVERLAY_FADE_DUR, accent / 4)
+    fade_out_start = max(0.0, accent - fade)
 
     # ── Build filter_complex ────────────────────────────────────────────────
+    # Keep everything in gbrp (planar RGB) so the blend operates in RGB colour
+    # space, matching what Filmora and other NLEs do. Blending in YUV applies
+    # the screen/multiply formula to offset chroma channels and introduces a
+    # colour cast (typically purple/teal).
     chains: list[str] = []
 
-    # Scale each overlay copy to the clip resolution.
-    # Keep in gbrp (planar RGB) so the blend operates in RGB colour space,
-    # matching what Filmora and other NLEs do. Blending in YUV applies the
-    # screen/multiply formula to offset chroma channels and introduces a
-    # colour cast (typically purple/teal).
-    for i in range(n_loops):
-        chains.append(f"[{i}:v]scale={width}:{height},format=gbrp[_s{i}]")
+    # Scale, trim to accent duration, and fade in/out.
+    chains.append(
+        f"[0:v]scale={width}:{height},format=gbrp,"
+        f"trim=0:{accent:.6f},setpts=PTS-STARTPTS,"
+        f"fade=t=in:st=0:d={fade:.3f},"
+        f"fade=t=out:st={fade_out_start:.6f}:d={fade:.3f}"
+        f"[_ov_trimmed]"
+    )
 
-    # Chain xfade transitions between consecutive overlay copies.
-    # At each join point the outgoing copy fades to black while the incoming
-    # copy fades up from black, producing a seamless crossfade loop.
-    prev = "_s0"
-    for i in range(1, n_loops):
-        xf_offset = step * i
-        nxt = f"_x{i}"
+    # Pad the remainder of the clip with a neutral color so the blend is a
+    # mathematical identity after the accent window ends.
+    if clip_dur > accent:
+        pad_dur   = clip_dur - accent
+        # screen(clip, black)=clip; multiply(clip, white)=clip
+        pad_color = "white" if blend_mode == "multiply" else "black"
         chains.append(
-            f"[{prev}][_s{i}]"
-            f"xfade=transition=fade:duration={xfade:.3f}:offset={xf_offset:.6f}"
-            f"[{nxt}]"
+            f"color=c={pad_color}:s={width}x{height}:r=30:d={pad_dur:.6f},"
+            f"format=gbrp[_ov_pad]"
         )
-        prev = nxt
-
-    # Fade the assembled overlay in at the start and out at the end.
-    fade_out_st = max(0.0, clip_dur - fade)
-    if fade > 0:
         chains.append(
-            f"[{prev}]"
-            f"fade=t=in:st=0:d={fade:.3f},"
-            f"fade=t=out:st={fade_out_st:.6f}:d={fade:.3f}"
-            f"[_ov]"
+            f"[_ov_trimmed][_ov_pad]concat=n=2:v=1:a=0,setpts=PTS-STARTPTS[_ov]"
         )
     else:
-        chains.append(f"[{prev}]null[_ov]")
+        chains.append(f"[_ov_trimmed]null[_ov]")
 
-    # Convert clip to gbrp so the blend runs in RGB colour space, then
-    # blend, then convert the result back to yuv420p for the encoder.
-    chains.append(f"[{clip_idx}:v]format=gbrp[_clip]")
+    # Blend and convert back to yuv420p for the encoder.
+    chains.append(f"[1:v]format=gbrp[_clip]")
     chains.append(
         f"[_clip][_ov]"
         f"blend=all_mode={blend_mode}:all_opacity={opacity},"
@@ -1244,10 +1224,11 @@ def apply_visual_effect(
     codec = _get_configured_video_codec()
     cmd = [
         utils.get_ffmpeg_binary(), "-y",
-        *ff_inputs,
+        "-i", overlay_path,
+        "-i", clip_path,
         "-filter_complex", filter_complex,
         "-map", "[out]",
-        "-map", f"{clip_idx}:a?", "-c:a", "copy",
+        "-map", "1:a?", "-c:a", "copy",
         "-t", f"{clip_dur:.6f}",
         "-c:v", codec, *_fast_preset_args(codec),
         "-pix_fmt", "yuv420p",
