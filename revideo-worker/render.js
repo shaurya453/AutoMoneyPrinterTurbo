@@ -3,7 +3,7 @@
  * segment, and writes the output file path to stdout.
  *
  * stdin JSON fields:
- *   type       – graphic type: "title_card" | "infographic" | "transition"
+ *   type       – graphic type: "lower_third" | "infographic" | "transition" | "list"
  *   outPath    – absolute path for the rendered MP4
  *   duration   – clip length in seconds
  *   width      – output width in pixels  (default 1920)
@@ -21,11 +21,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Variant 0 is the default (original). The caller passes a `variant` index so
 // graphics.py can enforce no-consecutive-repeat selection without needing state here.
 const VARIANT_POOL = {
-  title_card: [
-    path.join(__dirname, 'src', 'project.ts'),                    // A — fade-in centred
-    path.join(__dirname, 'src', 'projects', 'title-card-b.ts'),   // B — kinetic reveal
-    path.join(__dirname, 'src', 'projects', 'title-card-c.ts'),   // C — left-bar frame
-    path.join(__dirname, 'src', 'projects', 'title-card-d.ts'),   // D — cold slide (editorial)
+  lower_third: [
+    path.join(__dirname, 'src', 'projects', 'lower-third.ts'),    // only variant
   ],
   infographic: [
     path.join(__dirname, 'src', 'projects', 'infographic.ts'),    // A — vertical bars
@@ -63,7 +60,7 @@ async function main() {
   }
 
   const {
-    type = 'title_card',
+    type = 'lower_third',
     variant = 0,   // pool index; graphics.py picks to avoid consecutive repeats
     outPath,
     duration = 5,
@@ -80,10 +77,10 @@ async function main() {
 
   const pool = VARIANT_POOL[type];
   if (!pool) {
-    process.stderr.write(`render.js: unknown type "${type}", falling back to title_card\n`);
+    process.stderr.write(`render.js: unknown graphic type "${type}"\n`);
+    process.exit(1);
   }
-  const activePool = pool ?? VARIANT_POOL.title_card;
-  const projectFile = activePool[variant % activePool.length];
+  const projectFile = pool[variant % pool.length];
 
   try {
     await renderVideo({

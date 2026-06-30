@@ -23,7 +23,7 @@ _RENDER_TIMEOUT = 180  # seconds
 
 # Pool sizes per type — must match VARIANT_POOL array lengths in render.js.
 _POOL_SIZES: dict = {
-    "title_card":  4,
+    "lower_third": 1,
     "infographic": 4,
     "transition":  4,
     "list":        4,
@@ -32,12 +32,7 @@ _POOL_SIZES: dict = {
 # Named style → variant index mapping, per type.
 # Lets the agent request a specific aesthetic without knowing variant numbers.
 STYLE_MAP: dict = {
-    "title_card": {
-        "minimal":   0,   # fade-in centred, very clean
-        "kinetic":   1,   # title glides upward, white rule wipe
-        "framed":    2,   # vertical left bar + text reveal
-        "editorial": 3,   # gold-accent rule, title slides from right
-    },
+    "lower_third": {},   # single variant — no style options
     "infographic": {
         "bars":       0,  # vertical bar chart
         "horizontal": 1,  # horizontal bar chart
@@ -106,7 +101,7 @@ def render_graphic_clip(
     Render a Revideo graphic segment. Returns the output MP4 path, or None on failure.
 
     Args:
-        graphic_type: Scene selector — "title_card", "infographic", "transition", "list".
+        graphic_type: Scene selector — "lower_third", "infographic", "transition", "list".
         out_path:     Absolute path where the MP4 should be written.
         duration:     Clip length in seconds.
         width/height: Output dimensions (must match the pipeline's target resolution).

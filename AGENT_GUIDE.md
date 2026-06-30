@@ -143,14 +143,14 @@ All graphics are **narrated** — the graphic plays on screen while the narrator
 
 | `graphic_type` | Fields inside `variables` |
 |---|---|
-| `"title_card"` | `title` (≤10 words), optional `subtitle`, `style` |
+| `"lower_third"` | `label` (2–6 words, title case — entity name or identifier) |
 | `"infographic"` | `title`, `labels[]`, `values[]`, optional `unit`, `style` |
 | `"transition"` | `label` (≤4 words), optional `sublabel`, `style` |
 | `"list"` | `items[]` (2–6 strings), optional `title`, `style` |
 
 | Type | Styles (pick one, or omit to auto-rotate) |
 |---|---|
-| `title_card` | `"minimal"` · `"kinetic"` · `"framed"` · `"editorial"` |
+| `lower_third` | (no styles — single preset) |
 | `infographic` | `"bars"` · `"horizontal"` (long labels) · `"lollipop"` · `"callouts"` (2–3 standalone stats) |
 | `transition` | `"line"` · `"sweep"` · `"brackets"` · `"crosshair"` |
 | `list` | `"bullets"` · `"numbered"` (ordered) · `"cascade"` · `"grid"` (4–6 equal-weight items) |
@@ -159,17 +159,12 @@ All graphics are **narrated** — the graphic plays on screen while the narrator
 
 | Trigger | Type | Budget |
 |---|---|---|
-| One sentence where a title card genuinely fits — typically the intro | `title_card` | 1 (total, ever) |
+| Named entity on screen where a text identifier adds genuine viewer value | `lower_third` | 0–3 |
 | 2+ quantities the viewer must compare side by side | `infographic` | 0–2 |
 | Parallel enumerable items where every item is a single short sentence | `list` | 0–1 |
 | Genuine narrative leap — time jump, location shift, major tone change | `transition` | 0–2 |
 
-**Budget rule:** exactly 1 title_card per video — no more, no exceptions. No outro title card. No second title card anywhere. Infographic + list + transition combined ≤ 3. Total graphics ≤ 5.
-
-**title_card false triggers — these must NEVER produce a title_card:**
-- Any phrase that sounds like a mid-video marker: "halfway through", "half time", "we're at the halfway point", "in the middle of our list", "we've reached number five", "as we continue", "let's keep going", "moving on"
-- The final/outro sentence — the video ends on footage, not a card
-- Chapter or section headings mid-video
+**Budget rule:** lower_third + infographic + list + transition combined ≤ 4. Total graphics ≤ 5. Lower thirds only on named entities.
 
 **Handling list items:** `sentence_prep.py` creates one stub per enumerated item. Merge them:
 1. Extract every item to its core phrase and collect in `variables.items`.
@@ -178,9 +173,9 @@ All graphics are **narrated** — the graphic plays on screen while the narrator
 Only use `list` when every item fits in one short sentence — if any item needs 2+ sentences, use regular broll for all.
 
 **Type-specific rules:**
-- `title_card`: `title` ≤10 words. `subtitle` — 3–6 word **viewer-facing tagline** about the video's value proposition (e.g. `"Hidden Audio Gems"`, `"Worth Far More Than You Think"`). Never write internal labels (`"countdown intro"`, `"midpoint break"`, `"chapter 1"` are wrong). Use `""` if no good tagline exists. Exactly one per video — typically the intro sentence. No outro card.
+- `lower_third`: `label` is 2–6 words, title case, no punctuation. Use only when the entity name on screen adds genuine viewer value — a brand being reviewed, a person being named, a product in close-up, a historical artifact being examined. Do NOT use for generic broll, locations the narrator merely passes through, or entities obvious from context. The AI decides: if adding a label would feel gratuitous or redundant, omit it entirely.
 - `infographic`: `labels` and `values` same length; 2–8 data points; all `values` positive. `"callouts"` for 2–3 standalone stats. `"horizontal"` when any label is >3 words.
-- `transition`: `label` ≤4 words, title case. Only real structural pivots — not paragraph breaks. Not for chapter headings (use `title_card`).
+- `transition`: `label` ≤4 words, title case. Only real structural pivots — not paragraph breaks.
 - `list`: 2–6 items. Single-sentence items only. For 2 numerically differing items, use `"infographic"` `"callouts"` instead. `"grid"` only for 4–6 items.
 
 ---
@@ -249,18 +244,16 @@ Ignored for `content_track: "named"` (always image). For real places the narrati
       "avoid": []
     },
     // Narrated graphic — text stays in video_script; no duration field
-    // title_card example — ALL fields inside variables, nothing at top level
+    // lower_third example — label over stock footage of a named entity
     {
-      "text": "Today we're counting down ten products that defy their price tags.",
-      "content_track": "broll",
-      "graphic_type": "title_card",
+      "text": "The Sony WH-1000XM5 consistently tops every noise-cancelling chart.",
+      "content_track": "named",
+      "graphic_type": "lower_third",
       "variables": {
-        "title": "Ten Products That Defy Their Price Tags",
-        "subtitle": "Hidden Value, Revealed",
-        "style": "editorial"
+        "label": "Sony WH-1000XM5"
       },
-      "visual_concepts": ["product display shelf", "retail store interior"],
-      "visual_caption": "a sleek product display in a well-lit showroom"
+      "visual_concepts": ["Sony WH-1000XM5 headphones", "premium over-ear headphones"],
+      "visual_caption": "Sony WH-1000XM5 headphones on a clean white surface"
     },
     // infographic example
     {
@@ -311,8 +304,7 @@ Match `bgm_search_term` to tone: `"tense thriller score"`, `"uplifting corporate
 - No two consecutive sentences with the same `assigned_motif`? (thematic)
 - Unique `[0]` count ≥ `max(15, ceil(N/4))`?
 - Effects: ≤20% of broll/named; no two adjacent sentences both have effects; sepia+noir combined ≤1; tech+hacker_tech combined ≤1?
-- Exactly one title_card in the entire video (no outro card, no second card anywhere)?
-- title_card `subtitle` is a viewer-facing tagline — not an internal label?
+- Lower thirds (`lower_third`) only on named entities where a label adds genuine viewer value?
 - All graphics are narrated: real `text` in `video_script`, no `duration`, `visual_concepts`/`visual_caption` set?
 - Total graphics ≤5? `labels` and `values` same length on infographics?
 - All list item stubs deleted from `sentences` (zero stubs remaining)?
@@ -349,13 +341,13 @@ Do NOT run `cli.py`. The worker runs it automatically.
 - **`content_track: "graphic"` with empty `text`** — silent standalone graphics are not supported; all graphics must be narrated (`content_track: "broll"` + `graphic_type`)
 - **Missing `visual_concepts`/`visual_caption` on a graphic sentence** — these are the footage fallback if Revideo render fails
 - **`subtitle` as a structural label** — `"countdown intro"`, `"midpoint break"`, `"chapter 1"` are wrong; write a viewer-facing tagline or use `""`
-- **More than one title_card** — exactly one per video; no outro card, no chapter cards, no mid-video cards. VO phrases like "halfway through", "half time", "middle of the list" are not triggers — ignore them
+- **`lower_third` on generic broll** — only use it when a named entity (brand, person, product) is specifically on screen and a text identifier adds genuine value
 - **Named entity continuity** — after naming a product, person, or brand, keep `content_track: "named"` with that entity's visuals for every sentence that still discusses it. Don't revert to broll while the same entity is still on screen
 - **Effects on consecutive sentences** — never place a visual_effect on two adjacent sentences; always separate effect sentences with ≥2 plain sentences between them
 - **Leaving list item stubs in `sentences`** — ALL item stubs must be deleted; partial deletion shows fewer items than scripted
 - **`list` for multi-sentence items** — if any item needs 2+ sentences of narration, skip list and use regular broll for all
 - **`list` for two numerically differing items** — use `"infographic"` `"callouts"` instead
-- **`infographic` for a single statistic** — needs ≥2 labeled values; use `"callouts"` or `title_card` instead
+- **`infographic` for a single statistic** — needs ≥2 labeled values; use `"callouts"` style instead
 - **`infographic` with long labels and `"bars"` style** — use `"horizontal"` when any label exceeds ~3 words
 - **`"grid"` list style for fewer than 4 items** — cards look sparse; use `"bullets"` or `"cascade"` for 2–3 items
 - **`transition` for every topic shift** — only real structural breaks (time jump, location, narrative phase); not paragraph breaks

@@ -16,7 +16,7 @@ Hard errors (exit 1):
 Warnings (exit 0, logged by worker):
   - video_topic missing
   - video_type not thematic/named_entity
-  - title_card used more than once (exactly 1 allowed per video)
+  - lower_third used on a sentence that is not content_track='named'
   - graphic sentence missing variables dict (would render blank)
   - Any broll/named sentence missing visual_concepts or visual_caption
   - Duplicate visual_caption across sentences
@@ -84,7 +84,6 @@ def main():
     seen_captions: dict = {}      # caption → first sentence index
     concept0_counts: dict = {}    # concept[0] → count
     enrichable: list = []         # (sentence_index, concept0) for non-graphic sentences
-    title_card_indices: list = [] # sentence indices that use graphic_type="title_card"
 
     text_errors = []
 
@@ -106,8 +105,6 @@ def main():
             continue
 
         gtype = sent.get("graphic_type")
-        if gtype == "title_card":
-            title_card_indices.append(i)
         if gtype and not isinstance(sent.get("variables"), dict):
             warnings.append(
                 f"sentence {i}: graphic_type={gtype!r} has no 'variables' dict — "
@@ -155,13 +152,6 @@ def main():
             flush=True,
         )
         sys.exit(1)
-
-    # ── Title card count check ───────────────────────────────────────────────
-    if len(title_card_indices) > 1:
-        warnings.append(
-            f"title_card used {len(title_card_indices)} times (sentences {title_card_indices}) — "
-            "exactly 1 allowed per video; remove the extras"
-        )
 
     # ── Effect aggregate checks ──────────────────────────────────────────────
     enrichable_tracks = [

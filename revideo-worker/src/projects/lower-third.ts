@@ -1,6 +1,6 @@
 import {makeProject} from '@revideo/core';
-import titleCard from './scenes/title-card';
+import lowerThird from '../scenes/lower-third';
 
 export default makeProject({
-  scenes: [titleCard],
+  scenes: [lowerThird],
 });
