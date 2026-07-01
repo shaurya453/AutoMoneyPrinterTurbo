@@ -709,9 +709,9 @@ def _render_3d_effect(
             # ease-out cubic, 1→0
             ease = (1.0 - min(t, D) / D) ** 3
 
-            # Zoom: progress 0→1 over D seconds, then hold at 1.0.
+            # Zoom: progress 0→1 over the full clip duration.
             # screen_3d_lr zooms in (0.95→1.0); screen_3d_ud zooms out (1.05→1.0).
-            zoom_t = min(t, D) / D
+            zoom_t = t / duration
             if preset == "screen_3d_lr":
                 scale = 0.95 + 0.05 * zoom_t
             else:
