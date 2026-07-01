@@ -1,4 +1,16 @@
 @font-face {
+  font-family: 'Playfair Display';
+  font-weight: 400 900;
+  font-style: normal;
+  src: url('../fonts/PlayfairDisplay-VariableFont_wght.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'Stack Sans Text';
+  font-weight: 200 700;
+  font-style: normal;
+  src: url('../fonts/StackSansText-VariableFont_wght.ttf') format('truetype');
+}
+@font-face {
   font-family: 'Inter';
   font-weight: 300;
   font-style: normal;

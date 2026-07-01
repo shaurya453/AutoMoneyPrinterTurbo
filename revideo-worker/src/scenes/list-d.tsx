@@ -1,16 +1,17 @@
 import '../global.css';
-import {makeScene2D, Rect, Txt} from '@revideo/2d';
+import {blur, makeScene2D, Rect, Txt, Video} from '@revideo/2d';
 import {all, chain, createRef, easeInOutCubic, easeOutCubic, tween, useScene, waitFor} from '@revideo/core';
 
 // Variant D — Card Grid
-// Items are laid out in a 2-column grid of bordered cards, each with a coloured
-// accent number badge in the top-left corner. Cards fade in column-by-column.
-// Falls back to single-column for ≤3 items. Background: deep charcoal (#0d0d0d).
 
 const COLORS = [
   '#4f8ef7', '#f7964f', '#4fd1a0', '#f74f7e',
   '#b44ff7', '#f7e14f', '#4fcef7', '#f74fb3',
 ];
+
+const FLOAT_AMP      = 5;
+const FLOAT_PERIOD   = 3.5;
+const easeInOutSine  = (v: number) => -(Math.cos(Math.PI * v) - 1) / 2;
 
 export default makeScene2D('list-d', function* (view) {
   const vars = useScene().variables;
@@ -19,11 +20,11 @@ export default makeScene2D('list-d', function* (view) {
   const rawItems = vars.get('items', ['Item 1', 'Item 2', 'Item 3'])();
   const items    = Array.from(rawItems as string[]);
   const duration = Number(vars.get('duration', 8)());
+  const bgVideo  = String(vars.get('bgVideo', '')());
 
   const n        = Math.min(items.length, 6);
   const hasTitle = title.length > 0;
 
-  // Layout: 2 columns for 4-6 items, 1 column for 1-3
   const useTwoCols = n >= 4;
   const COLS       = useTwoCols ? 2 : 1;
   const ROWS       = Math.ceil(n / COLS);
@@ -36,10 +37,9 @@ export default makeScene2D('list-d', function* (view) {
   const gridW = COLS * CARD_W + (COLS - 1) * COL_GAP;
   const gridH = ROWS * CARD_H + (ROWS - 1) * ROW_GAP;
 
-  const GRID_TOP  = hasTitle ? -gridH / 2 + 60 : -gridH / 2;
-  const TITLE_Y   = hasTitle ? GRID_TOP - CARD_H / 2 - 56 : 0;
+  const GRID_TOP = hasTitle ? -gridH / 2 + 60 : -gridH / 2;
+  const TITLE_Y  = hasTitle ? GRID_TOP - CARD_H / 2 - 56 : 0;
 
-  // Card positions (top-left corner, converted to centre for Revideo)
   const cardCentres = Array.from({length: n}, (_, i) => {
     const col = i % COLS;
     const row = Math.floor(i / COLS);
@@ -48,89 +48,54 @@ export default makeScene2D('list-d', function* (view) {
     return {x, y};
   });
 
-  const STAGGER  = 0.18;
-  const FADE_DUR = 0.45;
+  const STAGGER  = 0.30;
+  const FADE_DUR = 0.70;
   const ANIM_OUT = 0.35;
 
-  const containerRef = createRef<Rect>();
-  const titleRef     = createRef<Txt>();
-  const cardRefs     = Array.from({length: n}, () => createRef<Rect>());
-  const numRefs      = Array.from({length: n}, () => createRef<Txt>());
-  const txtRefs      = Array.from({length: n}, () => createRef<Txt>());
+  const floatRef = createRef<Rect>();
+  const titleRef = createRef<Txt>();
+  const cardRefs = Array.from({length: n}, () => createRef<Rect>());
+  const numRefs  = Array.from({length: n}, () => createRef<Txt>());
+  const txtRefs  = Array.from({length: n}, () => createRef<Txt>());
 
   view.add(
-    <Rect ref={containerRef} width={1920} height={1080} fill={'#0d0d0d'} opacity={1} layout={false}>
-      <Txt
-        ref={titleRef}
-        text={title}
-        x={0}
-        y={TITLE_Y}
-        fontSize={52}
-        fontWeight={700}
-        fontFamily={'Inter, sans-serif'}
-        fill={'#ffffff'}
-        opacity={0}
-        textAlign={'center'}
-        justifyContent={'center'}
-        width={1600}
-        textWrap={true}
-      />
-
-      {Array.from({length: n}, (_, i) => {
-        const {x, y} = cardCentres[i];
-        return (
-          <Rect
-            ref={cardRefs[i]}
-            width={CARD_W}
-            height={CARD_H}
-            fill={'#161620'}
-            stroke={COLORS[i % COLORS.length]}
-            lineWidth={1.5}
-            opacity={0}
-            radius={8}
-            x={x}
-            y={y}
-          />
-        );
-      })}
-      {Array.from({length: n}, (_, i) => {
-        const {x, y} = cardCentres[i];
-        const numSize = CARD_H <= 160 ? 32 : 40;
-        return (
-          <Txt
-            ref={numRefs[i]}
-            text={String(i + 1).padStart(2, '0')}
-            x={x - CARD_W / 2 + 32}
-            y={y - CARD_H / 2 + numSize / 2 + 14}
-            fontSize={numSize}
-            fontWeight={800}
-            fontFamily={'Inter, sans-serif'}
-            fill={COLORS[i % COLORS.length]}
-            opacity={0}
-          />
-        );
-      })}
-      {Array.from({length: n}, (_, i) => {
-        const {x, y} = cardCentres[i];
-        const txtSize = CARD_H <= 160 ? 26 : 32;
-        return (
-          <Txt
-            ref={txtRefs[i]}
-            text={items[i]}
-            x={x}
-            y={y + 8}
-            fontSize={txtSize}
-            fontWeight={400}
-            fontFamily={'Inter, sans-serif'}
-            fill={'#d8d8d8'}
-            opacity={0}
-            textAlign={'center'}
-            justifyContent={'center'}
-            width={CARD_W - 48}
-            textWrap={true}
-          />
-        );
-      })}
+    <Rect width={1920} height={1080} layout={false}>
+      {bgVideo
+        ? <Video src={bgVideo} width={1920} height={1080} opacity={0.55} filters={[blur(16)]} loop play />
+        : <Rect width={1920} height={1080} fill={'#0d0d0d'} />
+      }
+      <Rect width={1920} height={1080} fill={'rgba(0,0,0,0.52)'} />
+      <Rect ref={floatRef} width={1920} height={1080} opacity={1} layout={false}>
+        <Txt ref={titleRef} text={title} x={0} y={TITLE_Y} fontSize={52} fontWeight={700}
+          fontFamily={'Stack Sans Text, sans-serif'} fill={'#ffffff'} opacity={0} textAlign={'center'}
+          justifyContent={'center'} width={1600} textWrap={true} />
+        {Array.from({length: n}, (_, i) => {
+          const {x, y} = cardCentres[i];
+          return (
+            <Rect ref={cardRefs[i]} width={CARD_W} height={CARD_H} fill={'#161620'}
+              stroke={COLORS[i % COLORS.length]} lineWidth={1.5} opacity={0} radius={8} x={x} y={y} />
+          );
+        })}
+        {Array.from({length: n}, (_, i) => {
+          const {x, y} = cardCentres[i];
+          const numSize = CARD_H <= 160 ? 32 : 40;
+          return (
+            <Txt ref={numRefs[i]} text={String(i + 1).padStart(2, '0')}
+              x={x - CARD_W / 2 + 32} y={y - CARD_H / 2 + numSize / 2 + 14}
+              fontSize={numSize} fontWeight={700} fontFamily={'Stack Sans Text, sans-serif'}
+              fill={COLORS[i % COLORS.length]} opacity={0} />
+          );
+        })}
+        {Array.from({length: n}, (_, i) => {
+          const {x, y} = cardCentres[i];
+          const txtSize = CARD_H <= 160 ? 26 : 32;
+          return (
+            <Txt ref={txtRefs[i]} text={items[i]} x={x} y={y + 8} fontSize={txtSize}
+              fontWeight={400} fontFamily={'Stack Sans Text, sans-serif'} fill={'#d8d8d8'} opacity={0}
+              textAlign={'center'} justifyContent={'center'} width={CARD_W - 48} textWrap={true} />
+          );
+        })}
+      </Rect>
     </Rect>,
   );
 
@@ -140,7 +105,6 @@ export default makeScene2D('list-d', function* (view) {
     yield* waitFor(0.12);
   }
 
-  // Cards fade in column-by-column, left column first
   yield* all(
     ...Array.from({length: n}, (_, i) =>
       chain(
@@ -155,7 +119,23 @@ export default makeScene2D('list-d', function* (view) {
     ),
   );
 
-  const animIn = titleTime + (n - 1) * STAGGER + FADE_DUR;
-  yield* waitFor(Math.max(0, duration - animIn - ANIM_OUT));
-  yield* tween(ANIM_OUT, v => containerRef().opacity(1 - easeInOutCubic(v)));
+  const animIn  = titleTime + (n - 1) * STAGGER + FADE_DUR;
+  const holdDur = Math.max(0, duration - animIn - ANIM_OUT);
+  if (holdDur > 0.1) {
+    const qd = FLOAT_PERIOD / 4;
+    const pts = [FLOAT_AMP, 0, -FLOAT_AMP, 0];
+    let fe = 0; let qi = 0;
+    while (fe + qd <= holdDur - 0.05) {
+      const fr = pts[(qi + 3) % 4], to = pts[qi % 4];
+      yield* tween(qd, v => floatRef().y(fr + (to - fr) * easeInOutSine(v)));
+      fe += qd; qi++;
+    }
+    const rem = holdDur - fe;
+    if (rem > 0.05) {
+      const fr = pts[(qi + 3) % 4], to = pts[qi % 4];
+      yield* tween(rem, v => floatRef().y(fr + (to - fr) * easeInOutSine(v)));
+    }
+    floatRef().y(0);
+  }
+  yield* tween(ANIM_OUT, v => floatRef().opacity(1 - easeInOutCubic(v)));
 });

@@ -536,6 +536,7 @@ _PAN_Z = 1.04                    # zoom factor: subtle 4% motion, minimal conten
 
 _KEN_BURNS_ANIMATIONS = ("pan_lr", "pan_rl", "zoom_in", "pan_ud")
 _last_ken_burns_animation: str | None = None
+_3D_ANIM_DUR = 1.8  # seconds — tilt-to-flat transition; remaining duration holds flat
 
 _VALID_VISUAL_EFFECTS = frozenset({
     "threat", "cold", "warmth", "mystery", "sepia",
@@ -566,15 +567,15 @@ _EFFECT_OVERLAYS: dict[str, dict] = {
 # duplicated by their weight, so the random pick naturally favours them without
 # overriding geometry constraints or the no-consecutive-repeat rule.
 _EFFECT_ANIM_WEIGHTS: dict[str, dict[str, int]] = {
-    "threat":      {"zoom_in": 3},
+    "threat":      {"zoom_in": 3, "screen_3d_ud": 2},
     "cold":        {"pan_ud": 2},
-    "mystery":     {"pan_ud": 3},
+    "mystery":     {"pan_ud": 3, "screen_3d_lr": 1},
     "warmth":      {"zoom_in": 2},
     "dream":       {"zoom_in": 2},
-    "revelation":  {"zoom_in": 3},
+    "revelation":  {"zoom_in": 3, "screen_3d_lr": 2},
     "sepia":       {"pan_lr": 3},
     "hacker_tech": {"zoom_in": 2},
-    "noir":       {"zoom_in": 2},
+    "noir":        {"zoom_in": 2},
 }
 
 
@@ -611,6 +612,153 @@ def _cover_crop_image(img: Image.Image, width: int, height: int) -> Image.Image:
     resized = img.resize((new_w, new_h), Image.LANCZOS)
     x0, y0 = (new_w - width) // 2, (new_h - height) // 2
     return resized.crop((x0, y0, x0 + width, y0 + height))
+
+
+def _perspective_coeffs(dst_pts, src_pts) -> list:
+    """Compute 8 PIL PERSPECTIVE inverse-map coefficients from 4 (dst→src) point pairs."""
+    A, b = [], []
+    for (dx, dy), (sx, sy) in zip(dst_pts, src_pts):
+        A.append([dx, dy, 1,  0,  0, 0, -sx * dx, -sx * dy])
+        b.append(sx)
+        A.append([ 0,  0, 0, dx, dy, 1, -sy * dx, -sy * dy])
+        b.append(sy)
+    coeffs = np.linalg.solve(np.array(A, dtype=np.float64), np.array(b, dtype=np.float64))
+    return coeffs.tolist()
+
+
+def _ffmpeg_persp_quad(tilt_pts: list, W: int, H: int) -> tuple:
+    """
+    Convert tilt_pts (where each image corner appears in the output at max tilt,
+    order TL/TR/BR/BL) into the 8 source-space coordinates FFmpeg's perspective
+    filter expects: which source pixel fills each output corner (TL TR BL BR).
+    Returns (x0,y0, x1,y1, x2,y2, x3,y3) as floats.
+    """
+    src_pts = [(0, 0), (W, 0), (W, H), (0, H)]   # image corners, same TL/TR/BR/BL order
+    a, bc, c, d, e, f, g, h = _perspective_coeffs(tilt_pts, src_pts)
+
+    def src_at(dx: float, dy: float):
+        denom = g * dx + h * dy + 1.0
+        return (a * dx + bc * dy + c) / denom, (d * dx + e * dy + f) / denom
+
+    tl = src_at(0, 0)
+    tr = src_at(W, 0)
+    bl = src_at(0, H)
+    br = src_at(W, H)
+    return (*tl, *tr, *bl, *br)  # x0,y0,x1,y1,x2,y2,x3,y3
+
+
+def _render_3d_effect(
+    image_path: str,
+    duration: float,
+    width: int,
+    height: int,
+    output_path: str,
+    preset: str,
+) -> bool:
+    """
+    Render a 3D screen-mockup animation: tilted perspective → flat full-frame.
+    Re-implemented using MoviePy and PIL to bypass FFmpeg's perspective
+    filter lacking `sendcmd` / timeline command support.
+    """
+    from moviepy.video.VideoClip import VideoClip as _VideoClip
+    from PIL import Image as _PILImage, ImageFilter as _ImageFilter
+    import numpy as np
+
+    W, H = width, height
+    D = duration * 0.50
+
+    # Destination positions of each source corner at max tilt
+    if preset == "screen_3d_lr":
+        tilt_pts = [
+            (W * 0.25, H * 0.18),  # TL
+            (W * 0.94, H * 0.03),  # TR
+            (W * 0.94, H * 0.97),  # BR
+            (W * 0.25, H * 0.82),  # BL
+        ]
+        sdx, sdy = 48, 20
+    else:  # screen_3d_ud
+        tilt_pts = [
+            (W * 0.16, H * 0.24),  # TL
+            (W * 0.84, H * 0.24),  # TR
+            (W * 0.96, H * 0.92),  # BR
+            (W * 0.04, H * 0.92),  # BL
+        ]
+        sdx, sdy = 20, 48
+
+    flat_pts = [(0, 0), (W, 0), (W, H), (0, H)]
+    src_pts = [(0, 0), (W, 0), (W, H), (0, H)]
+
+    # Fixed offset for the shadow
+    sox, soy = sdx // 3, sdy // 3
+
+    try:
+        # 1. Load and cover-crop the base image to exactly WxH
+        with _PILImage.open(image_path) as f:
+            img_raw = f.convert("RGB")
+
+        img = _cover_crop_image(img_raw, W, H)
+
+        # Pre-compute blurred background once (heavy blur + darken, static across all frames)
+        bg_arr = np.array(img, dtype=np.float32) * 0.45
+        bg = _PILImage.fromarray(np.clip(bg_arr, 0, 255).astype(np.uint8))
+        bg = bg.filter(_ImageFilter.GaussianBlur(radius=48))
+
+        img = img.convert("RGBA")  # Requires Alpha for transparent bounds
+
+        def make_frame(t):
+            # ease-out cubic, 1→0
+            ease = (1.0 - min(t, D) / D) ** 3
+
+            # Interpolate the 4 corners towards the flat full-frame bounds
+            current_dst = []
+            for i in range(4):
+                tx, ty = tilt_pts[i]
+                fx, fy = flat_pts[i]
+                current_dst.append((fx + (tx - fx) * ease, fy + (ty - fy) * ease))
+
+            # Compute PIL PERSPECTIVE inverse-map coefficients (dst->src)
+            coeffs = _perspective_coeffs(current_dst, src_pts)
+
+            # Warp the image. fillcolor=(0,0,0,0) makes the outside transparent.
+            warped = img.transform(
+                (W, H),
+                _PILImage.PERSPECTIVE,
+                coeffs,
+                _PILImage.BICUBIC,
+                fillcolor=(0, 0, 0, 0)
+            )
+
+            # Blurred background base (same image, heavily blurred and darkened)
+            frame = bg.copy()
+            alpha = warped.split()[3]
+
+            # Shadow creation (matches FFmpeg: gblur=sigma=20 + colorchannelmixer)
+            shadow_mask = alpha.filter(_ImageFilter.GaussianBlur(radius=20))
+            shadow_layer = _PILImage.new("RGB", (W, H), (38, 38, 38))  # 15% brightness
+
+            # Composite shadow, then composite the warped image on top
+            frame.paste(shadow_layer, (sox, soy), mask=shadow_mask)
+            frame.paste(warped, (0, 0), mask=alpha)
+
+            return np.array(frame)
+
+        # 2. Render via MoviePy using the global fps variable
+        clip = _VideoClip(make_frame, duration=duration).with_fps(fps)
+
+        # 3. Write output leveraging existing codec fallback & hardware acceleration
+        _write_videofile_with_codec_fallback(
+            clip,
+            output_file=output_path,
+            codec="libx264",
+            preset="fast",
+            threads=os.cpu_count() or 4,
+            logger=None,
+        )
+        return os.path.exists(output_path) and os.path.getsize(output_path) > 0
+
+    except Exception as exc:
+        logger.warning(f"_render_3d_effect ({preset}) failed: {exc}")
+        return False
 
 
 def _resize_clip_to_aspect(clip, video_width: int, video_height: int):
@@ -1066,7 +1214,7 @@ def render_ken_burns_clip(
         h_excess = max(0.0, img_w * cover_scale - width)
         v_excess = max(0.0, img_h * cover_scale - height)
 
-        allowed = ["zoom_in"]
+        allowed = ["zoom_in", "screen_3d_lr", "screen_3d_ud"]
         if h_excess > width * 0.02:
             allowed.extend(["pan_lr", "pan_rl"])
         if v_excess > height * 0.02:
@@ -1079,6 +1227,15 @@ def render_ken_burns_clip(
             f"h_excess={h_excess:.0f}px, v_excess={v_excess:.0f}px, "
             f"pool={allowed}"
         )
+
+    # 3D screen-mockup presets use PIL per-frame rendering, not FFmpeg filters.
+    if animation in ("screen_3d_lr", "screen_3d_ud"):
+        ok = _render_3d_effect(image_path, duration, width, height, output_path, animation)
+        if ok:
+            return output_path
+        logger.warning(f"3D effect failed for {image_path}, falling back to pan/zoom")
+        allowed_fallback = [a for a in allowed if "screen_3d" not in a]
+        animation = _pick_animation(allowed_fallback or ["zoom_in"], effect)
 
     # Prefer FFmpeg (sub-pixel smooth motion) over MoviePy (integer rounding jitter).
     try:
@@ -1112,7 +1269,7 @@ def render_ken_burns_clip(
 
 
 _OVERLAY_FADE_DUR   = 0.5   # seconds — fade-in at start, fade-out at end of accent window
-_OVERLAY_ACCENT_DUR = 2.5   # seconds — how long the overlay stays on screen
+_OVERLAY_ACCENT_DUR = 2.0   # seconds — how long the overlay stays on screen
 
 
 def _probe_duration(path: str) -> float | None:
@@ -1211,7 +1368,9 @@ def apply_visual_effect(
         chains.append(f"[_ov_trimmed]null[_ov]")
 
     # Blend and convert back to yuv420p for the encoder.
-    chains.append(f"[1:v]format=gbrp[_clip]")
+    # Scale the clip to match the overlay — Pexels sometimes delivers non-standard
+    # resolutions (e.g. 2048×1080) that would cause the blend to fail with -22.
+    chains.append(f"[1:v]scale={width}:{height},format=gbrp[_clip]")
     chains.append(
         f"[_clip][_ov]"
         f"blend=all_mode={blend_mode}:all_opacity={opacity},"
@@ -1258,6 +1417,126 @@ def apply_visual_effect(
     except Exception as exc:
         logger.error(f"apply_visual_effect({effect}) exception: {exc}")
         return clip_path
+
+
+# Duration constants for lower_third compositing.
+_LT_ANIM_IN  = 0.40   # seconds — fade-in
+_LT_ANIM_OUT = 0.35   # seconds — fade-out
+
+# Optional user-supplied full-frame RGBA blob PNG for the lower_third backdrop.
+_LT_BLOB_PNG = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "resource", "lower_third_shadow.png")
+)
+
+
+def composite_lower_third(
+    footage_path: str,
+    graphic_path: str,
+    output_path: str,
+    width: int,
+    height: int,
+    threads: int = 4,
+) -> Optional[str]:
+    """
+    Composite a lower_third Revideo clip (white text on black) over stock footage.
+
+    Two-pass blend strategy — no chroma key needed:
+      1. Blob PNG (RGBA): overlaid on footage with its native alpha channel.
+         FFmpeg `overlay` respects the PNG's alpha, so the feathered blob appears
+         correctly without any colour contamination.
+      2. Text clip (white on black): composited via `screen` blend.
+         screen(footage, black=0) = footage  → black bg disappears
+         screen(footage, white=1) = white    → text stays white
+
+    Both the blob and the text fade in/out via separate FFmpeg `fade` filters
+    so they stay in sync.  Falls back to text-only (no blob) if the PNG is absent.
+    """
+    codec = _get_configured_video_codec()
+    footage_dur = _probe_duration(footage_path)
+    gfx_dur     = _probe_duration(graphic_path)
+    if not footage_dur or not gfx_dur:
+        logger.warning("composite_lower_third: could not probe clip durations")
+        return None
+
+    fi       = min(_LT_ANIM_IN,  gfx_dur / 4)
+    fo       = min(_LT_ANIM_OUT, gfx_dur / 4)
+    fo_start = max(0.0, gfx_dur - fo)
+
+    has_blob = os.path.isfile(_LT_BLOB_PNG)
+
+    if has_blob:
+        # Input 0: footage | Input 1: Revideo text clip | Input 2: blob PNG (via -loop 1)
+        # IMPORTANT: use gbrp (not rgba/rgb24) for screen blend inputs — blend=all_mode=screen
+        # operates on ALL channels; rgba corrupts the alpha channel into the output, and rgb24
+        # causes incorrect YUV↔RGB range conversion. gbrp is the correct planar RGB format.
+        filter_complex = (
+            # Footage: scale to target, gbrp (planar RGB, correct for screen blend)
+            f"[0:v]scale={width}:{height},format=gbrp[footage];"
+            # Blob PNG: RGBA is needed so overlay can use the native alpha channel
+            f"[2:v]scale={width}:{height},format=rgba,"
+            f"fade=t=in:st=0:d={fi:.3f}:alpha=1,"
+            f"fade=t=out:st={fo_start:.3f}:d={fo:.3f}:alpha=1[blob];"
+            # Overlay blob using its native alpha; convert result to gbrp (drop alpha)
+            f"[footage][blob]overlay=0:0,format=gbrp[with_blob];"
+            # Revideo text clip: gbrp (white text on black), fade RGB values for screen blend
+            f"[1:v]scale={width}:{height},format=gbrp,"
+            f"fade=t=in:st=0:d={fi:.3f},"
+            f"fade=t=out:st={fo_start:.3f}:d={fo:.3f}[text];"
+            # screen(footage_with_blob, black=0)=footage; screen(…, white=1)=white
+            f"[with_blob][text]blend=all_mode=screen,format=yuv420p[out]"
+        )
+        cmd = [
+            utils.get_ffmpeg_binary(), "-y",
+            "-i", footage_path,
+            "-i", graphic_path,
+            "-loop", "1", "-t", f"{gfx_dur + 0.1:.3f}", "-i", _LT_BLOB_PNG,
+            "-filter_complex", filter_complex,
+            "-map", "[out]",
+            "-map", "0:a?", "-c:a", "copy",
+            "-t", f"{footage_dur:.6f}",
+            "-c:v", codec, *_fast_preset_args(codec),
+            "-pix_fmt", "yuv420p",
+            "-threads", str(threads),
+            output_path,
+        ]
+    else:
+        # No blob PNG — just screen-blend the text over footage
+        filter_complex = (
+            f"[0:v]scale={width}:{height},format=gbrp[footage];"
+            f"[1:v]scale={width}:{height},format=gbrp,"
+            f"fade=t=in:st=0:d={fi:.3f},"
+            f"fade=t=out:st={fo_start:.3f}:d={fo:.3f}[text];"
+            f"[footage][text]blend=all_mode=screen,format=yuv420p[out]"
+        )
+        cmd = [
+            utils.get_ffmpeg_binary(), "-y",
+            "-i", footage_path,
+            "-i", graphic_path,
+            "-filter_complex", filter_complex,
+            "-map", "[out]",
+            "-map", "0:a?", "-c:a", "copy",
+            "-t", f"{footage_dur:.6f}",
+            "-c:v", codec, *_fast_preset_args(codec),
+            "-pix_fmt", "yuv420p",
+            "-threads", str(threads),
+            output_path,
+        ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=300)
+        if result.returncode != 0:
+            stderr = result.stderr.decode("utf-8", errors="replace")
+            logger.warning(
+                f"composite_lower_third failed (exit {result.returncode}): {stderr[-400:]}"
+            )
+            return None
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            logger.warning("composite_lower_third: output file is empty")
+            return None
+        return output_path
+    except Exception as exc:
+        logger.warning(f"composite_lower_third exception: {exc}")
+        return None
 
 
 def _open_video_clip_quietly(video_path: str, audio: bool = False) -> VideoFileClip:
