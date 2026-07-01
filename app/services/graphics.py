@@ -21,6 +21,17 @@ _RENDER_JS = os.path.join(_WORKER_DIR, "render.js")
 
 _RENDER_TIMEOUT = 180  # seconds
 
+# Gradient backgrounds served from revideo-worker/public/ — must match BG_VIDEOS in render.js.
+_BG_VIDEOS: list[str] = [
+    '/blue_gradient_bg.mp4',
+    '/orange_gradient_bg.mp4',
+    '/green_gradient_bg.mp4',
+    '/monochrome_gradient_bg.mp4',
+]
+
+# Per-job last-used background (module-level, persists for one job run).
+_last_bg_video: str = ""
+
 # Pool sizes per type — must match VARIANT_POOL array lengths in render.js.
 _POOL_SIZES: dict = {
     "lower_third": 1,
@@ -103,6 +114,8 @@ def render_graphic_clip(
         style:        Optional named style (e.g. "editorial", "callouts") — maps to a
                       specific variant, bypassing the no-consecutive rotation.
     """
+    global _last_bg_video
+
     if os.environ.get("REVIDEO_ENABLED", "1") == "0":
         logger.info(f"Revideo disabled (REVIDEO_ENABLED=0) — skipping {graphic_type} render")
         return None
@@ -114,6 +127,15 @@ def render_graphic_clip(
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
     variant = _pick_variant(graphic_type, style)
+    merged_vars = dict(variables or {})
+
+    # Inject background for infographic/list scenes, enforcing no-consecutive-repeat.
+    if graphic_type in ("infographic", "list"):
+        choices = [v for v in _BG_VIDEOS if v != _last_bg_video] or _BG_VIDEOS
+        chosen_bg = random.choice(choices)
+        _last_bg_video = chosen_bg
+        merged_vars["bgVideo"] = chosen_bg
+
     payload = {
         "type": graphic_type,
         "variant": variant,
@@ -122,7 +144,7 @@ def render_graphic_clip(
         "width": width,
         "height": height,
         "fps": fps,
-        "variables": variables or {},
+        "variables": merged_vars,
     }
 
     style_tag = f" style={style}" if style else ""

@@ -85,9 +85,13 @@ async function main() {
   }
   const projectFile = pool[variant % pool.length];
 
-  // Inject a random gradient background for infographic and list types.
+  // Inject a gradient background for infographic and list types.
+  // Python (graphics.py) picks the background for no-consecutive-repeat enforcement;
+  // fall back to random selection only when called standalone (e.g. manual testing).
   if (type === 'infographic' || type === 'list') {
-    variables.bgVideo = BG_VIDEOS[Math.floor(Math.random() * BG_VIDEOS.length)];
+    if (!variables.bgVideo) {
+      variables.bgVideo = BG_VIDEOS[Math.floor(Math.random() * BG_VIDEOS.length)];
+    }
   }
 
   try {

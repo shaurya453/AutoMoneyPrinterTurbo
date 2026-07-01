@@ -41,7 +41,7 @@ export default makeScene2D('list-c', function* (view) {
   const FADE_DUR    = 0.40;
   const ANIM_OUT    = 0.35;
   const titleTime_c = hasTitle ? 0.52 : 0;
-  const SWEEP_DUR   = Math.max(0.3, duration * 0.5 - titleTime_c - (n - 1) * STAGGER - FADE_DUR - ANIM_OUT);
+  const SWEEP_DUR   = Math.max(0.3, duration * 0.30 - titleTime_c - (n - 1) * STAGGER - FADE_DUR - ANIM_OUT);
 
   const floatRef = createRef<Rect>();
   const titleRef = createRef<Txt>();

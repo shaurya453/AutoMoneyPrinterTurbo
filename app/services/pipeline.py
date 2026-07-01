@@ -1056,6 +1056,7 @@ def start(job_path: str) -> Optional[dict]:
 
     clip_counter = 0  # unique index for clip filenames across all sentences
     obtained_duration = 0.0  # sum of planned durations that yielded a clip
+    _last_visual_effect: str = ""  # no-consecutive-repeat for overlay effects
     for idx, plan in enumerate(clip_plans):
         sent = plan["sent"]
         durations = plan["durations"]
@@ -1163,6 +1164,11 @@ def start(job_path: str) -> Optional[dict]:
                     )
 
             visual_effect = sent.get("visual_effect", "")
+            if visual_effect and visual_effect == _last_visual_effect:
+                logger.info(
+                    f"clip {clip_counter}: skipping consecutive repeat overlay '{visual_effect}'"
+                )
+                visual_effect = ""
             fetched = _fetch_clip(
                 sentence=sent,
                 sent_duration=clip_duration,
@@ -1181,6 +1187,7 @@ def start(job_path: str) -> Optional[dict]:
                 visual_effect=visual_effect,
             )
             clip_counter += 1
+            _last_visual_effect = visual_effect  # update after potential dedup clear
             if fetched:
                 clip_path, used_image = fetched
                 content_track_sent = sent.get("content_track", "broll")

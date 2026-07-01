@@ -38,7 +38,7 @@ export default makeScene2D('list', function* (view) {
   const STAGGER     = 0.35;
   const ANIM_OUT    = 0.35;
   const titleTime_c = hasTitle ? 0.55 : 0;
-  const ROW_DUR     = Math.max(0.4, duration * 0.5 - titleTime_c - (n - 1) * STAGGER - ANIM_OUT);
+  const ROW_DUR     = Math.max(0.4, duration * 0.30 - titleTime_c - (n - 1) * STAGGER - ANIM_OUT);
 
   const floatRef     = createRef<Rect>();
   const titleRef     = createRef<Txt>();

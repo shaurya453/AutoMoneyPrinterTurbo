@@ -36,7 +36,7 @@ export default makeScene2D('infographic-d', function* (view) {
   const STAGGER   = 0.30;
   const INTRO_DUR = 0.4 + 0.25;
   const END_DUR   = 0.3;
-  const COUNT_DUR = Math.max(0.5, duration * 0.5 - INTRO_DUR - (n - 1) * STAGGER - END_DUR);
+  const COUNT_DUR = Math.max(0.5, duration * 0.30 - INTRO_DUR - (n - 1) * STAGGER - END_DUR);
 
   const formatCount = (v: number, target: number): string => {
     if (Number.isInteger(target)) return String(Math.round(v));

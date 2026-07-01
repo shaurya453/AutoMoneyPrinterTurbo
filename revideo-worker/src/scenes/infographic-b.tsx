@@ -37,7 +37,7 @@ export default makeScene2D('infographic-b', function* (view) {
   const STAGGER    = 0.22;
   const INTRO_DUR  = 0.50 + 0.22;
   const END_DUR    = 0.35;
-  const BAR_DUR    = Math.max(0.5, duration * 0.5 - INTRO_DUR - (n - 1) * STAGGER - END_DUR);
+  const BAR_DUR    = Math.max(0.5, duration * 0.30 - INTRO_DUR - (n - 1) * STAGGER - END_DUR);
 
   const totalH   = BAR_H + (n - 1) * ROW_GAP;
   const chartTop = -totalH / 2;
