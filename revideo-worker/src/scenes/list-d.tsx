@@ -48,9 +48,10 @@ export default makeScene2D('list-d', function* (view) {
     return {x, y};
   });
 
-  const STAGGER  = 0.30;
-  const FADE_DUR = 0.70;
-  const ANIM_OUT = 0.35;
+  const STAGGER     = 0.30;
+  const ANIM_OUT    = 0.35;
+  const titleTime_c = hasTitle ? 0.52 : 0;
+  const FADE_DUR    = Math.max(0.4, duration * 0.5 - titleTime_c - (n - 1) * STAGGER - ANIM_OUT);
 
   const floatRef = createRef<Rect>();
   const titleRef = createRef<Txt>();

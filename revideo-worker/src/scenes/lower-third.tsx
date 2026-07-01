@@ -26,7 +26,7 @@ export default makeScene2D('lower-third', function* (view) {
         x={TEXT_X}
         y={TEXT_Y}
         offsetX={-1}
-        fontSize={36}
+        fontSize={44}
         fontWeight={600}
         fontFamily={'Playfair Display, serif'}
         fill={'#ffffff'}

@@ -39,7 +39,9 @@ export default makeScene2D('infographic', function* (view) {
   const BAR_SLOT_W = CHART_W / n;
   const BAR_W      = Math.min(BAR_SLOT_W * 0.55, 180);
   const STAGGER    = 0.22;
-  const BAR_DUR    = 2.0;
+  const INTRO_DUR  = 0.6 + 0.25;
+  const END_DUR    = 0.4;
+  const BAR_DUR    = Math.max(0.5, duration * 0.5 - INTRO_DUR - (n - 1) * STAGGER - END_DUR);
 
   const targetHeights = values.slice(0, n).map(v => (v / maxVal) * MAX_BAR_H);
   const barXs = Array.from({length: n}, (_, i) => -CHART_W / 2 + BAR_SLOT_W * (i + 0.5));

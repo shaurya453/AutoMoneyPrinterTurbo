@@ -33,8 +33,10 @@ export default makeScene2D('infographic-c', function* (view) {
   const STEM_W     = 5;
   const DOT_D      = 36;
   const STAGGER    = 0.22;
-  const STEM_DUR   = 1.8;
   const DOT_DUR    = 0.40;
+  const INTRO_DUR  = 0.55 + 0.22;
+  const END_DUR    = DOT_DUR + 0.35;
+  const STEM_DUR   = Math.max(0.5, duration * 0.5 - INTRO_DUR - (n - 1) * STAGGER - END_DUR);
 
   const stemXs   = Array.from({length: n}, (_, i) => -CHART_W / 2 + BAR_SLOT_W * (i + 0.5));
   const targetHs = values.slice(0, n).map(v => (v / maxVal) * MAX_STEM_H);
