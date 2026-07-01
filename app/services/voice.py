@@ -112,6 +112,11 @@ def tts(
     voice_file: str,
     voice_volume: float = 1.0,
 ) -> Union[SubMaker, None]:
+    # Collapse mid-sentence newlines (AI line-wrapping, soft wraps in script.txt)
+    # into spaces. edge-tts treats \n as a paragraph break — it inserts a pause
+    # and resets pitch — so any embedded newline causes an audible break in the VO.
+    text = re.sub(r'\s*\n\s*', ' ', text).strip()
+
     engine = str(config.app.get("tts_engine", "edge")).lower()
 
     if voice_name.lower().startswith(_KOKORO_PREFIX):
