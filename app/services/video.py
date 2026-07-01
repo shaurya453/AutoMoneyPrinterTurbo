@@ -1268,8 +1268,7 @@ def render_ken_burns_clip(
     return output_path if os.path.exists(output_path) else ""
 
 
-_OVERLAY_FADE_DUR   = 0.5   # seconds — fade-in at start, fade-out at end of accent window
-_OVERLAY_ACCENT_DUR = 2.0   # seconds — how long the overlay stays on screen
+_OVERLAY_FADE_DUR = 0.5   # seconds — fade-in at start, fade-out at end
 
 
 def _probe_duration(path: str) -> float | None:
@@ -1293,17 +1292,17 @@ def apply_visual_effect(
     height: int = 1080,
     threads: int = 4,
 ) -> str:
-    """Composite a motion overlay as a 2-3 second accentuator at the start of clip_path.
+    """Composite a motion overlay onto clip_path for its full natural duration.
 
-    The overlay is trimmed to _OVERLAY_ACCENT_DUR seconds (clamped to the clip
-    and overlay durations), faded in at 0 and faded out at the end of the accent
-    window, then blended onto the clip.  The remainder of the clip plays clean.
-
-    The neutral-color pad that fills the rest of the clip is chosen so that the
-    blend is a mathematical identity after the accent window ends:
+    The overlay plays ONCE from start to finish (no looping). If the clip is
+    shorter than the overlay, the overlay is trimmed to fit. If the clip is
+    longer, the overlay plays for its natural duration, then the remainder of
+    the clip plays clean via a neutral-color pad that makes the blend a
+    mathematical identity:
       - screen blend: pad with black  (screen(clip, 0) = clip)
       - multiply blend: pad with white (multiply(clip, 1) = clip)
 
+    A fade-in and fade-out of _OVERLAY_FADE_DUR seconds is applied.
     Returns output_path on success, clip_path unchanged on any failure.
     Audio is passed through unchanged.
     """
@@ -1328,10 +1327,9 @@ def apply_visual_effect(
     blend_mode = overlay_cfg["mode"]
     opacity    = overlay_cfg["opacity"]
 
-    # Accent window: use at most _OVERLAY_ACCENT_DUR seconds of the overlay,
-    # clamped to the overlay and clip durations so nothing overruns.
-    accent = min(_OVERLAY_ACCENT_DUR, ov_dur, clip_dur)
-    # Clamp fade so it never exceeds 25% of the accent window.
+    # Play the full overlay once, trimmed to clip duration if the clip is shorter.
+    accent = min(ov_dur, clip_dur)
+    # Clamp fade so it never exceeds 25% of the overlay window.
     fade   = min(_OVERLAY_FADE_DUR, accent / 4)
     fade_out_start = max(0.0, accent - fade)
 
@@ -1362,17 +1360,18 @@ def apply_visual_effect(
             f"format=gbrp[_ov_pad]"
         )
         chains.append(
-            f"[_ov_trimmed][_ov_pad]concat=n=2:v=1:a=0,setpts=PTS-STARTPTS[_ov]"
+            f"[_ov_trimmed][_ov_pad]concat=n=2:v=1:a=0,setpts=PTS-STARTPTS[_ov_final]"
         )
+        ov_label = "_ov_final"
     else:
-        chains.append(f"[_ov_trimmed]null[_ov]")
+        ov_label = "_ov_trimmed"
 
     # Blend and convert back to yuv420p for the encoder.
     # Scale the clip to match the overlay — Pexels sometimes delivers non-standard
     # resolutions (e.g. 2048×1080) that would cause the blend to fail with -22.
     chains.append(f"[1:v]scale={width}:{height},format=gbrp[_clip]")
     chains.append(
-        f"[_clip][_ov]"
+        f"[_clip][{ov_label}]"
         f"blend=all_mode={blend_mode}:all_opacity={opacity},"
         f"format=yuv420p"
         f"[out]"
@@ -1425,7 +1424,7 @@ _LT_ANIM_OUT = 0.35   # seconds — fade-out
 
 # Optional user-supplied full-frame RGBA blob PNG for the lower_third backdrop.
 _LT_BLOB_PNG = os.path.normpath(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "resource", "lower_third_shadow.png")
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "resource", "graphics", "lower_third_shadow.png")
 )
 
 

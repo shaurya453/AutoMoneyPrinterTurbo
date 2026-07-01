@@ -70,7 +70,7 @@ export default makeScene2D('infographic-b', function* (view) {
           fontSize={52} fontWeight={700} fontFamily={'Stack Sans Text, sans-serif'}
           fill={'#ffffff'} opacity={0}
           textAlign={'center'} justifyContent={'center'}
-          width={1680} textWrap={true}
+          width={1920} textWrap={true}
         />
         <Rect ref={axisRef} width={2} height={totalH + 48} fill={'#3a3a3a'} x={AXIS_X} y={0} opacity={0} />
         {Array.from({length: n}, (_, i) => (

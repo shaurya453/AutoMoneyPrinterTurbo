@@ -54,6 +54,9 @@ Re-running with the same title creates `<title> (2)`, `<title> (3)`, etc. automa
 | `app/config.py` | Loads `config.toml` |
 | `AGENT_GUIDE.md` | Full enrichment spec for the AI agent |
 | `resource/songs/` | Local BGM MP3s (fallback when online search is empty) |
+| `resource/backgrounds/` | Gradient background MP4s served by Revideo/Vite via symlinks in `revideo-worker/public/` |
+| `resource/graphics/` | Static compositing assets (e.g. `lower_third_shadow.png`) |
+| `resource/overlays/` | Motion overlay MP4s blended during rendering (screen / multiply modes) |
 | `storage/tasks/<title>/` | Per-job working directory |
 
 ### Revideo motion-graphics worker
@@ -65,11 +68,9 @@ Lives at `revideo-worker/` (inside the repository root).
 | `render.js` | CLI: reads JSON from stdin, routes to project file by `type`+`variant`, calls `renderVideo()`, prints MP4 path to stdout |
 | `src/projects/lower-third.ts` | Revideo project for `lower_third` (single variant) |
 | `src/projects/infographic{,-b,-c,-d}.ts` | Revideo projects for infographic variants A–D |
-| `src/projects/transition{,-b,-c,-d}.ts` | Revideo projects for transition variants A–D |
 | `src/projects/list{,-b,-c,-d}.ts` | Revideo projects for list variants A–D |
 | `src/scenes/lower-third.tsx` | Lower third — left-anchored label with semi-transparent backdrop, fade in/out |
 | `src/scenes/infographic{,-b,-c,-d}.tsx` | Scene files: A vert bars · B horiz bars · C lollipop · D callouts |
-| `src/scenes/transition{,-b,-c,-d}.tsx` | Scene files: A line · B panel sweep · C brackets · D crosshair |
 | `src/scenes/list{,-b,-c,-d}.tsx` | Scene files: A bullets · B numbered · C cascade · D card grid |
 | `package.json` | `@revideo/{core,2d,renderer,vite-plugin,ui}` v0.10.4 |
 
@@ -129,7 +130,6 @@ The rendered H.264 MP4 slots into `temp/clips/` identically to any stock clip �
 |---|---|---|
 | `lower_third` | single | `label` (2–6 words) |
 | `infographic` | A: vertical bars · B: horizontal bars · C: lollipop · D: number callouts | `title`, `labels[]`, `values[]`, `unit` |
-| `transition` | A: line · B: panel sweep · C: corner brackets · D: crosshair | `label`, `sublabel` |
 | `list` | A: bullets · B: numbered · C: cascade reveal · D: card grid | `items[]`, `title` |
 
 Named style hints (e.g. `"style": "callouts"`) map to specific variants — see `AGENT_GUIDE.md`. The pipeline rotates variants automatically when no style is specified to avoid consecutive repeats.

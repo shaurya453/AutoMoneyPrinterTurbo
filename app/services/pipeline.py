@@ -1067,11 +1067,14 @@ def start(job_path: str) -> Optional[dict]:
         )
 
         got_any = False
+        _lt_gfx_clip: Optional[str] = None   # lower_third Revideo clip pending composite
 
         # Narrated graphic — sentence has real VO text AND graphic_type set.
         # Render a Revideo clip sized to the full Whisper-derived sentence duration
         # instead of fetching stock footage.  If the render fails, falls through to
         # the normal footage fetch so the sentence is never left visually empty.
+        # Exception: lower_third overlays ON footage rather than replacing it —
+        # the rendered clip is stashed in _lt_gfx_clip and composited after fetch.
         if sent.get("graphic_type") and sent.get("text"):
             from app.services import graphics as _graphics
             whisper_dur = sum(durations)       # exact audio slot from Whisper
@@ -1114,12 +1117,16 @@ def start(job_path: str) -> Optional[dict]:
                         f"sentence {idx+1}: anim trim failed — using full {render_dur:.2f}s clip"
                     )
             if rendered:
-                ordered_clips.append(rendered)
-                planned_clip_durations.append(_trim_target)
-                got_any = True
-                obtained_duration += _trim_target
-                video_clip_count += 1
-                continue  # graphic is the visual — skip footage fetch
+                if sent.get("graphic_type") == "lower_third":
+                    # lower_third overlays ON footage — stash and fall through to fetch.
+                    _lt_gfx_clip = rendered
+                else:
+                    ordered_clips.append(rendered)
+                    planned_clip_durations.append(_trim_target)
+                    got_any = True
+                    obtained_duration += _trim_target
+                    video_clip_count += 1
+                    continue  # standalone graphic — skip footage fetch
             else:
                 logger.warning(
                     f"sentence {idx+1}: narrated graphic render failed — falling back to footage"
@@ -1185,6 +1192,23 @@ def start(job_path: str) -> Optional[dict]:
                         width=eff_w, height=eff_h,
                         threads=os.cpu_count() or 4,
                     )
+                # lower_third composite — overlay the Revideo label on this footage clip.
+                if _lt_gfx_clip:
+                    lt_out = clip_path.replace(".mp4", "_lt.mp4")
+                    lt_w, lt_h = video_aspect.to_resolution()
+                    lt_result = video.composite_lower_third(
+                        clip_path, _lt_gfx_clip, lt_out,
+                        lt_w, lt_h, threads=os.cpu_count() or 4,
+                    )
+                    if lt_result:
+                        clip_path = lt_result
+                    else:
+                        logger.warning(
+                            f"sentence {idx+1}: lower_third composite failed — "
+                            "footage used without label overlay"
+                        )
+                    _lt_gfx_clip = None   # consume — don't apply to subsequent clips
+
                 ordered_clips.append(clip_path)
                 planned_clip_durations.append(clip_duration + trim_buffer)
                 got_any = True
@@ -1375,15 +1399,32 @@ def start(job_path: str) -> Optional[dict]:
             f"outro: combined ({combined_duration:.2f}s) covers audio+tail ({target_duration:.2f}s) — no extension needed"
         )
     else:
-        # Gap to fill: loop the last clip so the outro plays live footage
-        # rather than a frozen frame, then fade to black in generate_video.
+        # Gap to fill: play the tail of the last clip in REVERSE so the outro
+        # flows seamlessly from the last frame backwards — no visible loop seam,
+        # and any Ken Burns animation continues moving through the fade-out.
         outro_path = os.path.join(temp_dir, "outro.mp4")
         last_clip = ordered_clips[-1]
         try:
+            # Probe the last clip's duration so we only seek within valid range.
+            probe = subprocess.run(
+                [
+                    "ffprobe", "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    last_clip,
+                ],
+                capture_output=True, text=True, timeout=30,
+            )
+            last_clip_dur = float(probe.stdout.strip() or "5.0")
+            # Seek to where we need to start reading backwards; clamp so we
+            # never seek past the clip's own start.
+            seek_back = min(needed_extra, last_clip_dur - 0.05)
+            seek_pos = max(0.0, last_clip_dur - seek_back)
             subprocess.run(
                 [
                     "ffmpeg", "-y", "-loglevel", "error",
-                    "-stream_loop", "-1", "-i", last_clip,
+                    "-ss", f"{seek_pos:.3f}", "-i", last_clip,
+                    "-vf", "reverse",
                     "-t", f"{needed_extra:.3f}",
                     *_ENC, "-an", outro_path,
                 ],
@@ -1402,11 +1443,11 @@ def start(job_path: str) -> Optional[dict]:
                 check=True, capture_output=True, timeout=300,
             )
             logger.info(
-                f"outro: looped last clip {needed_extra:.2f}s → "
+                f"outro: reversed last-clip tail {needed_extra:.2f}s → "
                 f"extended={combined_duration + needed_extra:.2f}s (audio={audio_duration}s)"
             )
         except Exception as exc:
-            logger.warning(f"outro loop failed ({exc}), using combined as-is")
+            logger.warning(f"outro reverse failed ({exc}), using combined as-is")
             extended_path = combined_path
 
     # ------------------------------------------------------------------ #

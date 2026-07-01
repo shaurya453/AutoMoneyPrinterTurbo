@@ -3,7 +3,7 @@
  * segment, and writes the output file path to stdout.
  *
  * stdin JSON fields:
- *   type       – graphic type: "lower_third" | "infographic" | "transition" | "list"
+ *   type       – graphic type: "lower_third" | "infographic" | "list"
  *   outPath    – absolute path for the rendered MP4
  *   duration   – clip length in seconds
  *   width      – output width in pixels  (default 1920)
@@ -17,6 +17,15 @@ import {fileURLToPath} from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// Gradient background MP4s served from revideo-worker/public/ by Vite.
+// Symlinks in public/ point to resource/*.mp4 — no file:// needed.
+const BG_VIDEOS = [
+  '/blue_gradient_bg.mp4',
+  '/orange_gradient_bg.mp4',
+  '/green_gradient_bg.mp4',
+  '/monochrome_gradient_bg.mp4',
+];
+
 // Maps graphic type → ordered pool of Revideo project files (one per variant).
 // Variant 0 is the default (original). The caller passes a `variant` index so
 // graphics.py can enforce no-consecutive-repeat selection without needing state here.
@@ -29,12 +38,6 @@ const VARIANT_POOL = {
     path.join(__dirname, 'src', 'projects', 'infographic-b.ts'),  // B — horizontal bars
     path.join(__dirname, 'src', 'projects', 'infographic-c.ts'),  // C — lollipop chart
     path.join(__dirname, 'src', 'projects', 'infographic-d.ts'),  // D — number callouts
-  ],
-  transition: [
-    path.join(__dirname, 'src', 'projects', 'transition.ts'),     // A — line + label
-    path.join(__dirname, 'src', 'projects', 'transition-b.ts'),   // B — panel sweep
-    path.join(__dirname, 'src', 'projects', 'transition-c.ts'),   // C — corner brackets
-    path.join(__dirname, 'src', 'projects', 'transition-d.ts'),   // D — crosshair
   ],
   list: [
     path.join(__dirname, 'src', 'projects', 'list.ts'),           // A — bullet list (slides from left)
@@ -81,6 +84,11 @@ async function main() {
     process.exit(1);
   }
   const projectFile = pool[variant % pool.length];
+
+  // Inject a random gradient background for infographic and list types.
+  if (type === 'infographic' || type === 'list') {
+    variables.bgVideo = BG_VIDEOS[Math.floor(Math.random() * BG_VIDEOS.length)];
+  }
 
   try {
     await renderVideo({

@@ -58,6 +58,8 @@ export default makeScene2D('infographic-d', function* (view) {
       }
       <Rect width={1920} height={1080} fill={'rgba(0,0,0,0.52)'} />
       <Rect ref={floatRef} width={1920} height={1080} layout={false}>
+        <Txt text={' '} x={-9999} y={0} fontSize={52} fontWeight={700}
+          fontFamily={'Stack Sans Text, sans-serif'} fill={'#000001'} />
         <Txt
           ref={titleRef}
           text={title}
@@ -65,7 +67,7 @@ export default makeScene2D('infographic-d', function* (view) {
           fontSize={52} fontWeight={700} fontFamily={'Stack Sans Text, sans-serif'}
           fill={'#ffffff'} opacity={0}
           textAlign={'center'} justifyContent={'center'}
-          width={1680} textWrap={true}
+          width={1920} textWrap={true}
         />
         <Rect ref={divRef} width={0} height={1} fill={'#2a2a2a'} y={-320} />
         {Array.from({length: n}, (_, i) => (

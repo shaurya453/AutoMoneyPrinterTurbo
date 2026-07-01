@@ -47,10 +47,12 @@ export default makeScene2D('list-b', function* (view) {
         : <Rect width={1920} height={1080} fill={'#060616'} />
       }
       <Rect width={1920} height={1080} fill={'rgba(0,0,0,0.52)'} />
-      <Rect ref={floatRef} width={1920} height={1080} opacity={1} layout={false}>
+      <Rect ref={floatRef} width={1920} height={1080} layout={false}>
+        <Txt text={' '} x={-9999} y={0} fontSize={52} fontWeight={700}
+          fontFamily={'Stack Sans Text, sans-serif'} fill={'#000001'} />
         <Txt ref={titleRef} text={title} x={0} y={TITLE_Y} fontSize={52} fontWeight={700}
           fontFamily={'Stack Sans Text, sans-serif'} fill={'#ffffff'} opacity={0} textAlign={'center'}
-          justifyContent={'center'} width={1600} textWrap={true} />
+          justifyContent={'center'} width={1920} textWrap={true} />
         {Array.from({length: n}, (_, i) => (
           <Txt ref={numRefs[i]} text={String(i + 1).padStart(2, '0') + '.'}
             fontSize={52} fontWeight={700} fontFamily={'Stack Sans Text, sans-serif'} fill={'#4fcef7'}

@@ -85,7 +85,7 @@ export default makeScene2D('infographic', function* (view) {
           fontSize={56} fontWeight={700} fontFamily={'Stack Sans Text, sans-serif'}
           fill={'#ffffff'} opacity={0}
           textAlign={'center'} justifyContent={'center'}
-          textWrap={true} width={1680}
+          textWrap={true} width={1920}
         />
         <Rect ref={axisRef} width={CHART_W + 60} height={2} fill={'#444444'} y={AXIS_Y} opacity={0} />
         {Array.from({length: n}, (_, i) => (

@@ -23,7 +23,7 @@ venv/bin/python sentence_prep.py --script "storage/tasks/My Video/script.txt" \
 Set `video_topic`, `video_type`, and (thematic only) `motif_palette` at the job root. Patch only the fields listed here on each sentence — **do not rebuild the array from scratch**.
 
 > **CRITICAL — never clear `text`.**
-> `sentence_prep.py` writes each narration sentence into `text`. Whisper uses it for timestamp alignment. If you blank `text` on any `broll`/`named` sentence the entire pipeline breaks: every clip gets a 2-second placeholder, subtitles are empty, and 50+ irrelevant gap-fill clips are generated. **Leave `text` exactly as written. Patch only the fields below.**
+> `sentence_prep.py` writes each narration sentence into `text`. Whisper uses it for timestamp alignment. If you blank `text` on any sentence the entire pipeline breaks: every clip gets a 2-second placeholder, subtitles are empty, and 50+ irrelevant gap-fill clips are generated. **Leave `text` exactly as written. Patch only the fields below.**
 
 ---
 
@@ -64,13 +64,15 @@ One sentence describing the shot — used by the CLIP relevance filter to rank a
 - Describes the **shot** (subject, setting, composition) — not a search query
 - Specific enough to reject off-topic stock: `"a worried shopper reading a discontinued label in a supermarket aisle"` — not `"a person looking surprised"`
 - Required on every sentence, including `media_type: "image"` ones
-- **No two sentences may share the same caption.** Duplicate captions break the relevance filter — it can't distinguish good from bad when all sentences score against the same description.
+- **No two sentences may share the same caption.** Duplicate captions break the relevance filter.
 
 ---
 
 ### `visual_effect`
 
-Motion overlay composited during rendering — each effect is a looping MP4 blended over the clip at screen mode. **Target ≤20% of `broll`/`named` sentences** — assign only at distinct narrative beats where the effect genuinely accentuates what's on screen. Leave blank for neutral or transitional clips. Decide now — you wrote the script and know the emotional beat of each sentence.
+Motion overlay composited during rendering. **Target ≤20% of `broll`/`named` sentences** — assign only at distinct narrative beats where the effect genuinely accentuates what's on screen. Leave blank for neutral or transitional clips.
+
+> **Hook Zone exception:** sentences 0–4 must carry at least 2 visual effects regardless of the global 20% cap — see Hook Zone below.
 
 | Value | Overlay | When to use |
 |---|---|---|
@@ -88,31 +90,25 @@ Motion overlay composited during rendering — each effect is a looping MP4 blen
 
 **Rules:**
 - Never set on `graphic` sentences.
-- **Never on two consecutive sentences** — regardless of whether the effects are different types. Always separate any two effect-bearing sentences with ≥2 plain (no-effect) sentences in between.
+- **Never on two consecutive sentences** — always separate effect-bearing sentences with ≥2 plain sentences.
 - `sepia`+`noir` combined ≤1 per video. `tech`+`hacker_tech` combined ≤1 per video.
-- Use only when the emotional beat **strongly** calls for it — to accentuate the specific image on screen. Don't assign effects decoratively or mechanically to fill a quota.
-
-**Audit (required):** effect-bearing sentences ≤20% of all `broll`/`named`. Confirm no two adjacent sentences both carry effects. `sepia`+`noir` combined ≤1. `tech`+`hacker_tech` combined ≤1.
 
 ---
 
 ### `content_track`
 
-- **`"named"`** — `[0]` is a specific, uniquely identifiable entity. Routes to Google Images (Serper) first. `media_type` is ignored for the primary fetch.
+- **`"named"`** — `[0]` is a specific, uniquely identifiable entity. Routes to Google Images (Serper) first.
 - **`"broll"`** — generic scene, action, category, or location. Routes to stock video/image sources.
-- **`"graphic"`** — animated graphic rendered by Revideo (title card, infographic, transition, list). See Graphic Cues section below.
 
 **Decision rule:** if you can Google the entity by exact name and expect the right image, use `"named"`. If it's a category or scene type, use `"broll"`. **70–80% of sentences should be `"broll"`** — Serper quota is finite.
 
-**Entity continuity (critical):** once the narration names a specific entity and you assign `"named"`, keep `"named"` with that entity's visuals for every subsequent sentence that still discusses the same entity — even if those sentences don't repeat the name. Only revert to `"broll"` when the narration has genuinely moved on to a different topic or entity. This applies to all named entity types: products, speakers, people, brands, cities, dishes, etc.
+**Entity continuity (critical):** once the narration names a specific entity and you assign `"named"`, keep `"named"` with that entity's visuals for every subsequent sentence that still discusses the same entity — even if those sentences don't repeat the name. Only revert to `"broll"` when the narration has genuinely moved on.
 
-Example — a speaker review that names the KEF LS50 Meta then keeps discussing it:
 | Sentence | `visual_concepts[0]` | `content_track` |
 |---|---|---|
 | "The KEF LS50 Meta costs twelve hundred dollars." | `"KEF LS50 Meta speaker pair"` | `"named"` |
-| "It uses a Uni-Q driver array at its heart." | `"KEF LS50 Meta driver detail"` | `"named"` ← still on the same product |
-| "The cabinet is surprisingly compact." | `"KEF LS50 Meta cabinet side view"` | `"named"` ← still on the same product |
-| "Next up is the Focal Aria 906." | `"Focal Aria 906 speaker"` | `"named"` ← new entity, new named track |
+| "It uses a Uni-Q driver array at its heart." | `"KEF LS50 Meta driver detail"` | `"named"` ← still on same product |
+| "Next up is the Focal Aria 906." | `"Focal Aria 906 speaker"` | `"named"` ← new entity |
 
 **Use `"named"` for:** named people (portraits), branded products/SKUs, company logos/HQ, specific vehicles/aircraft/ships, named buildings/landmarks, historical events, named documents/laws/reports, named artworks, species with a distinctive look.
 
@@ -124,20 +120,11 @@ Example — a speaker review that names the KEF LS50 Meta then keeps discussing 
 
 For `"named"` branded products, also add the key visual identifier to `must_show`.
 
-| Sentence | `visual_concepts[0]` | `content_track` |
-|---|---|---|
-| "Elon Musk unveiled the Cybertruck" | `"Elon Musk portrait"` | `"named"` |
-| "Tesla dominates EV sales" | `"Tesla logo"` | `"named"` |
-| "The SR-71 flew at Mach 3.2" | `"SR-71 Blackbird aircraft"` | `"named"` |
-| "The Eiffel Tower was built in 1889" | `"Eiffel Tower Paris"` | `"named"` |
-| "I walked through the freezer aisle" | `"frozen food aisle"` | `"broll"` |
-| "Cars lined up for miles" | `"cars in traffic jam"` | `"broll"` |
-
 ---
 
 ### Graphic Cues
 
-All graphics are **narrated** — the graphic plays on screen while the narrator speaks. Keep the narration in `text` and in `video_script`. Set `content_track: "broll"`, `graphic_type`, and `variables` on the sentence. Do NOT set `duration` — Whisper derives it. Add `visual_concepts` and `visual_caption` as footage fallback if render fails.
+All graphics are **narrated** — the graphic plays on screen while the narrator speaks. Keep the narration in `text` and in `video_script`. Set `graphic_type` and `variables` on the sentence. Set `content_track` the same as any other sentence (`"broll"` for generic context, `"named"` when showing a named entity). Do NOT set `duration` — Whisper derives it. Add `visual_concepts` and `visual_caption` as footage fallback if render fails.
 
 **ALL fields below must be placed inside a `"variables": {}` object on the sentence — not at the top level.** The pipeline reads `sent["variables"]`; top-level `title`, `style`, etc. are silently ignored and the graphic renders blank.
 
@@ -145,37 +132,33 @@ All graphics are **narrated** — the graphic plays on screen while the narrator
 |---|---|
 | `"lower_third"` | `label` (2–6 words, title case — entity name or identifier) |
 | `"infographic"` | `title`, `labels[]`, `values[]`, optional `unit`, `style` |
-| `"transition"` | `label` (≤4 words), optional `sublabel`, `style` |
 | `"list"` | `items[]` (2–6 strings), optional `title`, `style` |
 
 | Type | Styles (pick one, or omit to auto-rotate) |
 |---|---|
 | `lower_third` | (no styles — single preset) |
 | `infographic` | `"bars"` · `"horizontal"` (long labels) · `"lollipop"` · `"callouts"` (2–3 standalone stats) |
-| `transition` | `"line"` · `"sweep"` · `"brackets"` · `"crosshair"` |
 | `list` | `"bullets"` · `"numbered"` (ordered) · `"cascade"` · `"grid"` (4–6 equal-weight items) |
 
 **When to insert:**
 
-| Trigger | Type | Budget |
-|---|---|---|
-| Named entity on screen where a text identifier adds genuine viewer value | `lower_third` | 0–3 |
-| 2+ quantities the viewer must compare side by side | `infographic` | 0–2 |
-| Parallel enumerable items where every item is a single short sentence | `list` | 0–1 |
-| Genuine narrative leap — time jump, location shift, major tone change | `transition` | 0–2 |
+| Trigger | Type | Budget | Hook Zone (sent 0–4) |
+|---|---|---|---|
+| Named entity on screen where a text identifier adds genuine viewer value | `lower_third` | 0–3 | **BANNED** |
+| 2+ quantities the viewer must compare side by side | `infographic` | 0–2 | **BANNED** |
+| Parallel enumerable items where every item is a single short sentence | `list` | 0–1 | **BANNED** |
 
-**Budget rule:** lower_third + infographic + list + transition combined ≤ 4. Total graphics ≤ 5. Lower thirds only on named entities.
+**Budget rule:** lower_third + infographic + list combined ≤ 3. Total graphics ≤ 4.
 
 **Handling list items:** `sentence_prep.py` creates one stub per enumerated item. Merge them:
 1. Extract every item to its core phrase and collect in `variables.items`.
-2. **Delete every item stub sentence** — leave zero stubs. Missing stubs make the list show fewer items than scripted.
-3. Set `graphic_type: "list"` on the intro sentence (Pattern 2 preferred).
+2. **Delete every item stub sentence** — leave zero stubs.
+3. Set `graphic_type: "list"` on the intro sentence.
 Only use `list` when every item fits in one short sentence — if any item needs 2+ sentences, use regular broll for all.
 
 **Type-specific rules:**
-- `lower_third`: `label` is 2–6 words, title case, no punctuation. Use only when the entity name on screen adds genuine viewer value — a brand being reviewed, a person being named, a product in close-up, a historical artifact being examined. Do NOT use for generic broll, locations the narrator merely passes through, or entities obvious from context. The AI decides: if adding a label would feel gratuitous or redundant, omit it entirely.
+- `lower_third`: `label` is 2–6 words, title case, no punctuation. Only when the entity name adds genuine viewer value — a brand being reviewed, a person being named, a product in close-up. Do NOT use for generic broll or entities obvious from context. Strictly forbidden in sentences 0–4.
 - `infographic`: `labels` and `values` same length; 2–8 data points; all `values` positive. `"callouts"` for 2–3 standalone stats. `"horizontal"` when any label is >3 words.
-- `transition`: `label` ≤4 words, title case. Only real structural pivots — not paragraph breaks.
 - `list`: 2–6 items. Single-sentence items only. For 2 numerically differing items, use `"infographic"` `"callouts"` instead. `"grid"` only for 4–6 items.
 
 ---
@@ -235,9 +218,9 @@ Ignored for `content_track: "named"` (always image). For real places the narrati
     {
       "text": "The sentence as it appears in the script.",  // NEVER modify this field
       "visual_concepts": ["concrete scene description", "broader fallback"],
-      "content_track": "broll",        // "broll" | "named" | "graphic"
+      "content_track": "broll",        // "broll" | "named"
       "visual_caption": "one sentence describing the shot",
-      "visual_effect": "",             // see table above — 15–25% of sentences
+      "visual_effect": "",             // see table above — ≤20% of sentences
       "media_type": "video",           // "video" | "image"
       "assigned_motif": "...",         // thematic only
       "must_show": [],
@@ -293,21 +276,64 @@ Match `bgm_search_term` to tone: `"tense thriller score"`, `"uplifting corporate
 
 ---
 
+## Hook Zone — Sentences 0–4
+
+The first 30 seconds determine whether a viewer stays. Apply stricter rules here.
+
+### Hard bans (sentences 0–4)
+
+- **All graphic types (`lower_third`, `infographic`, `list`) are forbidden.** Save data graphics and name labels for after the viewer is hooked.
+- **`media_type: "image"` on any `broll` sentence is forbidden.** Static photos kill opening pace.
+
+### Required (sentences 0–4)
+
+| Rule | Why |
+|---|---|
+| `media_type: "video"` on every `broll` sentence | Motion holds attention; stills release it |
+| All 3 `visual_concepts` slots filled | Maximum variety across the 5 opening cuts |
+| Distinct `visual_concepts[0]` on every sentence — no repeats | Consecutive similar shots feel like a slideshow |
+| **At least 2 of the 5 sentences carry a `visual_effect`** | Cinematic overlays signal production quality immediately |
+| No two consecutive hook sentences share an effect | Effect saturation desensitizes; spacing builds contrast |
+
+**Effect placement example:**
+```
+sent 0: warmth   (effect)
+sent 1: —
+sent 2: —
+sent 3: revelation  (effect)
+sent 4: —
+```
+
+### Strongly recommended (sentences 0–4)
+
+- **Write hook sentences at 8–14 words.** Shorter sentences → shorter clips → faster cut rate.
+- **Use active, kinetic visual concepts.** `"engineer soldering circuit board close-up"` beats `"technology office interior"`. `"water rushing over rocks"` beats `"river landscape"`.
+- **Vary depth and scale** — mix extreme close-ups, medium shots, and wider contexts.
+
+---
+
 ## Step 2.5 — Review Pass (mandatory)
 
-- Is `[0]` physically showable for *that specific sentence* (not just the video theme)?
-- No `video_topic` words repeated in any `visual_concepts` entry?
-- `[1]`/`[2]` genuinely broader than `[0]` — not synonyms?
-- Every named entity marked `"named"`? Every generic scene `"broll"`?
-- Any two sentences sharing the same `visual_caption`? (must be zero)
-- `max_image_ratio` set at job root?
-- No two consecutive sentences with the same `assigned_motif`? (thematic)
-- Unique `[0]` count ≥ `max(15, ceil(N/4))`?
-- Effects: ≤20% of broll/named; no two adjacent sentences both have effects; sepia+noir combined ≤1; tech+hacker_tech combined ≤1?
-- Lower thirds (`lower_third`) only on named entities where a label adds genuine viewer value?
-- All graphics are narrated: real `text` in `video_script`, no `duration`, `visual_concepts`/`visual_caption` set?
-- Total graphics ≤5? `labels` and `values` same length on infographics?
-- All list item stubs deleted from `sentences` (zero stubs remaining)?
+**Hook Zone (sentences 0–4):**
+- [ ] No graphics in sentences 0–4?
+- [ ] All `broll` sentences have `media_type: "video"`?
+- [ ] ≥2 of the 5 sentences carry a `visual_effect`?
+- [ ] All 3 `visual_concepts` slots filled on every sentence?
+- [ ] Every sentence has a distinct `visual_concepts[0]`?
+
+**Full video:**
+- [ ] `[0]` is physically showable for *that specific sentence* (not just the video theme)?
+- [ ] No `video_topic` words in any `visual_concepts` entry?
+- [ ] `[1]`/`[2]` genuinely broader than `[0]` — not synonyms?
+- [ ] Every named entity marked `"named"`? Every generic scene `"broll"`?
+- [ ] No two sentences share the same `visual_caption`?
+- [ ] `max_image_ratio` set at job root?
+- [ ] Unique `[0]` count ≥ `max(15, ceil(N/4))`?
+- [ ] Effects ≤20% of broll/named; no two adjacent with effects; sepia+noir ≤1; tech+hacker_tech ≤1?
+- [ ] All graphics narrated: real `text`, no `duration`, `visual_concepts`/`visual_caption` set?
+- [ ] Total graphics ≤4? `labels` and `values` same length on infographics?
+- [ ] All list item stubs deleted from `sentences`?
+- [ ] No two consecutive sentences share `assigned_motif`? (thematic)
 
 ---
 
@@ -328,27 +354,21 @@ Do NOT run `cli.py`. The worker runs it automatically.
 - **Repeating `video_topic` words in concepts** — pipeline appends them; repeating garbles queries
 - **Ambiguous single words** — `"court"` → `"courtroom interior"`, `"bar"` → `"crowded bar interior"`
 - **Brand/animal/software name collisions** — `"firefly"` → `"firefly insect glowing"`, `"jaguar"` → `"jaguar big cat"`, `"python"` → `"python snake coiled"`
-- **Numbered concept variants** — `"shelf angle 5"` ≡ `"shelf angle 6"` — explicitly forbidden, detected by validator
+- **Numbered concept variants** — `"shelf angle 5"` ≡ `"shelf angle 6"` — explicitly forbidden
 - **Near-duplicate `[1]`/`[2]`** — must widen the search, not restate `[0]`
-- **Wrong `video_type`** — `"thematic"` for abstract categories; `"named_entity"` for one specific recurring subject
 - **Overusing `"named"`** — spends Serper quota; 70–80% should be `"broll"`
-- **`"named"` for scenes or locations** — storefront photos are watermarked; use `"broll"` + `"video"` instead
-- **Generic or copied `visual_caption`** — must describe the specific shot precisely; never copy from `visual_concepts`
-- **Duplicate `visual_caption`** — every sentence needs a visually distinct description
-- **Missing `bgm_search_term`** on emotional content — match it to the tone; don't leave it generic
-- **Graphic fields at the top level of the sentence** — `title`, `subtitle`, `style`, `label`, `items`, etc. MUST be inside `"variables": {}`. Placing them at the top level of the sentence makes them invisible to the renderer; the graphic renders completely blank
-- **`duration` on a graphic sentence** — Whisper derives it; setting it overrides and desyncs audio
-- **`content_track: "graphic"` with empty `text`** — silent standalone graphics are not supported; all graphics must be narrated (`content_track: "broll"` + `graphic_type`)
-- **Missing `visual_concepts`/`visual_caption` on a graphic sentence** — these are the footage fallback if Revideo render fails
-- **`subtitle` as a structural label** — `"countdown intro"`, `"midpoint break"`, `"chapter 1"` are wrong; write a viewer-facing tagline or use `""`
-- **`lower_third` on generic broll** — only use it when a named entity (brand, person, product) is specifically on screen and a text identifier adds genuine value
-- **Named entity continuity** — after naming a product, person, or brand, keep `content_track: "named"` with that entity's visuals for every sentence that still discusses it. Don't revert to broll while the same entity is still on screen
-- **Effects on consecutive sentences** — never place a visual_effect on two adjacent sentences; always separate effect sentences with ≥2 plain sentences between them
-- **Leaving list item stubs in `sentences`** — ALL item stubs must be deleted; partial deletion shows fewer items than scripted
-- **`list` for multi-sentence items** — if any item needs 2+ sentences of narration, skip list and use regular broll for all
+- **`"named"` for real places** — storefront/landmark photos are usually watermarked; use `"broll"` + `"video"`
+- **Generic or duplicate `visual_caption`** — must describe the specific shot; no two sentences may share one
+- **Missing `bgm_search_term`** on emotional content — match it to tone
+- **Graphic fields at the top level** — `title`, `style`, `label`, `items`, etc. MUST be inside `"variables": {}`. Top-level placement is silently ignored; the graphic renders blank
+- **`duration` on a graphic sentence** — Whisper derives it; setting it desyncs audio
+- **`lower_third` on generic broll** — only use when a named entity is specifically on screen and a label adds genuine value
+- **Named entity continuity** — after naming an entity, keep `content_track: "named"` until the narration genuinely moves on
+- **Effects on consecutive sentences** — always separate effect sentences with ≥2 plain sentences
+- **Leaving list item stubs in `sentences`** — ALL stubs must be deleted
+- **`list` for multi-sentence items** — if any item needs 2+ sentences, use regular broll for all
 - **`list` for two numerically differing items** — use `"infographic"` `"callouts"` instead
-- **`infographic` for a single statistic** — needs ≥2 labeled values; use `"callouts"` style instead
+- **`infographic` for a single statistic** — needs ≥2 labeled values
 - **`infographic` with long labels and `"bars"` style** — use `"horizontal"` when any label exceeds ~3 words
-- **`"grid"` list style for fewer than 4 items** — cards look sparse; use `"bullets"` or `"cascade"` for 2–3 items
-- **`transition` for every topic shift** — only real structural breaks (time jump, location, narrative phase); not paragraph breaks
-- **More than 5 graphic entries total** — cut to the most impactful; hard limit is ≤5
+- **`"grid"` list style for fewer than 4 items** — use `"bullets"` or `"cascade"` for 2–3 items
+- **More than 4 total graphic entries** — hard limit is ≤4

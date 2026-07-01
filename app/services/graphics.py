@@ -1,7 +1,7 @@
 """
 app/services/graphics.py — Revideo graphic segment renderer
 
-Renders animated graphic clips (title cards, infographics, lists, transitions)
+Renders animated graphic clips (title cards, infographics, lists)
 via a headless Node.js/Revideo subprocess and returns the path to the resulting
 MP4, which slots directly into the existing clip pipeline.
 """
@@ -25,7 +25,6 @@ _RENDER_TIMEOUT = 180  # seconds
 _POOL_SIZES: dict = {
     "lower_third": 1,
     "infographic": 4,
-    "transition":  4,
     "list":        4,
 }
 
@@ -38,12 +37,6 @@ STYLE_MAP: dict = {
         "horizontal": 1,  # horizontal bar chart
         "lollipop":   2,  # lollipop (stem + dot) chart
         "callouts":   3,  # large bold numbers counting up — best for 2–3 stats
-    },
-    "transition": {
-        "line":       0,  # accent line grows, label fades
-        "sweep":      1,  # dark panel sweeps across screen
-        "brackets":   2,  # corner brackets frame the label
-        "crosshair":  3,  # thin crosshair lines from centre
     },
     "list": {
         "bullets":  0,   # coloured square bullets, slides from left
@@ -101,7 +94,7 @@ def render_graphic_clip(
     Render a Revideo graphic segment. Returns the output MP4 path, or None on failure.
 
     Args:
-        graphic_type: Scene selector — "lower_third", "infographic", "transition", "list".
+        graphic_type: Scene selector — "lower_third", "infographic", "list".
         out_path:     Absolute path where the MP4 should be written.
         duration:     Clip length in seconds.
         width/height: Output dimensions (must match the pipeline's target resolution).

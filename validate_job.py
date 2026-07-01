@@ -28,11 +28,22 @@ Warnings (exit 0, logged by worker):
   - Effect-bearing sentences exceed 20% of broll/named sentences
   - Any two adjacent broll/named sentences both carry a visual_effect
   - Both 'sepia' and 'noir' used in the same video
+
+Hook Zone warnings (sentences 0–4):
+  - lower_third, infographic, or list graphic_type in sentences 0–4
+  - media_type='image' on a broll sentence in sentences 0–4
+  - Fewer than 2 visual_effects across sentences 0–4
+  - Any visual_concepts slot left empty in sentences 0–4
 """
 
 import json
 import math
 import sys
+
+_HOOK_ZONE = 5  # first N sentences constitute the hook zone (~30 s at normal narration speed)
+
+_VALID_GTYPES = frozenset({"lower_third", "infographic", "list"})
+_HOOK_BANNED_GTYPES = _VALID_GTYPES  # all graphic types are banned from the hook zone
 
 _VALID_VISUAL_EFFECTS = frozenset({
     "threat", "cold", "warmth", "mystery", "sepia",
@@ -105,12 +116,19 @@ def main():
             continue
 
         gtype = sent.get("graphic_type")
-        if gtype and not isinstance(sent.get("variables"), dict):
-            warnings.append(
-                f"sentence {i}: graphic_type={gtype!r} has no 'variables' dict — "
-                "graphic will render blank. All fields (title, label, items, style, etc.) "
-                "must be inside variables: {}"
-            )
+        if gtype:
+            gtype_str = gtype.strip() if isinstance(gtype, str) else str(gtype)
+            if gtype_str not in _VALID_GTYPES:
+                text_errors.append(
+                    f"sentence {i}: graphic_type={gtype!r} is not a valid type. "
+                    f"Valid types: {sorted(_VALID_GTYPES)}"
+                )
+            if not isinstance(sent.get("variables"), dict):
+                warnings.append(
+                    f"sentence {i}: graphic_type={gtype!r} has no 'variables' dict — "
+                    "graphic will render blank. All fields (title, label, items, style, etc.) "
+                    "must be inside variables: {}"
+                )
 
         if track in ("broll", "named") and not text:
             text_errors.append(
@@ -143,6 +161,47 @@ def main():
         effect = (sent.get("visual_effect") or "").strip()
         if effect and effect not in _VALID_VISUAL_EFFECTS:
             warnings.append(f"sentence {i}: unknown visual_effect={effect!r}")
+
+    # ── Hook Zone checks (sentences 0–4) ────────────────────────────────────
+    hook_effect_count  = 0
+    hook_broll_named   = 0
+    hook_sents = sentences[:_HOOK_ZONE]
+    for i, sent in enumerate(hook_sents):
+        track = sent.get("content_track", "broll")
+        gtype = (sent.get("graphic_type") or "").strip()
+
+        if gtype in _HOOK_BANNED_GTYPES:
+            warnings.append(
+                f"hook zone violation — sentence {i}: graphic_type={gtype!r} is banned "
+                f"in sentences 0–{_HOOK_ZONE - 1}; save lower_thirds, infographics, and lists "
+                "for after the viewer is hooked"
+            )
+
+        if track in ("broll", "named"):
+            hook_broll_named += 1
+            mtype = (sent.get("media_type") or "video").strip()
+            if mtype == "image":
+                warnings.append(
+                    f"hook zone — sentence {i}: media_type='image' on broll sentence slows "
+                    f"opening pace; use 'video' in sentences 0–{_HOOK_ZONE - 1}"
+                )
+            vc = sent.get("visual_concepts")
+            if not vc or not isinstance(vc, list) or len(vc) < 3:
+                filled = len(vc) if isinstance(vc, list) else 0
+                warnings.append(
+                    f"hook zone — sentence {i}: only {filled}/3 visual_concepts slots filled; "
+                    f"all 3 are required in sentences 0–{_HOOK_ZONE - 1} to maximise footage variety"
+                )
+            eff = (sent.get("visual_effect") or "").strip()
+            if eff and eff in _VALID_VISUAL_EFFECTS:
+                hook_effect_count += 1
+
+    if hook_broll_named >= 3 and hook_effect_count < 2:
+        warnings.append(
+            f"hook zone (sentences 0–{_HOOK_ZONE - 1}) has only {hook_effect_count} "
+            f"visual_effect(s) across {hook_broll_named} broll/named sentences — "
+            "at least 2 cinematic effects are required in the opening to hold viewers"
+        )
 
     # ── Text-field hard errors ───────────────────────────────────────────────
     if text_errors:

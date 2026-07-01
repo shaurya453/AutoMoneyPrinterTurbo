@@ -17,7 +17,7 @@ export default makeScene2D('lower-third', function* (view) {
   // Text left edge at screen x=108px (80 left margin + 28 pad), y=910px center.
   // Revideo centre-origin coords: x = 108 - 960 = -852, y = 910 - 540 = 370.
   const TEXT_X = -852;
-  const TEXT_Y = 370;
+  const TEXT_Y = 350;
 
   view.add(
     <Rect width={1920} height={1080} fill={'#000000'} layout={false}>
@@ -26,7 +26,7 @@ export default makeScene2D('lower-third', function* (view) {
         x={TEXT_X}
         y={TEXT_Y}
         offsetX={-1}
-        fontSize={44}
+        fontSize={58}
         fontWeight={600}
         fontFamily={'Playfair Display, serif'}
         fill={'#ffffff'}
