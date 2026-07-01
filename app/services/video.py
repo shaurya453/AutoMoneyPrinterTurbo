@@ -709,6 +709,14 @@ def _render_3d_effect(
             # ease-out cubic, 1→0
             ease = (1.0 - min(t, D) / D) ** 3
 
+            # Zoom: progress 0→1 over D seconds, then hold at 1.0.
+            # screen_3d_lr zooms in (0.95→1.0); screen_3d_ud zooms out (1.05→1.0).
+            zoom_t = min(t, D) / D
+            if preset == "screen_3d_lr":
+                scale = 0.95 + 0.05 * zoom_t
+            else:
+                scale = 1.05 - 0.05 * zoom_t
+
             # Interpolate the 4 corners towards the flat full-frame bounds
             current_dst = []
             for i in range(4):
@@ -727,6 +735,15 @@ def _render_3d_effect(
                 _PILImage.BICUBIC,
                 fillcolor=(0, 0, 0, 0)
             )
+
+            # Apply zoom: scale the warped card and re-center on a WxH canvas.
+            # For zoom-in (scale<1) the card is letterboxed; for zoom-out (scale>1)
+            # the paste offset goes negative and PIL naturally center-crops it.
+            new_w = max(1, round(W * scale))
+            new_h = max(1, round(H * scale))
+            scaled = warped.resize((new_w, new_h), _PILImage.BILINEAR)
+            warped = _PILImage.new("RGBA", (W, H), (0, 0, 0, 0))
+            warped.paste(scaled, ((W - new_w) // 2, (H - new_h) // 2), mask=scaled.split()[3])
 
             # Blurred background base (same image, heavily blurred and darkened)
             frame = bg.copy()
