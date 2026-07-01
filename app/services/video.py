@@ -534,7 +534,7 @@ _BG_BLUR_FRACTION = 0.06  # downscale-then-upscale blur strength
 
 _PAN_Z = 1.04                    # zoom factor: subtle 4% motion, minimal content crop at peak zoom
 
-_KEN_BURNS_ANIMATIONS = ("pan_lr", "pan_rl", "zoom_in", "pan_ud")
+_KEN_BURNS_ANIMATIONS = ("pan_lr", "pan_rl", "zoom_in", "pan_ud", "fade")
 _last_ken_burns_animation: str | None = None
 _3D_ANIM_DUR = 1.8  # seconds — tilt-to-flat transition; remaining duration holds flat
 
@@ -1026,6 +1026,18 @@ def _render_ken_burns_ffmpeg(
                         f"scale={width}:{height}:flags=lanczos"
                     )
 
+            elif animation == "fade":
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
+                    tmp_pre = fh.name
+                _cover_crop_image(img, width, height).save(tmp_pre)
+                fade_d = min(0.5, duration * 0.15)
+                fade_out_st = max(0.0, duration - fade_d)
+                vf = (
+                    f"scale={width}:{height}:flags=lanczos,"
+                    f"fade=t=in:st=0:d={fade_d:.3f},"
+                    f"fade=t=out:st={fade_out_st:.3f}:d={fade_d:.3f}"
+                )
+
             else:  # static (cover) — safety fallback; landscape path won't request this
                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
                     tmp_pre = fh.name
@@ -1223,15 +1235,16 @@ def render_ken_burns_clip(
         img_w, img_h = _im.width, _im.height
 
     if not is_landscape:
-        # Portrait: unchanged — FIT at 95%, blurred background, static.
-        frame_scale, animation = 0.95, "static"
+        # Portrait: FIT at 95%, blurred background, fade in/out.
+        frame_scale = 0.95
+        animation = _pick_animation(["fade", "static"])
     else:
         # Landscape: cover-crop + random animation from overflow-derived pool.
         cover_scale = max(width / img_w, height / img_h)
         h_excess = max(0.0, img_w * cover_scale - width)
         v_excess = max(0.0, img_h * cover_scale - height)
 
-        allowed = ["zoom_in", "screen_3d_lr", "screen_3d_ud"]
+        allowed = ["zoom_in", "screen_3d_lr", "screen_3d_ud", "fade"]
         if h_excess > width * 0.02:
             allowed.extend(["pan_lr", "pan_rl"])
         if v_excess > height * 0.02:
