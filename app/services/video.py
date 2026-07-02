@@ -604,6 +604,24 @@ def _blur_and_darken(frame: np.ndarray, brightness: float = _BG_BRIGHTNESS, blur
     return np.clip(arr, 0, 255).astype(np.uint8)
 
 
+def _add_drop_shadow(
+    rgba: Image.Image,
+    shadow_blur: int = 14,
+    shadow_alpha_frac: float = 0.38,
+    shadow_offset: tuple = (0, 8),
+) -> Image.Image:
+    """Composite an RGBA image over a plain white background with a soft drop shadow; return RGB."""
+    from PIL import ImageFilter as _IF
+    alpha_ch = rgba.getchannel("A")
+    shadow_layer = Image.new("RGBA", rgba.size, (0, 0, 0, int(255 * shadow_alpha_frac)))
+    shadow_layer.putalpha(alpha_ch)
+    shadow_layer = shadow_layer.filter(_IF.GaussianBlur(radius=shadow_blur))
+    result = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+    result.paste(shadow_layer, shadow_offset, shadow_layer)
+    result.paste(rgba, (0, 0), rgba)
+    return result.convert("RGB")
+
+
 def _cover_crop_image(img: Image.Image, width: int, height: int) -> Image.Image:
     """Scale + center-crop a PIL image to exactly (width, height), covering the full frame."""
     scale = max(width / img.width, height / img.height)
@@ -826,6 +844,10 @@ def apply_ken_burns(
     from PIL import Image as _PILImage
 
     with _PILImage.open(image_path) as f:
+        _has_alpha = f.mode in ("RGBA", "LA") or (f.mode == "P" and "transparency" in f.info)
+        _rgba_src = f.convert("RGBA") if _has_alpha else None
+        if _rgba_src:
+            _rgba_src.load()
         img = f.convert("RGB")
         img.load()
         src_w, src_h = img.size
@@ -866,16 +888,20 @@ def apply_ken_burns(
         clip = _VideoClip(make_frame_cover, duration=duration)
         return clip.with_fps(fps)
 
-    # ── FIT mode (portrait, blurred background) ───────────────────────────────
-    bg_arr = _blur_and_darken(np.array(_cover_crop_image(img, width, height)))
-
+    # ── FIT mode (portrait, blurred background or white for transparent PNG) ──
     fg_budget_w = width * frame_scale
     fg_budget_h = height * frame_scale
     # Always fit inside the foreground budget — no cover-crop, no content clipping.
     fit_scale = min(fg_budget_w / src_w, fg_budget_h / src_h)
     fit_w = int(fit_scale * src_w)
     fit_h = int(fit_scale * src_h)
-    fit_arr = np.array(img.resize((fit_w, fit_h), _PILImage.LANCZOS))
+
+    if _has_alpha:
+        bg_arr = np.full((height, width, 3), 255, dtype=np.uint8)
+        fit_arr = np.array(_add_drop_shadow(_rgba_src.resize((fit_w, fit_h), _PILImage.LANCZOS)))
+    else:
+        bg_arr = _blur_and_darken(np.array(_cover_crop_image(img, width, height)))
+        fit_arr = np.array(img.resize((fit_w, fit_h), _PILImage.LANCZOS))
 
     x_off = (width - fit_w) // 2
     y_off = (height - fit_h) // 2
@@ -979,6 +1005,10 @@ def _render_ken_burns_ffmpeg(
     codec = _get_configured_video_codec()
 
     with _PILImage.open(image_path) as f:
+        _has_alpha = f.mode in ("RGBA", "LA") or (f.mode == "P" and "transparency" in f.info)
+        _rgba_src = f.convert("RGBA") if _has_alpha else None
+        if _rgba_src:
+            _rgba_src.load()
         img = f.convert("RGB")
         img.load()
         src_w, src_h = img.size
@@ -1080,9 +1110,7 @@ def _render_ken_burns_ffmpeg(
                 return ""
             return output_path if os.path.exists(output_path) else ""
 
-        # ── FIT mode: portrait, blurred background ────────────────────────────
-        bg_arr = _blur_and_darken(np.array(_cover_crop_image(img, width, height)))
-
+        # ── FIT mode: portrait, blurred background (white for transparent PNG) ─
         # Fit image into the foreground budget (frame_scale of screen).
         fg_budget_w = width * frame_scale
         fg_budget_h = height * frame_scale
@@ -1097,13 +1125,22 @@ def _render_ken_burns_ffmpeg(
         fg_x = (width - fit_w) // 2
         fg_y = (height - fit_h) // 2
 
+        if _has_alpha:
+            _bg_pil = _PILImage.new("RGB", (width, height), (255, 255, 255))
+            _fg_at_fit = _add_drop_shadow(_rgba_src.resize((fit_w, fit_h), _PILImage.LANCZOS))
+        else:
+            _bg_pil = _PILImage.fromarray(
+                _blur_and_darken(np.array(_cover_crop_image(img, width, height)))
+            )
+            _fg_at_fit = img.resize((fit_w, fit_h), _PILImage.LANCZOS)
+
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
             tmp_bg = fh.name
-        _PILImage.fromarray(bg_arr).save(tmp_bg)
+        _bg_pil.save(tmp_bg)
 
         # Static path — portrait images displayed with no animation.
         if animation == "static":
-            pre_resized = img.resize((fit_w, fit_h), _PILImage.LANCZOS)
+            pre_resized = _fg_at_fit
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
                 tmp_pre = fh.name
             pre_resized.save(tmp_pre)
@@ -1134,7 +1171,7 @@ def _render_ken_burns_ffmpeg(
             z_expr = f"1.0+{_PAN_Z - 1.0:.4f}*(1-pow(1-on/{d_minus_1},2))"
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
                 tmp_pre = fh.name
-            img.resize((fit_w, fit_h), _PILImage.LANCZOS).save(tmp_pre)
+            _fg_at_fit.save(tmp_pre)
             fade_d = min(0.4, duration * 0.15)
             fade_out_st = max(0.0, duration - fade_d)
             filter_complex = (
@@ -1197,7 +1234,7 @@ def _render_ken_burns_ffmpeg(
             total_frames = max(int(round(duration * fps)), 1)
             d_minus_1 = max(total_frames - 1, 1)
             z_expr = f"1.0+{_PAN_Z - 1.0:.4f}*pow(1-on/{d_minus_1},2)"
-            canvas_img = img.resize((fit_w, fit_h), _PILImage.LANCZOS)
+            canvas_img = _fg_at_fit
             filter_fg = (
                 f"[0:v]scale={up_w}:{up_h}:flags=lanczos,"
                 f"zoompan=z='{z_expr}':x='iw/2-iw/(2*zoom)':y='ih/2-ih/(2*zoom)':"
@@ -1211,7 +1248,7 @@ def _render_ken_burns_ffmpeg(
             total_frames = max(int(round(duration * fps)), 1)
             d_minus_1 = max(total_frames - 1, 1)
             z_expr = f"1.0+{_PAN_Z - 1.0:.4f}*(1-pow(1-on/{d_minus_1},2))"
-            canvas_img = img.resize((fit_w, fit_h), _PILImage.LANCZOS)
+            canvas_img = _fg_at_fit
             filter_fg = (
                 f"[0:v]scale={up_w}:{up_h}:flags=lanczos,"
                 f"zoompan=z='{z_expr}':x='iw/2-iw/(2*zoom)':y='ih/2-ih/(2*zoom)':"
