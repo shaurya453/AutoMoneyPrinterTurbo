@@ -534,7 +534,7 @@ _BG_BLUR_FRACTION = 0.06  # downscale-then-upscale blur strength
 
 _PAN_Z = 1.04                    # zoom factor: subtle 4% motion, minimal content crop at peak zoom
 
-_KEN_BURNS_ANIMATIONS = ("pan_lr", "pan_rl", "zoom_in", "pan_ud", "fade")
+_KEN_BURNS_ANIMATIONS = ("pan_lr", "pan_rl", "zoom_in", "zoom_out", "pan_ud", "fade")
 _last_ken_burns_animation: str | None = None
 _3D_ANIM_DUR = 1.8  # seconds — tilt-to-flat transition; remaining duration holds flat
 
@@ -898,14 +898,27 @@ def apply_ken_burns(
             else:
                 alpha = 1.0
             alpha = max(0.0, min(1.0, alpha))
+            z = 1.0 + (_PAN_Z - 1.0) * pe
+            crop_w = max(1, int(fit_w / z))
+            crop_h = max(1, int(fit_h / z))
+            x0 = (fit_w - crop_w) // 2
+            y0 = (fit_h - crop_h) // 2
+            crop = _PILImage.fromarray(fit_arr[y0:y0 + crop_h, x0:x0 + crop_w])
+            zoomed = np.array(crop.resize((fit_w, fit_h), _PILImage.LANCZOS))
             bg_region = bg_arr[y_off:y_off + fit_h, x_off:x_off + fit_w]
-            blended = (fit_arr.astype(np.float32) * alpha + bg_region.astype(np.float32) * (1.0 - alpha)).astype(np.uint8)
+            blended = (zoomed.astype(np.float32) * alpha + bg_region.astype(np.float32) * (1.0 - alpha)).astype(np.uint8)
             frame = bg_arr.copy()
             frame[y_off:y_off + fit_h, x_off:x_off + fit_w] = blended
             return frame
 
         if animation == "zoom_in":
             z = 1.0 + (_PAN_Z - 1.0) * pe
+            crop_w = max(1, int(fit_w / z))
+            crop_h = max(1, int(fit_h / z))
+            x0 = (fit_w - crop_w) // 2
+            y0 = (fit_h - crop_h) // 2
+        elif animation == "zoom_out":
+            z = 1.0 + (_PAN_Z - 1.0) * (1.0 - pe)
             crop_w = max(1, int(fit_w / z))
             crop_h = max(1, int(fit_h / z))
             x0 = (fit_w - crop_w) // 2
@@ -1027,13 +1040,21 @@ def _render_ken_burns_ffmpeg(
                     )
 
             elif animation == "fade":
+                canvas_img = _cover_crop_image(img, width, height)
+                _uz = 8
+                up_w, up_h = width * _uz, height * _uz
+                total_frames = max(int(round(duration * fps)), 1)
+                d_minus_1 = max(total_frames - 1, 1)
+                z_expr = f"1.0+{_PAN_Z - 1.0:.4f}*(1-pow(1-on/{d_minus_1},2))"
                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
                     tmp_pre = fh.name
-                _cover_crop_image(img, width, height).save(tmp_pre)
+                canvas_img.save(tmp_pre)
                 fade_d = min(0.5, duration * 0.15)
                 fade_out_st = max(0.0, duration - fade_d)
                 vf = (
-                    f"scale={width}:{height}:flags=lanczos,"
+                    f"scale={up_w}:{up_h}:flags=lanczos,"
+                    f"zoompan=z='{z_expr}':x='iw/2-iw/(2*zoom)':y='ih/2-ih/(2*zoom)':"
+                    f"d={total_frames}:s={width}x{height}:fps={fps},"
                     f"fade=t=in:st=0:d={fade_d:.3f},"
                     f"fade=t=out:st={fade_out_st:.3f}:d={fade_d:.3f}"
                 )
@@ -1103,16 +1124,24 @@ def _render_ken_burns_ffmpeg(
                 return ""
             return output_path if os.path.exists(output_path) else ""
 
-        # Fade path — gentle fade in/out, no pan/zoom.
+        # Fade path — fade in/out with slow zoom in.
         if animation == "fade":
-            pre_resized = img.resize((fit_w, fit_h), _PILImage.LANCZOS)
+            _uz = 8
+            up_w = fit_w * _uz
+            up_h = fit_h * _uz
+            total_frames = max(int(round(duration * fps)), 1)
+            d_minus_1 = max(total_frames - 1, 1)
+            z_expr = f"1.0+{_PAN_Z - 1.0:.4f}*(1-pow(1-on/{d_minus_1},2))"
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
                 tmp_pre = fh.name
-            pre_resized.save(tmp_pre)
+            img.resize((fit_w, fit_h), _PILImage.LANCZOS).save(tmp_pre)
             fade_d = min(0.4, duration * 0.15)
             fade_out_st = max(0.0, duration - fade_d)
             filter_complex = (
-                f"[0:v]fade=t=in:st=0:d={fade_d:.3f},"
+                f"[0:v]scale={up_w}:{up_h}:flags=lanczos,"
+                f"zoompan=z='{z_expr}':x='iw/2-iw/(2*zoom)':y='ih/2-ih/(2*zoom)':"
+                f"d={total_frames}:s={fit_w}x{fit_h}:fps={fps},"
+                f"fade=t=in:st=0:d={fade_d:.3f},"
                 f"fade=t=out:st={fade_out_st:.3f}:d={fade_d:.3f}"
                 f"[fg];"
                 f"[1:v][fg]overlay=x={fg_x}:y={fg_y}"
@@ -1161,6 +1190,20 @@ def _render_ken_burns_ffmpeg(
                 f"[0:v]crop=w={cw}:h={fit_h * 2}:x=0:y='{travel}*{eot}',"
                 f"scale={fit_w}:{fit_h}:flags=lanczos[fg]"
             )
+        elif animation == "zoom_out":
+            _uz = 8
+            up_w = fit_w * _uz
+            up_h = fit_h * _uz
+            total_frames = max(int(round(duration * fps)), 1)
+            d_minus_1 = max(total_frames - 1, 1)
+            z_expr = f"1.0+{_PAN_Z - 1.0:.4f}*pow(1-on/{d_minus_1},2)"
+            canvas_img = img.resize((fit_w, fit_h), _PILImage.LANCZOS)
+            filter_fg = (
+                f"[0:v]scale={up_w}:{up_h}:flags=lanczos,"
+                f"zoompan=z='{z_expr}':x='iw/2-iw/(2*zoom)':y='ih/2-ih/(2*zoom)':"
+                f"d={total_frames}:s={fit_w}x{fit_h}:fps={fps}[fg]"
+            )
+
         else:  # zoom_in — 8× zoompan for sub-pixel accuracy.
             _uz = 8
             up_w = fit_w * _uz
@@ -1235,9 +1278,9 @@ def render_ken_burns_clip(
         img_w, img_h = _im.width, _im.height
 
     if not is_landscape:
-        # Portrait: FIT at 95%, blurred background, fade in/out.
+        # Portrait: FIT at 95%, blurred background, fade/zoom.
         frame_scale = 0.95
-        animation = _pick_animation(["fade", "static"])
+        animation = _pick_animation(["fade", "zoom_in", "zoom_out", "static"])
     else:
         # Landscape: cover-crop + random animation from overflow-derived pool.
         cover_scale = max(width / img_w, height / img_h)
