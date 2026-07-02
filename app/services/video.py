@@ -1280,7 +1280,7 @@ def render_ken_burns_clip(
     if not is_landscape:
         # Portrait: FIT at 95%, blurred background, fade/zoom.
         frame_scale = 0.95
-        animation = _pick_animation(["fade", "zoom_in", "zoom_out", "static"])
+        animation = _pick_animation(["fade", "zoom_in", "zoom_out"])
     else:
         # Landscape: cover-crop + random animation from overflow-derived pool.
         cover_scale = max(width / img_w, height / img_h)
