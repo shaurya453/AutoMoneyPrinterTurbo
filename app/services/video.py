@@ -1161,27 +1161,27 @@ def _render_ken_burns_ffmpeg(
                 return ""
             return output_path if os.path.exists(output_path) else ""
 
-        # Fade path — fade in/out with slow zoom in.
+        # Fade path — portrait rectangle grows on screen; background stays static.
         if animation == "fade":
-            _uz = 8
-            up_w = fit_w * _uz
-            up_h = fit_h * _uz
             total_frames = max(int(round(duration * fps)), 1)
             d_minus_1 = max(total_frames - 1, 1)
-            z_expr = f"1.0+{_PAN_Z - 1.0:.4f}*(1-pow(1-on/{d_minus_1},2))"
+            grow = _PAN_Z - 1.0  # 0.04 — same 4% used by landscape pan/zoom
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
                 tmp_pre = fh.name
             _fg_at_fit.save(tmp_pre)
             fade_d = min(0.4, duration * 0.15)
             fade_out_st = max(0.0, duration - fade_d)
+            # Scale the portrait photo from fit_w×fit_h up to fit_w×_PAN_Z over the
+            # clip duration. overlay re-centers it each frame as it grows.
+            # Background (tmp_bg) is a static image and never moves.
             filter_complex = (
-                f"[0:v]scale={up_w}:{up_h}:flags=lanczos,"
-                f"zoompan=z='{z_expr}':x='iw/2-iw/(2*zoom)':y='ih/2-ih/(2*zoom)':"
-                f"d={total_frames}:s={fit_w}x{fit_h}:fps={fps},"
+                f"[0:v]scale="
+                f"w='trunc({fit_w}*(1+{grow:.4f}*n/{d_minus_1})/2)*2':"
+                f"h='trunc({fit_h}*(1+{grow:.4f}*n/{d_minus_1})/2)*2'"
+                f"[fg];"
+                f"[1:v][fg]overlay=x='(W-overlay_w)/2':y='(H-overlay_h)/2',"
                 f"fade=t=in:st=0:d={fade_d:.3f},"
                 f"fade=t=out:st={fade_out_st:.3f}:d={fade_d:.3f}"
-                f"[fg];"
-                f"[1:v][fg]overlay=x={fg_x}:y={fg_y}"
             )
             cmd = [
                 ffmpeg_bin, "-y",

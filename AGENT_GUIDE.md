@@ -70,9 +70,7 @@ One sentence describing the shot — used by the CLIP relevance filter to rank a
 
 ### `visual_effect`
 
-Motion overlay composited during rendering. **Target ≤20% of `broll`/`named` sentences** — assign only at distinct narrative beats where the effect genuinely accentuates what's on screen. Leave blank for neutral or transitional clips.
-
-> **Hook Zone exception:** sentences 0–4 must carry at least 2 visual effects regardless of the global 20% cap — see Hook Zone below.
+Motion overlay composited during rendering. **Target at least 2 effects per every 5 `broll`/`named` sentences (~40%), distributed evenly across the entire video.** Assign at narrative beats where the effect genuinely accentuates what's on screen — do not front-load into the opening and leave the rest bare. Leave blank only for genuinely neutral or transitional clips.
 
 | Value | Overlay | When to use |
 |---|---|---|
@@ -144,11 +142,11 @@ All graphics are **narrated** — the graphic plays on screen while the narrator
 
 | Trigger | Type | Budget | Hook Zone (sent 0–4) |
 |---|---|---|---|
-| Named entity on screen where a text identifier adds genuine viewer value | `lower_third` | 0–3 | **BANNED** |
+| Every `content_track: "named"` sentence after sentence 4 | `lower_third` | **required** — no cap | **BANNED** |
 | 2+ quantities the viewer must compare side by side | `infographic` | 0–2 | **BANNED** |
 | Parallel enumerable items where every item is a single short sentence | `list` | 0–1 | **BANNED** |
 
-**Budget rule:** lower_third + infographic + list combined ≤ 3. Total graphics ≤ 4.
+**Budget rule:** `lower_third` is required on every named entity sentence after sentence 4 — do not skip it. `infographic` + `list` combined ≤ 3. Total non-lower-third graphics ≤ 4.
 
 **Handling list items:** `sentence_prep.py` creates one stub per enumerated item. Merge them:
 1. Extract every item to its core phrase and collect in `variables.items`.
@@ -157,7 +155,7 @@ All graphics are **narrated** — the graphic plays on screen while the narrator
 Only use `list` when every item fits in one short sentence — if any item needs 2+ sentences, use regular broll for all.
 
 **Type-specific rules:**
-- `lower_third`: `label` is 2–6 words, title case, no punctuation. Only when the entity name adds genuine viewer value — a brand being reviewed, a person being named, a product in close-up. Do NOT use for generic broll or entities obvious from context. Strictly forbidden in sentences 0–4.
+- `lower_third`: **Required on every `content_track: "named"` sentence after sentence 4.** `label` is 2–6 words, title case, no punctuation — the entity name or identifier (brand, person, product). Do NOT use on generic `broll` sentences. Strictly forbidden in sentences 0–4.
 - `infographic`: `labels` and `values` same length; 2–8 data points; all `values` positive. `"callouts"` for 2–3 standalone stats. `"horizontal"` when any label is >3 words.
 - `list`: 2–6 items. Single-sentence items only. For 2 numerically differing items, use `"infographic"` `"callouts"` instead. `"grid"` only for 4–6 items.
 
@@ -292,7 +290,7 @@ The first 30 seconds determine whether a viewer stays. Apply stricter rules here
 | `media_type: "video"` on every `broll` sentence | Motion holds attention; stills release it |
 | All 3 `visual_concepts` slots filled | Maximum variety across the 5 opening cuts |
 | Distinct `visual_concepts[0]` on every sentence — no repeats | Consecutive similar shots feel like a slideshow |
-| **At least 2 of the 5 sentences carry a `visual_effect`** | Cinematic overlays signal production quality immediately |
+| **At least 2 of the 5 sentences carry a `visual_effect`** | Same density required throughout the whole video |
 | No two consecutive hook sentences share an effect | Effect saturation desensitizes; spacing builds contrast |
 
 **Effect placement example:**
@@ -329,9 +327,10 @@ sent 4: —
 - [ ] No two sentences share the same `visual_caption`?
 - [ ] `max_image_ratio` set at job root?
 - [ ] Unique `[0]` count ≥ `max(15, ceil(N/4))`?
-- [ ] Effects ≤20% of broll/named; no two adjacent with effects; sepia+noir ≤1; tech+hacker_tech ≤1?
+- [ ] Effects ≥2 per every 5 broll/named sentences, distributed evenly — no front-loading; no two adjacent with effects; sepia+noir ≤1; tech+hacker_tech ≤1?
 - [ ] All graphics narrated: real `text`, no `duration`, `visual_concepts`/`visual_caption` set?
-- [ ] Total graphics ≤4? `labels` and `values` same length on infographics?
+- [ ] Every `content_track: "named"` sentence after sentence 4 has `graphic_type: "lower_third"`?
+- [ ] Non-lower-third graphics (infographic + list) ≤4? `labels` and `values` same length on infographics?
 - [ ] All list item stubs deleted from `sentences`?
 - [ ] No two consecutive sentences share `assigned_motif`? (thematic)
 
@@ -362,9 +361,11 @@ Do NOT run `cli.py`. The worker runs it automatically.
 - **Missing `bgm_search_term`** on emotional content — match it to tone
 - **Graphic fields at the top level** — `title`, `style`, `label`, `items`, etc. MUST be inside `"variables": {}`. Top-level placement is silently ignored; the graphic renders blank
 - **`duration` on a graphic sentence** — Whisper derives it; setting it desyncs audio
-- **`lower_third` on generic broll** — only use when a named entity is specifically on screen and a label adds genuine value
+- **`lower_third` on generic broll** — only valid on `content_track: "named"` sentences; never on generic broll
+- **Missing `lower_third` on a named entity sentence** — every `content_track: "named"` sentence after sentence 4 must have `graphic_type: "lower_third"`
 - **Named entity continuity** — after naming an entity, keep `content_track: "named"` until the narration genuinely moves on
 - **Effects on consecutive sentences** — always separate effect sentences with ≥2 plain sentences
+- **Front-loading effects into the hook zone** — effects must be distributed evenly; ≥2 per every 5 sentences throughout the whole video, not just the opening
 - **Leaving list item stubs in `sentences`** — ALL stubs must be deleted
 - **`list` for multi-sentence items** — if any item needs 2+ sentences, use regular broll for all
 - **`list` for two numerically differing items** — use `"infographic"` `"callouts"` instead

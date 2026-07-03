@@ -1008,8 +1008,6 @@ def download_image(
         fallback_path = fallback_url = fallback_provider = fallback_term = ""
         fallback_score = float("-inf")
         fallback_emb = None
-        vlm_fallback_path = vlm_fallback_url = vlm_fallback_provider = vlm_fallback_term = ""
-        vlm_fallback_score = float("-inf")
 
         for term in search_terms:
             candidates = _gather_urls(term)
@@ -1032,11 +1030,10 @@ def download_image(
 
                 if not nsfw.passes(nsfw.is_nsfw_image(image_bytes)):
                     logger.info(f"rejected NSFW image candidate: {url}")
-                    # Guard: don't delete a file we're holding as a fallback —
-                    # same base-URL can produce the same cached path for a
-                    # different URL variant, and deleting it would orphan the
-                    # fallback pointer returned at the end of _try().
-                    if local != fallback_path and local != vlm_fallback_path:
+                    # Guard: don't delete a file we're holding as the relevance
+                    # fallback — same base-URL can produce the same cached path
+                    # for a different URL variant, orphaning the fallback pointer.
+                    if local != fallback_path:
                         try:
                             os.remove(local)
                         except Exception:
@@ -1050,25 +1047,13 @@ def download_image(
                     )
                     if not vlm.passes(vlm_score):
                         logger.info(f"VLM rejected image candidate (score={vlm_score:.2f}): {url}")
-                        # Track as last-resort fallback instead of deleting unconditionally —
-                        # mirrors the relevance fallback so VLM rejection never forces video.
-                        if vlm_score is not None and vlm_score > vlm_fallback_score:
-                            # Don't delete vlm_fallback_path if it's also held as the
-                            # relevance fallback — both pointers would be orphaned.
-                            if vlm_fallback_path and vlm_fallback_path != local and vlm_fallback_path != fallback_path:
-                                try:
-                                    os.remove(vlm_fallback_path)
-                                except Exception:
-                                    pass
-                            vlm_fallback_score = vlm_score
-                            vlm_fallback_path, vlm_fallback_url = local, url
-                            vlm_fallback_provider, vlm_fallback_term = provider, term
-                        else:
-                            if local != fallback_path and local != vlm_fallback_path:
-                                try:
-                                    os.remove(local)
-                                except Exception:
-                                    pass
+                        # Hard reject — VLM is a content gate, not a ranking signal.
+                        # Never fall back to a VLM-rejected image.
+                        if local != fallback_path:
+                            try:
+                                os.remove(local)
+                            except Exception:
+                                pass
                         continue
 
                 dedup_emb = None
@@ -1078,7 +1063,7 @@ def download_image(
                         dedup_emb, recent_embeddings, dedup_threshold
                     ):
                         logger.info(f"skipping near-duplicate image candidate: {url}")
-                        if local != fallback_path and local != vlm_fallback_path:
+                        if local != fallback_path:
                             try:
                                 os.remove(local)
                             except Exception:
@@ -1113,12 +1098,6 @@ def download_image(
             if fallback_emb is not None and recent_embeddings is not None:
                 recent_embeddings.append(fallback_emb)
             return _claim(fallback_url, fallback_term, fallback_provider, fallback_path)
-        if vlm_fallback_path:
-            logger.warning(
-                f"all image candidates VLM-rejected for {search_terms}; "
-                f"using best available (vlm_score={vlm_fallback_score:.2f}): {vlm_fallback_path}"
-            )
-            return _claim(vlm_fallback_url, vlm_fallback_term, vlm_fallback_provider, vlm_fallback_path)
         return ""
 
     result = _try()
