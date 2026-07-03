@@ -32,7 +32,7 @@ REVIDEO_ENABLED=0 venv/bin/python cli.py --job storage/tasks/<title>/job.json
 
 Output lands in `storage/tasks/<title>/`: `final.mp4`, `audio.mp3`, `subtitle.srt`, `temp/clips/clip-NNNN.mp4`.
 
-Re-running with the same title creates `<title> (2)`, `<title> (3)`, etc. automatically.
+Re-running with the same title creates `<title> (2)`, `<title> (3)`, etc. automatically — but only when the prior run reached Phase 2 (i.e. `audio.mp3` or `final.mp4` already exists). A directory with only a stale `job.json`/`script.txt` is reused (Phase-1 retry path).
 
 ---
 
