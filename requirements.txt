@@ -35,3 +35,11 @@ nudenet==3.4.2
 # against the narration sentence. If this package fails to load or vlm_api_key
 # is missing/vlm_verify_enabled is false, vlm.py degrades to a no-op automatically.
 openai>=1.0.0
+
+# On-device TTS — Supertonic 3 (app/services/voice.py, engine "supertonic").
+# 99M-parameter ONNX model, ~400MB auto-downloaded to ~/.cache/supertonic on
+# first use. Use voice names M1–M5 / F1–F5 with the "supertonic:" prefix in
+# voice_name (e.g. "supertonic:M1"). Set tts_engine = "supertonic" in
+# config.toml or use the portal engine dropdown. soundfile is a required dep.
+supertonic==1.3.1
+soundfile>=0.10.0
