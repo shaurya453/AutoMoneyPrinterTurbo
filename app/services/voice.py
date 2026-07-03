@@ -597,7 +597,7 @@ def supertonic_tts(
         return None
 
     steps = int(config.app.get("supertonic_steps", 8))
-    speed = max(0.7, min(float(voice_rate or 1.0), 2.0))
+    speed = 1.0
     lang = str(config.app.get("supertonic_lang", "en"))
 
     wav_file = voice_file.replace(".mp3", ".wav")
