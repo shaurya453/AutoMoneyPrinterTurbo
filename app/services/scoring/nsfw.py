@@ -144,7 +144,7 @@ def sample_frame_bytes(video_path: str, num_frames: int = 4) -> List[bytes]:
     NSFW gate and CLIP relevance scoring, avoiding opening the file twice.
     Returns an empty list if the video can't be opened.
     """
-    from app.services.video import _open_video_clip_quietly
+    from app.services.render._common import _open_video_clip_quietly
 
     clip = None
     frames: List[bytes] = []

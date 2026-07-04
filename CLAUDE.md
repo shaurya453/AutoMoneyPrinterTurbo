@@ -9,7 +9,7 @@ This file is read by Claude Code at the start of every session. Keep it up to da
 Headless CLI pipeline: turns a plain-text script into a finished documentary-style MP4 with narration (edge-tts), stock footage, Ken Burns still images, lower-third labels (Revideo), subtitles, and background music. Driven by an AI agent (see `AGENT_GUIDE.md`).
 
 ```
-script.txt  →  sentence_prep.py  →  job.json  →  [agent enriches]  →  cli.py  →  final.mp4
+script.txt  →  scripts/sentence_prep.py  →  job.json  →  [agent enriches]  →  cli.py  →  final.mp4
 ```
 
 ---
@@ -41,15 +41,29 @@ Re-running with the same title creates `<title> (2)`, `<title> (3)`, etc. automa
 | File | Role |
 |---|---|
 | `cli.py` | Entry point — parses args, calls `pipeline.start()` |
-| `sentence_prep.py` | Splits a script into a stub job JSON |
-| `app/services/pipeline.py` | Main orchestrator — TTS → Whisper → clip fetch → combine → subtitles → final |
-| `app/services/video.py` | FFmpeg/MoviePy helpers: Ken Burns, `combine_videos()`, `generate_video()` |
-| `app/services/material.py` | Stock footage/image search and download |
-| `app/services/graphics.py` | Python wrapper for Revideo graphic clip rendering (subprocess) |
-| `app/services/voice.py` | TTS: edge-tts or Kokoro ONNX |
-| `app/services/nsfw.py` | NudeNet ONNX pixel-level NSFW gate — hard-rejects before relevance |
-| `app/services/relevance.py` | CLIP ViT-B/32 ONNX relevance scoring vs. junk anchors |
-| `app/services/subtitle.py` | Subtitle burn-in (Pillow, Inter SemiBold) |
+| `scripts/sentence_prep.py` | Splits a script into a stub job JSON |
+| `scripts/validate_job.py` | Validates a job.json before Phase 2 (called by portal-worker) |
+| `app/services/pipeline/` | Main orchestrator package — TTS → Whisper → clip fetch → combine → subtitles → final |
+| `app/services/pipeline/_whisper.py` | Whisper sentence-timestamp alignment helpers |
+| `app/services/pipeline/_planning.py` | Clip planning: query building, duration estimation, ffmpeg trim |
+| `app/services/pipeline/_fetch.py` | Clip fetching: search → NSFW gate → relevance → Ken Burns |
+| `app/services/pipeline/_orchestrate.py` | `start()` function: orchestrates all pipeline stages |
+| `app/services/render/` | FFmpeg/MoviePy rendering package |
+| `app/services/render/ken_burns.py` | Ken Burns animations, `render_ken_burns_clip()` |
+| `app/services/render/combine.py` | `combine_videos()`, xfade concat, `XFADE_CLIP_LIMIT` |
+| `app/services/render/generate.py` | `generate_video()`, subtitle burn-in, BGM ducking, `get_bgm_file()` |
+| `app/services/render/effects.py` | `apply_visual_effect()`, `composite_lower_third()` |
+| `app/services/render/_common.py` | Shared codec helpers, `SubClippedVideoClip`, `close_clip()` |
+| `app/services/media/` | Stock footage/image search and download package |
+| `app/services/media/images.py` | Image search (Pexels, Pixabay, Unsplash, Wikimedia, DDG, Serper), `download_image()` |
+| `app/services/media/videos.py` | Video search (Pexels, Pixabay, Coverr), `download_video()`, BGM download |
+| `app/services/tts/` | TTS package: edge-tts, Kokoro ONNX, Supertonic, Minimax |
+| `app/services/tts/__init__.py` | `tts()` dispatcher, `NO_VOICE_NAME` |
+| `app/services/scoring/nsfw.py` | NudeNet ONNX pixel-level NSFW gate — hard-rejects before relevance |
+| `app/services/scoring/relevance.py` | CLIP ViT-B/32 ONNX relevance scoring vs. junk anchors |
+| `app/services/scoring/vlm.py` | VLM visual captioning (on-disk cache) |
+| `app/utils/graphics.py` | Python wrapper for Revideo graphic clip rendering (subprocess) |
+| `app/utils/subtitle.py` | SRT parsing helpers (`file_to_subtitles`) |
 | `app/models/schema.py` | `VideoAspect`, `VideoParams`, enums — `VideoAspect.to_resolution()` → `(w, h)` |
 | `app/config.py` | Loads `config.toml` |
 | `AGENT_GUIDE.md` | Full enrichment spec for the AI agent |
@@ -80,7 +94,7 @@ Lives at `revideo-worker/` (inside the repository root).
 
 ### Stage flow (inside `pipeline.start()`)
 
-1. **TTS** — `voice.tts()` → `audio.mp3`; also used to produce edge-tts word-level timings for subtitles
+1. **TTS** — `tts.tts()` → `audio.mp3`; also used to produce edge-tts word-level timings for subtitles
 2. **Whisper alignment** — `_get_sentence_timestamps()` (faster-whisper) aligns each narration sentence to an `(start, end)` span. **Graphic sentences (`content_track: "graphic"`) are filtered out before Whisper** and re-inserted with `(0.0, 0.0)` placeholder timestamps
 3. **Pass 1 — clip planning** — compute footage duration for each sentence from Whisper timestamps. Graphic sentences override to their `duration` field
 4. **Pass 2 — clip fetch / render** — for each sentence:
@@ -195,7 +209,7 @@ ffprobe -v error -show_entries format=duration -of compact /tmp/test.mp4
 This pipeline is the backend for `/home/deploy/portal/` (Next.js + SQLite). The `portal-worker` PM2 process drives two phases:
 
 1. **Phase 1** — AI agent (Claude via CLI) reads `AGENT_GUIDE.md`, writes the script, runs `sentence_prep.py`, enriches `job.json`, prints `JOB_JSON_PATH: /absolute/path`
-2. **Gate** — worker runs `venv/bin/python validate_job.py <path>`: `VALIDATION_ERROR` blocks Phase 2; `VALIDATION_WARNINGS` is logged but proceeds
+2. **Gate** — worker runs `venv/bin/python scripts/validate_job.py <path>`: `VALIDATION_ERROR` blocks Phase 2; `VALIDATION_WARNINGS` is logged but proceeds
 3. **Phase 2** — worker runs `venv/bin/python cli.py --job <path>`
 
 Check status: `pm2 list` — services are `portal-web` (Next.js, port 3000) and `portal-worker`.

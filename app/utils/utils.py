@@ -5,7 +5,11 @@ from uuid import uuid4
 
 from loguru import logger
 
-from app.models import const
+_PUNCTUATIONS = [
+    "?", ",", ".", "、", ";", ":", "!", "…",
+    "？", "，", "。", "、", "；", "：", "！", "...",
+    "،", "؛", "؟",
+]
 
 
 def to_json(obj):
@@ -187,7 +191,7 @@ def split_string_by_punctuations(s):
             txt += char
             continue
 
-        if char not in const.PUNCTUATIONS:
+        if char not in _PUNCTUATIONS:
             txt += char
         else:
             result.append(txt.strip())
