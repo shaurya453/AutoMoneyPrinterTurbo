@@ -18,6 +18,7 @@ import math
 import os
 import re
 import subprocess
+import time
 from collections import deque
 from difflib import SequenceMatcher
 from typing import Any, List, Optional, Tuple
@@ -293,6 +294,7 @@ def _fetch_video_clip(
     video_topic: str = "",
     recent_embeddings: Optional[Any] = None,
     dedup_threshold: float = 0.92,
+    deadline: Optional[float] = None,
 ) -> Optional[str]:
     """Download + trim a stock-video clip, verifying each candidate against
     the NSFW pixel gate and a CLIP relevance margin before accepting it.
@@ -373,6 +375,9 @@ def _fetch_video_clip(
 
     attempts = 0
     while attempts < max_attempts:
+        if deadline is not None and time.monotonic() > deadline:
+            logger.warning(f"clip {clip_idx}: video search deadline reached — stopping early")
+            break
         progressed = False
         for t_idx, term in enumerate(search_terms):
             if attempts >= max_attempts:
@@ -563,6 +568,7 @@ def _fetch_image_clip(
     source_order: Optional[List[str]] = None,
     recent_embeddings: Optional[Any] = None,
     dedup_threshold: float = 0.92,
+    deadline: Optional[float] = None,
 ) -> Optional[str]:
     """Download an image and render a Ken Burns clip. None if no image found.
 
@@ -598,6 +604,7 @@ def _fetch_image_clip(
         must_show=sentence.get("must_show") or [],
         avoid=sentence.get("avoid") or [],
         serper_term=serper_term,
+        deadline=deadline,
     )
     if not image_path:
         return None
@@ -633,6 +640,7 @@ def _fetch_clip(
     recent_embeddings: Optional[Any] = None,
     dedup_threshold: float = 0.92,
     visual_effect: str = "",
+    deadline: Optional[float] = None,
 ) -> Optional[Tuple[str, bool]]:
     """
     Fetch a clip (stock video or Ken Burns image) for one sentence.
@@ -695,7 +703,7 @@ def _fetch_clip(
 
     args_video = (sentence, sent_duration, trim_buffer, source, video_aspect, clip_idx, clips_dir, used_urls, caption_prompt, query_ladder)
     args_image = (sentence, sent_duration, trim_buffer, video_aspect, clip_idx, clips_dir, used_urls, caption_prompt, query_ladder)
-    dedup_kw = {"recent_embeddings": recent_embeddings, "dedup_threshold": dedup_threshold}
+    dedup_kw = {"recent_embeddings": recent_embeddings, "dedup_threshold": dedup_threshold, "deadline": deadline}
     topic_kw = {"video_topic": video_topic}
     image_kw = {"effect": visual_effect}
 
@@ -858,6 +866,7 @@ def start(job_path: str) -> Optional[dict]:
     dedup_threshold: float = float(config.app.get("dedup_similarity_threshold", 0.92))
     dedup_lookback: int = int(config.app.get("dedup_lookback_window", 8))
     recent_embs: Optional[Any] = deque(maxlen=dedup_lookback) if dedup_enabled else None
+    clip_budget_seconds: float = float(config.app.get("clip_fetch_budget_seconds", 180))
 
     if not video_script:
         logger.error("job.video_script is empty — nothing to do")
@@ -1151,6 +1160,7 @@ def start(job_path: str) -> Optional[dict]:
         for c in _get_visual_concepts(sent):
             concept_usage[c] += 1
 
+        _sent_t0 = time.monotonic()
         for clip_duration in durations:
             is_image_override = None
             if is_image and sent.get("content_track", "broll") != "named":
@@ -1169,6 +1179,7 @@ def start(job_path: str) -> Optional[dict]:
                     f"clip {clip_counter}: skipping consecutive repeat overlay '{visual_effect}'"
                 )
                 visual_effect = ""
+            clip_deadline = time.monotonic() + clip_budget_seconds
             fetched = _fetch_clip(
                 sentence=sent,
                 sent_duration=clip_duration,
@@ -1185,6 +1196,7 @@ def start(job_path: str) -> Optional[dict]:
                 recent_embeddings=recent_embs,
                 dedup_threshold=dedup_threshold,
                 visual_effect=visual_effect,
+                deadline=clip_deadline,
             )
             clip_counter += 1
             _last_visual_effect = visual_effect  # update after potential dedup clear
@@ -1225,6 +1237,7 @@ def start(job_path: str) -> Optional[dict]:
                 else:
                     video_clip_count += 1
 
+        logger.info(f"sentence {idx+1}: clip fetch took {time.monotonic() - _sent_t0:.1f}s")
         if not got_any:
             logger.warning(f"sentence {idx+1}: skipping — no clip available")
 

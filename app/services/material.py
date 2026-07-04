@@ -1,7 +1,8 @@
 import os
 import re
 import threading
-from typing import List, Tuple
+import time
+from typing import List, Optional, Tuple
 from urllib.parse import urlencode, urlparse
 
 import requests
@@ -21,8 +22,21 @@ _api_key_lock = threading.Lock()
 # requests timeouts as (connect, read) tuples, in seconds.
 _HTTP_TIMEOUT_THUMBNAIL = (15, 30)  # small thumbnail downloads for reranking
 _HTTP_TIMEOUT_API = (30, 60)        # provider search/JSON endpoints
-_HTTP_TIMEOUT_IMAGE = (30, 120)     # full-size image downloads
+_HTTP_TIMEOUT_IMAGE = (10, 15)      # full-size image downloads
 _HTTP_TIMEOUT_MEDIA = (60, 240)     # video/audio downloads
+
+# Known-slow or always-irrelevant domains that appear in open-web image search
+# results. Downloads from these are skipped without attempting a connection.
+_SLOW_IMAGE_DOMAINS = {
+    "allegroimg.com",
+    "a.allegroimg.com",
+    "imgs.699pic.com",
+    "assets.699pic.com",
+}
+
+# Hosts that returned HTTP 429 during this process run; populated dynamically.
+_per_run_blocked_hosts: set = set()
+_blocked_hosts_lock = threading.Lock()
 
 
 _TLS_VERIFY = None  # cached on first call; config never changes at runtime
@@ -867,6 +881,20 @@ def save_image(image_url: str, save_dir: str = "") -> str:
         logger.warning(f"cached image is not a valid raster image, re-downloading: {image_path}")
         os.remove(image_path)
 
+    # Fast-skip known-slow / currently 429-blocked hosts without connecting.
+    try:
+        _host = urlparse(image_url).netloc.lower().split(":")[0]
+    except Exception:
+        _host = ""
+    if _host:
+        if any(_host == d or _host.endswith("." + d) for d in _SLOW_IMAGE_DOMAINS):
+            logger.debug(f"skipping slow-domain image: {image_url}")
+            return ""
+        with _blocked_hosts_lock:
+            if _host in _per_run_blocked_hosts:
+                logger.debug(f"skipping 429-blocked host {_host}")
+                return ""
+
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -879,6 +907,11 @@ def save_image(image_url: str, save_dir: str = "") -> str:
             image_url, headers=headers, proxies=config.proxy,
             verify=_get_tls_verify(), timeout=_HTTP_TIMEOUT_IMAGE,
         )
+        if r.status_code == 429:
+            with _blocked_hosts_lock:
+                _per_run_blocked_hosts.add(_host)
+            logger.warning(f"429 from {_host} — blocked for this run: {image_url}")
+            return ""
         r.raise_for_status()
         with open(image_path, "wb") as fh:
             fh.write(r.content)
@@ -920,6 +953,7 @@ def download_image(
     must_show: List[str] = None,
     avoid: List[str] = None,
     serper_term: str = "",
+    deadline: Optional[float] = None,
 ) -> str:
     """
     Search for a still image using multiple providers in priority order and
@@ -1008,13 +1042,19 @@ def download_image(
         fallback_path = fallback_url = fallback_provider = fallback_term = ""
         fallback_score = float("-inf")
         fallback_emb = None
+        vlm_img_threshold = float(config.app.get("vlm_image_threshold", 0.30))
 
         for term in search_terms:
+            if deadline is not None and time.monotonic() > deadline:
+                logger.warning(f"image search deadline reached — stopping at term '{term}'")
+                break
             candidates = _gather_urls(term)
             iter_candidates = candidates if not use_relevance else candidates[:_CANDIDATES_PER_TERM]
             prompt = caption_prompt or term
 
             for provider, url in iter_candidates:
+                if deadline is not None and time.monotonic() > deadline:
+                    break
                 local = save_image(url, save_dir)
                 if not local:
                     continue
@@ -1045,10 +1085,11 @@ def download_image(
                         image_bytes, narration, visual_caption, video_topic,
                         must_show or [], avoid or [],
                     )
-                    if not vlm.passes(vlm_score):
+                    if vlm_score is not None and vlm_score < vlm_img_threshold:
                         logger.info(f"VLM rejected image candidate (score={vlm_score:.2f}): {url}")
-                        # Hard reject — VLM is a content gate, not a ranking signal.
-                        # Never fall back to a VLM-rejected image.
+                        # Mark as used so subsequent clips in this sentence skip re-download.
+                        if used_urls is not None:
+                            used_urls.add(url)
                         if local != fallback_path:
                             try:
                                 os.remove(local)

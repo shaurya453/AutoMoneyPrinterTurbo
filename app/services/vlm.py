@@ -10,7 +10,10 @@ Uses gpt-4.1-nano by default (~$0.002 per video at 10 clips).
 """
 
 import base64
+import hashlib
 import json
+import os
+import threading
 from typing import List, Optional
 
 from loguru import logger
@@ -25,6 +28,12 @@ _client_load_attempted = False
 _CIRCUIT_BREAKER_THRESHOLD = 3
 _consecutive_rate_errors = 0
 _circuit_open = False
+
+# On-disk verdict cache: md5(image_bytes) → score float.
+# Prevents re-screening the same image content across re-runs of the same job.
+_vlm_cache: dict = {}
+_vlm_cache_loaded = False
+_vlm_cache_lock = threading.Lock()
 
 # Per-run usage accumulators (reset at pipeline start via reset_usage()).
 _total_calls = 0
@@ -43,6 +52,35 @@ def get_usage() -> dict:
         "input_tokens": _total_input_tokens,
         "output_tokens": _total_output_tokens,
     }
+
+
+def _get_cache_path() -> str:
+    return os.path.join(config.root_dir, "storage", "vlm_verdicts.json")
+
+
+def _load_vlm_cache() -> None:
+    global _vlm_cache, _vlm_cache_loaded
+    if _vlm_cache_loaded:
+        return
+    try:
+        with open(_get_cache_path(), "r", encoding="utf-8") as fh:
+            _vlm_cache.update(json.load(fh))
+        logger.debug(f"VLM cache: {len(_vlm_cache)} entries loaded")
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        logger.debug(f"VLM cache load error (starting fresh): {exc}")
+    _vlm_cache_loaded = True
+
+
+def _save_vlm_cache() -> None:
+    try:
+        path = _get_cache_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(_vlm_cache, fh)
+    except Exception as exc:
+        logger.debug(f"VLM cache save failed: {exc}")
 
 
 def _get_client():
@@ -116,6 +154,15 @@ def verify_image(
     if client is None or not image_bytes:
         return None
 
+    # Cache lookup: same image bytes → same verdict, regardless of URL or run.
+    img_md5 = hashlib.md5(image_bytes).hexdigest()
+    with _vlm_cache_lock:
+        _load_vlm_cache()
+        if img_md5 in _vlm_cache:
+            cached = _vlm_cache[img_md5]
+            logger.debug(f"VLM cache hit: {img_md5[:8]} score={cached:.2f}")
+            return cached
+
     model = str(config.app.get("vlm_model", "gpt-4.1-nano"))
     threshold = float(config.app.get("vlm_threshold", 0.55))
 
@@ -173,6 +220,9 @@ def verify_image(
         reason = str(data.get("reason", ""))
         if config.app.get("relevance_debug_log", False):
             logger.debug(f"VLM: score={score:.2f} reason={reason!r}")
+        with _vlm_cache_lock:
+            _vlm_cache[img_md5] = score
+            _save_vlm_cache()
         _consecutive_rate_errors = 0
         global _total_calls, _total_input_tokens, _total_output_tokens
         _total_calls += 1
