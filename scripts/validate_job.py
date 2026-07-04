@@ -25,9 +25,8 @@ Warnings (exit 0, logged by worker):
   - Unique concept[0] count below max(15, ceil(N/4)) for videos ≥ 20 sentences
   - Unknown visual_effect value on any sentence (valid: threat/cold/warmth/mystery/sepia/tech/hacker_tech/dream/noir/nature/revelation)
   - visual_effect set on a graphic sentence
-  - Effect-bearing sentences exceed 20% of broll/named sentences
+  - Effect-bearing sentences below 40% of broll/named sentences (target density)
   - Any two adjacent broll/named sentences both carry a visual_effect
-  - Both 'sepia' and 'noir' used in the same video
 
 Hook Zone warnings (sentences 0–4):
   - lower_third, infographic, or list graphic_type in sentences 0–4
@@ -95,6 +94,7 @@ def main():
     seen_captions: dict = {}      # caption → first sentence index
     concept0_counts: dict = {}    # concept[0] → count
     enrichable: list = []         # (sentence_index, concept0) for non-graphic sentences
+    non_lt_graphic_indices: list = []  # sentence indices with infographic/list graphic_type
 
     text_errors = []
 
@@ -129,6 +129,8 @@ def main():
                     "graphic will render blank. All fields (title, label, items, style, etc.) "
                     "must be inside variables: {}"
                 )
+            if gtype_str in ("infographic", "list"):
+                non_lt_graphic_indices.append(i)
 
         if track in ("broll", "named") and not text:
             text_errors.append(
@@ -221,10 +223,11 @@ def main():
     effect_bearing = [e for e in enrichable_tracks if e and e in _VALID_VISUAL_EFFECTS]
     if enrichable_tracks:
         pct = len(effect_bearing) / len(enrichable_tracks)
-        if pct > 0.20:
+        if pct < 0.40:
             warnings.append(
-                f"visual_effect overuse: {len(effect_bearing)}/{len(enrichable_tracks)} "
-                f"broll/named sentences have effects ({pct:.0%} > 20% limit)"
+                f"visual_effect density too low: {len(effect_bearing)}/{len(enrichable_tracks)} "
+                f"broll/named sentences have effects ({pct:.0%} < 40% target) — "
+                "distribute effects more evenly; aim for at least 2 per every 5 sentences"
             )
 
     # Any two adjacent broll/named sentences both carrying an effect
@@ -236,11 +239,21 @@ def main():
             )
             break  # one warning is enough to flag the problem
 
-    used_effects = set(effect_bearing)
-    if "sepia" in used_effects and "noir" in used_effects:
-        warnings.append("both 'sepia' and 'noir' effects used — pick at most one per video")
-    if "tech" in used_effects and "hacker_tech" in used_effects:
-        warnings.append("both 'tech' and 'hacker_tech' effects used — pick at most one per video")
+    # ── Non-lower-third graphic cap and spacing ──────────────────────────────
+    _NON_LT_CAP = 8
+    if len(non_lt_graphic_indices) > _NON_LT_CAP:
+        warnings.append(
+            f"too many infographic/list graphics: {len(non_lt_graphic_indices)} "
+            f"(hard limit is ≤{_NON_LT_CAP}); remove the least necessary ones"
+        )
+    for k in range(1, len(non_lt_graphic_indices)):
+        gap = non_lt_graphic_indices[k] - non_lt_graphic_indices[k - 1]
+        if gap < 4:  # gap < 4 means fewer than 3 sentences between the two graphics
+            warnings.append(
+                f"infographic/list graphics too close: sentence {non_lt_graphic_indices[k - 1]} "
+                f"and sentence {non_lt_graphic_indices[k]} are only {gap - 1} sentence(s) apart "
+                f"— separate them with ≥3 footage sentences so each graphic has room to land"
+            )
 
     # Only consider enrichable slots that actually have a concept[0]
     enrichable_with_c0 = [(idx, c0) for idx, c0 in enrichable if c0 is not None]
