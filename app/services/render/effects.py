@@ -194,16 +194,13 @@ def composite_lower_third(
     """
     Composite a lower_third Revideo clip (white text on black) over stock footage.
 
-    Two-pass blend strategy — no chroma key needed:
-      1. Blob PNG (RGBA): overlaid on footage with its native alpha channel.
-         FFmpeg `overlay` respects the PNG's alpha, so the feathered blob appears
-         correctly without any colour contamination.
-      2. Text clip (white on black): composited via `screen` blend.
-         screen(footage, black=0) = footage  → black bg disappears
-         screen(footage, white=1) = white    → text stays white
+    Pure alpha-compositing strategy — no blend modes:
+      1. Blob PNG (RGBA): overlaid on footage via its native alpha channel.
+      2. Text clip (white on black): black is keyed out with `colorkey`, giving
+         the text clip a proper alpha channel; then overlaid the same way.
 
-    Both the blob and the text fade in/out via separate FFmpeg `fade` filters
-    so they stay in sync.  Falls back to text-only (no blob) if the PNG is absent.
+    Both layers fade in/out via FFmpeg `fade=alpha=1` on their alpha channels.
+    Falls back to text-only (no blob) if the PNG is absent.
     """
     codec = _get_configured_video_codec()
     footage_dur = _probe_duration(footage_path)
@@ -218,27 +215,26 @@ def composite_lower_third(
 
     has_blob = os.path.isfile(_LT_BLOB_PNG)
 
+    # colorkey turns the solid black background of the Revideo clip transparent.
+    # Convert to rgba first so the key operates in RGB space (not YUV), then fade
+    # the alpha channel in/out for the lower-third animation.
+    _text_chain = (
+        f"scale={width}:{height},format=rgba,"
+        f"colorkey=color=0x000000:similarity=0.01:blend=0.05,"
+        f"fade=t=in:st=0:d={fi:.3f}:alpha=1,"
+        f"fade=t=out:st={fo_start:.3f}:d={fo:.3f}:alpha=1"
+    )
+
     if has_blob:
         # Input 0: footage | Input 1: Revideo text clip | Input 2: blob PNG (via -loop 1)
-        # overlay filter requires rgba on both inputs to honour the PNG's alpha channel.
-        # After the overlay we convert to gbrp (planar RGB, no alpha) which is the correct
-        # format for screen blend — gbrp treats all channels numerically, whereas rgba would
-        # bleed the alpha channel into the blend arithmetic.
         filter_complex = (
-            # Footage: scale, convert to rgba so overlay can read its pixels correctly
             f"[0:v]scale={width}:{height},format=rgba[footage];"
-            # Blob PNG: scale, keep rgba, fade alpha channel in/out
             f"[2:v]scale={width}:{height},format=rgba,"
             f"fade=t=in:st=0:d={fi:.3f}:alpha=1,"
             f"fade=t=out:st={fo_start:.3f}:d={fo:.3f}:alpha=1[blob];"
-            # Overlay blob using its native alpha; drop alpha → gbrp for screen blend
-            f"[footage][blob]overlay=0:0,format=gbrp[with_blob];"
-            # Revideo text clip: gbrp (white text on black), fade for screen blend
-            f"[1:v]scale={width}:{height},format=gbrp,"
-            f"fade=t=in:st=0:d={fi:.3f},"
-            f"fade=t=out:st={fo_start:.3f}:d={fo:.3f}[text];"
-            # screen(footage_with_blob, black=0)=footage; screen(…, white=1)=white
-            f"[with_blob][text]blend=all_mode=screen,format=yuv420p[out]"
+            f"[footage][blob]overlay=0:0[with_blob];"
+            f"[1:v]{_text_chain}[text];"
+            f"[with_blob][text]overlay=0:0,format=yuv420p[out]"
         )
         cmd = [
             utils.get_ffmpeg_binary(), "-y",
@@ -255,13 +251,10 @@ def composite_lower_third(
             output_path,
         ]
     else:
-        # No blob PNG — just screen-blend the text over footage
         filter_complex = (
-            f"[0:v]scale={width}:{height},format=gbrp[footage];"
-            f"[1:v]scale={width}:{height},format=gbrp,"
-            f"fade=t=in:st=0:d={fi:.3f},"
-            f"fade=t=out:st={fo_start:.3f}:d={fo:.3f}[text];"
-            f"[footage][text]blend=all_mode=screen,format=yuv420p[out]"
+            f"[0:v]scale={width}:{height},format=rgba[footage];"
+            f"[1:v]{_text_chain}[text];"
+            f"[footage][text]overlay=0:0,format=yuv420p[out]"
         )
         cmd = [
             utils.get_ffmpeg_binary(), "-y",
