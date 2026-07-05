@@ -84,19 +84,23 @@ One sentence describing the shot — used by the CLIP relevance filter. `video_t
 | `"named"` | Specific, uniquely identifiable entity | Google Images (Serper) first |
 | `"broll"` | Generic scene, action, category, location | Stock video/image |
 
-**Entity continuity:** once you assign `"named"` to an entity, keep it for every subsequent sentence still discussing that entity — even without repeating the name. Revert to `"broll"` only when the narration genuinely moves on.
+**Entity continuity:** once you assign `"named"` to an entity, keep `content_track: "named"` for every subsequent sentence still in that entity's section — even without repeating the name. Revert to `"broll"` only when the narration genuinely moves on to a new topic.
 
-| Sentence | `visual_concepts[0]` | `content_track` |
-|---|---|---|
-| "The KEF LS50 Meta costs twelve hundred dollars." | `"KEF LS50 Meta speaker pair"` | `"named"` |
-| "It uses a Uni-Q driver array at its heart." | `"KEF LS50 Meta driver detail"` | `"named"` ← same entity |
-| "Next up is the Focal Aria 906." | `"Focal Aria 906 speaker"` | `"named"` ← new entity |
+**`visual_concepts[0]` = the most relevant Serper-searchable entity for that specific sentence.** This does NOT have to be the same product name every sentence. Within a named entity section, each sentence may point at whichever related entity best illustrates what that sentence is actually saying — the main product, the inventor, a specific component or accessory, a comparison product, the brand itself. The only constraint: `visual_concepts[0]` must be a recognisable proper noun or brand name that Serper can find. Never use sub-detail descriptions as `[0]` — they fail Serper search.
+
+| Sentence | `visual_concepts[0]` | `visual_concepts[1]` | why `[0]` changes |
+|---|---|---|---|
+| "The Bose 901 costs seven hundred dollars restored." | `"Bose 901 speaker pair"` | `"vintage floor speakers"` | main product |
+| "Let me be fair to Amar Bose for a second." | `"Amar Bose"` | `"Bose 901 speaker"` | sentence is about the person |
+| "It requires its powered equalizer in the signal path." | `"Bose 901 equalizer"` | `"stereo rack components"` | sentence is about the accessory |
+| "Those rear-firing drivers bounce off your wall." | `"Bose 901 speaker"` | `"rear speaker placement"` | back to the product |
+| "Next up is the KEF LS50 Meta." | `"KEF LS50 Meta speaker pair"` | `"bookshelf speakers"` | new entity |
 
 **Use `"named"` for:** named people, branded products/SKUs, company logos/HQ, specific vehicles, named landmarks, historical events, named documents/laws, named artworks, distinctive species.
 
 **Stay on `"broll"` for:** generic location types, real places as atmosphere (storefront photos are watermarked), generic actions, a company's generic product category.
 
-For named products, anchor `[0]` to the specific version: `"Kellogg's Corn Pops original yellow box"` not `"Kellogg's Corn Pops"`. Add the key visual to `must_show`.
+For named products, be specific in `[0]`: `"Kellogg's Corn Pops original yellow box"` not `"Kellogg's Corn Pops"`.
 
 ---
 
@@ -139,8 +143,8 @@ Motion overlay composited during rendering. **Target ≥40% of all broll/named s
 
 Keywords passed to the VLM reviewer. The VLM hard-rejects clips missing a `must_show` item.
 
-- **`must_show` required when:** narration names a specific physical object, or sentence is `"named"` for a branded product (add product name + key visual)
-- **`must_show` optional (`[]`):** general scene with no single mandatory element
+- **`must_show` required when:** narration names a specific physical object that must be visible — set it to whatever `visual_concepts[0]` is targeting (the product, the person, the component). It changes sentence by sentence.
+- **`must_show` empty (`[]`) when:** general scene with no mandatory element, OR the entity in `[0]` is a **person** (the narration + `visual_caption` give the VLM sufficient context; requiring a product in `must_show` hard-rejects valid portraits that don't show it)
 - **`avoid`:** when the topic makes wrong image types likely (meme charts in a finance doc; cartoon wildlife in a nature doc)
 
 ---
@@ -345,7 +349,9 @@ Do NOT run `cli.py`. The worker runs it automatically.
 - **`duration` on a graphic sentence** — Whisper derives it; setting it desyncs audio
 - **`lower_third` on broll** — only valid on `content_track: "named"` sentences after sentence 4
 - **Missing `lower_third`** — required on every `"named"` sentence after sentence 4; no exceptions
-- **Named entity continuity** — keep `"named"` until the narration genuinely moves on
+- **Named entity continuity** — keep `content_track: "named"` until the narration genuinely moves on; `visual_concepts[0]` may change sentence-by-sentence to the most relevant related entity (person, component, accessory) — it does not have to repeat the same product name
+- **Sub-detail description as `visual_concepts[0]`** — `"KEF LS50 Meta driver detail"` fails Serper; use `"KEF LS50 Meta speaker"` and put the detail in `[1]` and `visual_caption`
+- **`must_show` locked to product on a person sentence** — when `[0]` targets a person, leave `must_show` empty; listing the product hard-rejects valid portraits
 - **Effects on consecutive sentences** — always separate with ≥1 plain sentence
 - **Under-density or front-loaded effects** — target ≥40% across the whole video, evenly distributed
 - **List item stubs left in `sentences`** — ALL stubs must be deleted

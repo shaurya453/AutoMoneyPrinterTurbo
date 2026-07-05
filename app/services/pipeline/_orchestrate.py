@@ -226,13 +226,23 @@ def start(job_path: str) -> Optional[dict]:
             num_clips = max(1, min(ideal_clips, max_clips_by_min_dur))
 
         floor = num_clips * _MIN_VISUAL_DUR
-        # Narrated graphics (graphic_type + text, not pure graphic) must use the
-        # Whisper-derived duration so cum_end tracks the audio timeline exactly.
-        # Applying _MIN_VISUAL_DUR floor here would push cum_end past the audio
-        # position and cause every subsequent clip to drift late.
+        # Two cases where applying _MIN_VISUAL_DUR would push cum_end past the
+        # next sentence's Whisper timestamp, causing every subsequent clip to
+        # start late (context drift — visuals lag behind the VO):
+        #
+        #  1. Narrated graphics: duration is fixed by Whisper; any floor inflation
+        #     would desync the graphic from the narration it plays under.
+        #  2. Short sentences (sent_audio_dur < _MIN_VISUAL_DUR): the floor would
+        #     inflate the clip well beyond the sentence's audio slot.  Multiple
+        #     consecutive short sentences compound the drift (e.g. "Same money."
+        #     + "None of the heartbreak." can accumulate 3–4 s of visual lag).
+        #     Use the exact available slot instead; 0.5 s minimum ensures a
+        #     renderable clip without causing meaningful drift.
         is_narrated_graphic = bool(sent.get("graphic_type") and sent.get("text"))
         if is_narrated_graphic:
             total = max(raw_total, 1.0)    # 1s Revideo stability floor only
+        elif sent_audio_dur < _MIN_VISUAL_DUR:
+            total = max(raw_total, 0.5)    # exact slot, minimal clip floor
         else:
             total = max(floor, raw_total)
         durations = [total / num_clips] * num_clips
