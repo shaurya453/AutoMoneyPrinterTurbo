@@ -172,7 +172,7 @@ def _is_valid_raster_image(image_path: str) -> bool:
     """
     try:
         with Image.open(image_path) as img:
-            img.verify()
+            img.load()  # force full pixel decode; img.verify() only checks headers and misses truncated scan data
         return True
     except (UnidentifiedImageError, OSError, SyntaxError, Image.DecompressionBombError):
         return False
