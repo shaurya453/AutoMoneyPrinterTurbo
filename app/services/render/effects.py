@@ -18,7 +18,7 @@ _VALID_VISUAL_EFFECTS = frozenset({
 })
 
 _OVERLAY_DIR = os.path.normpath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "resource", "overlays")
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "resource", "overlays")
 )
 
 # Per-effect overlay config: file basename + FFmpeg blend mode + opacity.
@@ -45,7 +45,7 @@ _LT_ANIM_OUT = 0.35   # seconds — fade-out
 
 # Optional user-supplied full-frame RGBA blob PNG for the lower_third backdrop.
 _LT_BLOB_PNG = os.path.normpath(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "resource", "graphics", "lower_third_shadow.png")
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "resource", "graphics", "lower_third_shadow.png")
 )
 
 
