@@ -49,14 +49,37 @@ Set job-root fields and patch each sentence. **Do not rebuild the array from scr
 
 ### `visual_concepts`
 
-1–3 concrete, **subject-free** local visual ideas, specific → broad (≤3 words each for broll; named entity identifiers may be longer). Do not include `video_topic` words — appended automatically.
+1–3 **search queries** sent verbatim to Pexels, Pixabay, DDG, and Wikimedia. Think: what would you type into pexels.com to find this exact shot? Do not include `video_topic` words — the pipeline appends them automatically.
+
+**Query structure: subject + action or subject + setting (2–5 words)**
+- `[0]` = specific but realistically findable — mentally test it on pexels.com. If it returns fewer than 20 results, it will fail. Aim for terms that return 100+.
+- `[1]` = broader fallback used when `[0]` finds nothing usable. Widen the subject, not just reword it.
+- `[2]` = widest fallback — almost any related scene or category that could work.
 
 **Rules:**
-- `[0]` must describe what a camera physically shows — no abstract nouns (`"hope"` → `"sunrise over city"`)
+- `[0]` must describe what a camera physically shows — no abstract nouns (`"hope"` → `"sunrise over city"`, `"effectiveness"` → `"product on clean surface"`)
 - `[1]`/`[2]` must be genuinely broader than `[0]` — not synonyms or near-duplicates
 - Disambiguate collisions: `"court"` → `"courtroom interior"`, `"bar"` → `"crowded bar interior"`, `"firefly"` → `"firefly insect glowing"`, `"jaguar"` → `"jaguar big cat"`, `"python"` → `"python snake coiled"`
 - Same `[0]` on ≤2 consecutive sentences and ≤4 times total. Numbered variants (`"shelf angle 5"`, `"shelf angle 6"`) count as ONE — forbidden.
 - **Pre-submission audit:** unique `[0]` count ≥ `max(15, ceil(N/4))`. For 100 sentences → ≥25 unique.
+
+**What makes a good broll search term:**
+
+| Works | Fails | Why it fails |
+|---|---|---|
+| `"woman applying face cream"` | `"moisturizer effectiveness concept"` | abstract noun + "concept" returns nothing |
+| `"dermatologist examining patient skin"` | `"mature skin texture close-up"` | too niche, near-zero Pexels results |
+| `"skincare products bathroom shelf"` | `"shine control on mature skin"` | adjective phrase, not a searchable subject |
+| `"sunscreen bottle outdoor background"` | `"the feel of a product by noon"` | sentence fragment, no searchable subject |
+| `"woman morning skincare routine"` | `"trust and confidence"` | emotion word, returns stock smiles not skincare |
+| `"businesswoman reading financial report"` | `"corporate accountability"` | abstract — returns random office stock |
+| `"assembly line workers manufacturing"` | `"industrial efficiency concept"` | "concept" suffix always returns garbage |
+
+**Avoid these patterns in `[0]`:**
+- Trailing nouns: `"concept"`, `"philosophy"`, `"approach"`, `"effectiveness"`, `"idea"`
+- Pure emotion/mood words as the primary subject: `"trust"`, `"hope"`, `"confidence"`, `"disappointment"`
+- Overly specific niche shots that don't exist in stock libraries: `"sixty-year-old woman applying SPF 50 by a window"` → `"woman applying sunscreen face"`
+- Sentence fragments or narrative phrases
 
 Match visuals to what the **specific sentence** is about — not the overall theme:
 - Named product/person → use `content_track: "named"` (see below)
@@ -232,7 +255,7 @@ sent 3: revelation
 sent 4: —
 ```
 
-Use active, kinetic visual concepts — `"engineer soldering circuit board close-up"` beats `"technology office interior"`. Vary depth and scale across the 5 cuts.
+Use active, kinetic search terms — `"engineer soldering circuit board"` beats `"technology office interior"`. Vary depth and scale across the 5 cuts. All 5 must be immediately findable on Pexels (100+ results each).
 
 ---
 
@@ -349,7 +372,10 @@ Do NOT run `cli.py`. The worker runs it automatically.
 ## Common Mistakes
 
 - **Clearing `text`** — catastrophic; never touch it
-- **Abstract `visual_concepts`** — `"hope"` → `"sunrise over city horizon"`
+- **Abstract `visual_concepts`** — `"hope"` → `"sunrise over city horizon"`; `"effectiveness"` → `"product on clean surface"`
+- **"Concept" suffix on `[0]`** — `"moisturizer concept"`, `"industrial efficiency concept"`, `"trust concept"` always return garbage; strip the suffix and name a physical subject
+- **Mood/emotion words as primary subject** — `"trust"`, `"hope"`, `"confidence"` as `[0]` pull random stock smiles; describe the scene that *produces* that mood instead
+- **Overly narrow niche queries** — if fewer than 20 Pexels results would exist for your term, broaden it: `"sixty-year-old applying SPF 50 outdoors"` → `"woman applying sunscreen face"`
 - **`video_topic` words in concepts** — pipeline appends them; repeating garbles queries
 - **Ambiguous single words** — `"court"` → `"courtroom interior"`, `"bar"` → `"crowded bar interior"`
 - **Brand/animal/software collisions** — `"firefly"` → `"firefly insect glowing"`, `"jaguar"` → `"jaguar big cat"`, `"python"` → `"python snake coiled"`
