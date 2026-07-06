@@ -43,7 +43,9 @@ _SLOW_IMAGE_DOMAINS = {
 }
 
 # Hosts that returned HTTP 429 during this process run; populated dynamically.
-_per_run_blocked_hosts: set = set()
+# Maps host → monotonic unblock timestamp. Entries expire after _BLOCKED_HOST_TTL_SECONDS.
+_BLOCKED_HOST_TTL_SECONDS = 300  # 5 minutes
+_per_run_blocked_hosts: dict = {}
 _blocked_hosts_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------

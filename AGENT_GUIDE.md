@@ -67,11 +67,25 @@ Match visuals to what the **specific sentence** is about — not the overall the
 
 ### `visual_caption`
 
-One sentence describing the shot — used by the CLIP relevance filter. `video_topic` appended automatically.
+One sentence describing the shot — used by the CLIP relevance filter and VLM. `video_topic` appended automatically.
 
-- Describes the **shot** (subject, setting, composition) — not a search query
-- Specific enough to reject off-topic stock: `"a worried shopper reading a discontinued label in a supermarket aisle"` not `"a person looking surprised"`
+- Describes a **concrete, photographable scene**: specific subject, action, setting, and composition
+- Written as **stock-photo language** — imagine the caption that would appear under a Getty image. A human photographer should be able to recreate the shot from your description alone
+- **Never abstract concepts or emotions**: not `"moisturizer effectiveness"`, `"trust and confidence"`, or `"skincare philosophy"` — these produce unrelated garbage from search engines
+- **Never brand names** on broll sentences (they won't be found by Pexels/DDG/Wikimedia)
+- Specific enough to reject off-topic stock: `"a woman pressing her fingertips to her cheek while looking in a bathroom mirror"` not `"a person touching their face"`
 - Required on every sentence. **No two sentences may share the same caption.**
+
+**Good examples:**
+- `"close-up of sunscreen bottle held in a woman's hand against a sunny outdoor background"`
+- `"dermatologist in white coat examining a patient's skin under a bright clinic light"`
+- `"row of tinted moisturizer bottles lined up on a white bathroom shelf"`
+- `"woman pressing fingertip to cheek checking skin texture in bathroom mirror"`
+
+**Bad examples (too abstract — will return garbage):**
+- `"moisturizer application concept"` → returns dental braces, boats, cartoon coloring pages
+- `"shine control on mature skin"` → returns go-karts, playing cards
+- `"the feel of a product by noon"` → returns nothing relevant
 
 ---
 

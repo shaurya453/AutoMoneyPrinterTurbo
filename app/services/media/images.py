@@ -10,6 +10,7 @@ from loguru import logger
 
 from app.config import config
 from app.services.media._common import (
+    _BLOCKED_HOST_TTL_SECONDS,
     _HTTP_TIMEOUT_IMAGE,
     _SLOW_IMAGE_DOMAINS,
     _api_get_json,
@@ -385,9 +386,13 @@ def save_image(image_url: str, save_dir: str = "") -> str:
             logger.debug(f"skipping slow-domain image: {image_url}")
             return ""
         with _blocked_hosts_lock:
-            if _host in _per_run_blocked_hosts:
-                logger.debug(f"skipping 429-blocked host {_host}")
-                return ""
+            _unblock_at = _per_run_blocked_hosts.get(_host)
+            if _unblock_at is not None:
+                if time.monotonic() < _unblock_at:
+                    logger.debug(f"skipping 429-blocked host {_host}")
+                    return ""
+                else:
+                    del _per_run_blocked_hosts[_host]
 
     headers = {
         "User-Agent": (
@@ -403,8 +408,8 @@ def save_image(image_url: str, save_dir: str = "") -> str:
         )
         if r.status_code == 429:
             with _blocked_hosts_lock:
-                _per_run_blocked_hosts.add(_host)
-            logger.warning(f"429 from {_host} — blocked for this run: {image_url}")
+                _per_run_blocked_hosts[_host] = time.monotonic() + _BLOCKED_HOST_TTL_SECONDS
+            logger.warning(f"429 from {_host} — blocked for 5 min: {image_url}")
             return ""
         r.raise_for_status()
         with open(image_path, "wb") as fh:
