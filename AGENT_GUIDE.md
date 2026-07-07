@@ -24,6 +24,8 @@ Set job-root fields and patch each sentence. **Do not rebuild the array from scr
 
 > **CRITICAL — never clear `text`.** Whisper uses it for timestamp alignment. Blanking any `text` breaks the pipeline: 2-second placeholder clips, empty subtitles, 50+ gap-fill clips. Patch only the fields below.
 
+> **Do NOT set `graphic_type`, `variables`, or `visual_effect` on any sentence.** A dedicated graphics and overlay pass runs after you finish and handles all of those fields.
+
 ---
 
 ### Job-level fields
@@ -60,8 +62,14 @@ Set job-root fields and patch each sentence. **Do not rebuild the array from scr
 - `[0]` must describe what a camera physically shows — no abstract nouns (`"hope"` → `"sunrise over city"`, `"effectiveness"` → `"product on clean surface"`)
 - `[1]`/`[2]` must be genuinely broader than `[0]` — not synonyms or near-duplicates
 - Disambiguate collisions: `"court"` → `"courtroom interior"`, `"bar"` → `"crowded bar interior"`, `"firefly"` → `"firefly insect glowing"`, `"jaguar"` → `"jaguar big cat"`, `"python"` → `"python snake coiled"`
-- Same `[0]` on ≤2 consecutive sentences and ≤4 times total. Numbered variants (`"shelf angle 5"`, `"shelf angle 6"`) count as ONE — forbidden.
-- **Pre-submission audit:** unique `[0]` count ≥ `max(15, ceil(N/4))`. For 100 sentences → ≥25 unique.
+
+> **HARD LIMITS — verified automatically after you finish. Violations trigger a correction pass.**
+> - Same `[0]` on **≤2 consecutive sentences** — three in a row is always wrong
+> - Same `[0]` **≤4 times across the entire video** — this is a *global* cap, not per-product
+> - Unique `[0]` count **≥ max(15, ceil(N/4))** — for 100 sentences you need ≥25 distinct values
+>
+> Numbered variants count as ONE: `"shelf angle 5"` ≡ `"shelf angle 6"` — forbidden.
+> Self-audit your `[0]` column before writing job.json.
 
 **What makes a good broll search term:**
 
@@ -125,12 +133,16 @@ One sentence describing the shot — used by the CLIP relevance filter and VLM. 
 
 **`visual_concepts[0]` = the most relevant Serper-searchable entity for that specific sentence.** This does NOT have to be the same product name every sentence. Within a named entity section, each sentence may point at whichever related entity best illustrates what that sentence is actually saying — the main product, the inventor, a specific component or accessory, a comparison product, the brand itself. The only constraint: `visual_concepts[0]` must be a recognisable proper noun or brand name that Serper can find. Never use sub-detail descriptions as `[0]` — they fail Serper search.
 
+**Named-section variety is mandatory.** A product section with 6+ sentences cannot use the product name as `[0]` for all of them — it hits the ≤4 global cap and the ≤2 consecutive cap simultaneously. Rotate through: the product, a key feature or component, a related accessory, the brand, a comparison product, or the founder/designer. Every named section longer than 2 sentences must show `[0]` variety.
+
 | Sentence | `visual_concepts[0]` | `visual_concepts[1]` | why `[0]` changes |
 |---|---|---|---|
-| "The Bose 901 costs seven hundred dollars restored." | `"Bose 901 speaker pair"` | `"vintage floor speakers"` | main product |
+| "The Bose 901 costs seven hundred dollars restored." | `"Bose 901 speaker pair"` | `"vintage floor speakers"` | main product — use 1 of ≤4 allowed |
 | "Let me be fair to Amar Bose for a second." | `"Amar Bose"` | `"Bose 901 speaker"` | sentence is about the person |
-| "It requires its powered equalizer in the signal path." | `"Bose 901 equalizer"` | `"stereo rack components"` | sentence is about the accessory |
-| "Those rear-firing drivers bounce off your wall." | `"Bose 901 speaker"` | `"rear speaker placement"` | back to the product |
+| "It requires its powered equalizer in the signal path." | `"Bose 901 equalizer"` | `"stereo rack components"` | rotate to accessory — no consecutive repeat |
+| "Those rear-firing drivers bounce off your wall." | `"Bose 901 speaker"` | `"rear speaker placement"` | back to product — 2 of ≤4 allowed |
+| "The bass is weirdly satisfying." | `"Bose 901 speaker"` | `"home audio setup"` | 3 of ≤4 allowed; one more use left globally |
+| "Some audiophiles find the EQ coloration divisive." | `"stereo equalizer rack unit"` | `"audiophile listening room"` | must rotate — 4th use of "Bose 901 speaker" would be the last |
 | "Next up is the KEF LS50 Meta." | `"KEF LS50 Meta speaker pair"` | `"bookshelf speakers"` | new entity |
 
 **Use `"named"` for:** named people, branded products/SKUs, company logos/HQ, specific vehicles, named landmarks, historical events, named documents/laws, named artworks, distinctive species.
@@ -152,30 +164,6 @@ Ignored for `content_track: "named"` (always image). For real places, prefer `"b
 
 ---
 
-### `visual_effect`
-
-Motion overlay composited during rendering. **Target ≥40% of all broll/named sentences, distributed evenly across the entire video.** Assign where the effect genuinely accentuates what's on screen — do not front-load. Leave blank for neutral or transitional clips.
-
-| Value | Overlay | When to use |
-|---|---|---|
-| `"threat"` | Blood splatter | Danger, conflict, violence, harm |
-| `"cold"` | Snow particles | Tension, isolation, despair |
-| `"warmth"` | Sun rays | Hope, triumph, joy, prosperity |
-| `"mystery"` | Fog wisps | Eerie, unknown, conspiracy, dread |
-| `"sepia"` | Film grain + dust scratches | Historic, archival, nostalgia |
-| `"tech"` | Scan-line flicker | Digital, surveillance, data, systems |
-| `"hacker_tech"` | Heavy glitch / scan-lines | Hacking, malicious tech |
-| `"dream"` | Bokeh orbs | Memory, fantasy, aspiration |
-| `"noir"` | Rain streaks | Crime, cynicism, moral decay |
-| `"nature"` | Dust motes + light shafts | Ecology, growth, outdoors |
-| `"revelation"` | Lens flare burst | Discovery, truth, turning point |
-
-**Rules:**
-- Never set on graphic sentences.
-- **Never on two consecutive sentences** — always separate with ≥1 plain sentence.
-
----
-
 ### `must_show` / `avoid`
 
 Keywords passed to the VLM reviewer. The VLM hard-rejects clips missing a `must_show` item.
@@ -192,68 +180,13 @@ Which `motif_palette` entry drives `visual_concepts`. Never the same on consecut
 
 ---
 
-### Graphic Cues
-
-Graphics are **narrated** — the graphic plays while the narrator speaks. Keep `text` intact and in `video_script`. Set `content_track` as normal (`"broll"` for generic context, `"named"` for a named entity). Do NOT set `duration`. Add `visual_concepts` and `visual_caption` as footage fallback.
-
-**ALL graphic fields must be inside `"variables": {}`** — top-level `title`, `label`, etc. are silently ignored and the graphic renders blank.
-
-| `graphic_type` | Required inside `variables` | Optional |
-|---|---|---|
-| `"lower_third"` | `label` (2–6 words, title case) | — |
-| `"infographic"` | `title`, `labels[]`, `values[]` | `unit`, `style` |
-| `"list"` | `items[]` (2–6 strings) | `title`, `style` |
-
-| Type | Styles (omit to auto-rotate) |
-|---|---|
-| `lower_third` | single preset — no styles |
-| `infographic` | `"bars"` · `"horizontal"` (labels >3 words) · `"lollipop"` · `"callouts"` (2–3 standalone stats) |
-| `list` | `"bullets"` · `"numbered"` · `"cascade"` · `"grid"` (4–6 items only) |
-
-**When to insert:**
-
-| Type | Insert when | Hook zone |
-|---|---|---|
-| `lower_third` | Every `content_track: "named"` sentence after sentence 4 — **required** | BANNED |
-| `infographic` | Narrator presents 2+ quantities the viewer must compare — numbers meaningless without visual | BANNED |
-| `list` | Narrator enumerates parallel items where every item is one short phrase | BANNED |
-
-**Placement rules:**
-- `lower_third` is required on every `"named"` sentence after sentence 4 — do not skip.
-- Infographics and lists are **supporting only** — insert when the narration cannot be understood without a visual. Never insert just because a number or list appears.
-- **Combined infographic + list ≤ 8.**
-- **No two infographic/list graphics within 3 sentences of each other.**
-
-**Type-specific rules:**
-- `lower_third`: `label` — entity name/identifier, no punctuation. Only on `"named"` sentences. Banned in sentences 0–4.
-- `infographic`: `labels` and `values` same length; 2–8 data points; all `values` positive. `"callouts"` for 2–3 standalone stats. `"horizontal"` when any label >3 words.
-- `list`: 2–6 items; single-sentence items only. For 2 numerically differing items, use `"infographic"` `"callouts"`. `"grid"` only for 4–6 items.
-
-**Merging list stubs:** `sentence_prep.py` creates one stub per enumerated item. Merge them:
-1. Extract each item to its core phrase → `variables.items`
-2. **Delete every item stub sentence** — leave zero stubs
-3. Set `graphic_type: "list"` on the intro sentence
-
----
-
 ## Hook Zone — Sentences 0–4
 
 | Rule | Requirement |
 |---|---|
-| Graphics | All types banned |
 | `media_type` on `broll` | `"video"` only — no images |
 | `visual_concepts` | All 3 slots filled on every sentence |
 | `visual_concepts[0]` | Distinct on every sentence — no repeats |
-| `visual_effect` | ≥2 of the 5 sentences must carry an effect; no two consecutive |
-
-**Effect placement example:**
-```
-sent 0: warmth
-sent 1: —
-sent 2: —
-sent 3: revelation
-sent 4: —
-```
 
 Use active, kinetic search terms — `"engineer soldering circuit board"` beats `"technology office interior"`. Vary depth and scale across the 5 cuts. All 5 must be immediately findable on Pexels (100+ results each).
 
@@ -271,42 +204,15 @@ Use active, kinetic search terms — `"engineer soldering circuit board"` beats 
   "motif_palette": ["ATM machine cash withdrawal", ...],  // thematic only
 
   "sentences": [
-    // narration sentence
     {
       "text": "The sentence as written — NEVER modify.",
       "visual_concepts": ["concrete scene description", "broader fallback"],
       "content_track": "broll",         // "broll" | "named"
       "visual_caption": "one sentence describing the shot",
-      "visual_effect": "",              // target ≥40% of broll/named sentences
       "media_type": "video",            // "video" | "image"
       "assigned_motif": "...",          // thematic only
       "must_show": [],
       "avoid": []
-    },
-    // lower_third example
-    {
-      "text": "The Sony WH-1000XM5 consistently tops every noise-cancelling chart.",
-      "content_track": "named",
-      "graphic_type": "lower_third",
-      "variables": { "label": "Sony WH-1000XM5" },
-      "visual_concepts": ["Sony WH-1000XM5 headphones", "premium over-ear headphones"],
-      "visual_caption": "Sony WH-1000XM5 headphones on a clean white surface",
-      "must_show": ["Sony WH-1000XM5"]
-    },
-    // infographic example
-    {
-      "text": "China led with 8.1 million EVs, Europe 3.2 million, the US 1.4 million.",
-      "content_track": "broll",
-      "graphic_type": "infographic",
-      "variables": {
-        "title": "Global EV Sales (M units, 2023)",
-        "labels": ["China", "Europe", "USA"],
-        "values": [8.1, 3.2, 1.4],
-        "unit": "M units",
-        "style": "bars"
-      },
-      "visual_concepts": ["electric vehicle factory", "EV assembly plant"],
-      "visual_caption": "rows of electric cars on a modern assembly line"
     }
   ],
 
@@ -334,9 +240,7 @@ Match `bgm_search_term` to tone: `"tense thriller score"`, `"uplifting corporate
 ## Step 2.5 — Review Pass (mandatory)
 
 **Hook Zone (sentences 0–4):**
-- [ ] No graphics?
 - [ ] All `broll` sentences have `media_type: "video"`?
-- [ ] ≥2 effects, no two consecutive?
 - [ ] All 3 `visual_concepts` slots filled?
 - [ ] Distinct `visual_concepts[0]` on every sentence?
 
@@ -347,14 +251,9 @@ Match `bgm_search_term` to tone: `"tense thriller score"`, `"uplifting corporate
 - [ ] Every named entity marked `"named"`? Every generic scene `"broll"`?
 - [ ] No two sentences share the same `visual_caption`?
 - [ ] `max_image_ratio` set at job root?
-- [ ] Unique `[0]` count ≥ `max(15, ceil(N/4))`?
-- [ ] Effects ≥40% of broll/named sentences, distributed evenly — no two adjacent, no front-loading?
-- [ ] All graphics narrated: real `text`, no `duration`, `visual_concepts`/`visual_caption` set?
-- [ ] Every `content_track: "named"` sentence after sentence 4 has `graphic_type: "lower_third"`?
-- [ ] Each infographic/list present because narration cannot be understood without it?
-- [ ] Combined infographic + list ≤ 8? No two within 3 sentences of each other?
-- [ ] `labels` and `values` same length on all infographics?
-- [ ] All list item stubs deleted?
+- [ ] Tally every `[0]` value: any used >4 times total? Any used >2 times consecutively?
+- [ ] Count distinct `[0]` values: is the total ≥ `max(15, ceil(N/4))`? (N = enrichable sentences)
+- [ ] Named sections with 3+ sentences: does `[0]` rotate — not the same product name throughout?
 - [ ] No two consecutive sentences share `assigned_motif`? (thematic)
 
 ---
@@ -385,21 +284,6 @@ Do NOT run `cli.py`. The worker runs it automatically.
 - **`"named"` for real places** — storefront/landmark photos are watermarked; use `"broll"` + `"video"`
 - **Duplicate `visual_caption`** — every sentence must have a unique caption
 - **Generic `bgm_search_term`** — match to tone on emotional content
-- **Graphic fields at the top level** — `title`, `style`, `label`, `items` MUST be inside `"variables": {}`; top-level fields are silently ignored and the graphic renders blank
-- **`duration` on a graphic sentence** — Whisper derives it; setting it desyncs audio
-- **`lower_third` on broll** — only valid on `content_track: "named"` sentences after sentence 4
-- **Missing `lower_third`** — required on every `"named"` sentence after sentence 4; no exceptions
 - **Named entity continuity** — keep `content_track: "named"` until the narration genuinely moves on; `visual_concepts[0]` may change sentence-by-sentence to the most relevant related entity (person, component, accessory) — it does not have to repeat the same product name
 - **Sub-detail description as `visual_concepts[0]`** — `"KEF LS50 Meta driver detail"` fails Serper; use `"KEF LS50 Meta speaker"` and put the detail in `[1]` and `visual_caption`
-- **`must_show` locked to product on a person sentence** — when `[0]` targets a person, leave `must_show` empty; listing the product hard-rejects valid portraits
-- **Effects on consecutive sentences** — always separate with ≥1 plain sentence
-- **Under-density or front-loaded effects** — target ≥40% across the whole video, evenly distributed
-- **List item stubs left in `sentences`** — ALL stubs must be deleted
-- **`list` for multi-sentence items** — if any item needs 2+ sentences, use regular broll for all
-- **`list` for two numerically differing items** — use `"infographic"` `"callouts"` instead
-- **`infographic` for a single statistic** — needs ≥2 labeled values
-- **`infographic` with long labels and `"bars"`** — use `"horizontal"` when any label >3 words
-- **`"grid"` for fewer than 4 items** — use `"bullets"` or `"cascade"` for 2–3 items
-- **Infographic/list because data appears** — only when viewer cannot follow the narration without it
-- **Two infographic/list graphics within 3 sentences** — separate with ≥3 footage sentences
-- **More than 8 combined infographic + list** — hard limit ≤8
+- **`must_show` locked to product on a person sentence** — when `[0]` targets a person, leave `must_show` empty; listing the product hard-rejects valid portraits that don't show it

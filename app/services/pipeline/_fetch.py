@@ -1,6 +1,7 @@
 """Clip fetch: download + verify stock video or image for each sentence."""
 import io
 import os
+import threading
 import time
 from typing import Any, List, Optional, Tuple
 
@@ -19,6 +20,40 @@ from app.services.pipeline._planning import (
     _build_query_ladder,
 )
 from app.utils import utils
+
+
+class _ThreadSafeURLSet:
+    """Thread-safe wrapper around a URL-tracking set.
+
+    Exposes the standard set interface (``in``, ``.add()``) for read-only
+    or single-threaded callers, plus an atomic ``try_claim(*items)`` method
+    that checks *and* adds inside a single critical section.  This prevents
+    two worker threads from both believing they are the first to claim the
+    same clip URL between a bare ``in`` check and a subsequent ``.add()``.
+    """
+
+    def __init__(self) -> None:
+        self._lock: threading.Lock = threading.Lock()
+        self._set: set = set()
+
+    def __contains__(self, item: object) -> bool:
+        return item in self._set
+
+    def add(self, item: str) -> None:
+        self._set.add(item)
+
+    def try_claim(self, *items: str) -> bool:
+        """Atomically check-and-add.
+
+        Returns True and adds all *items* when none are already present.
+        Returns False (adding nothing) if any item is already in the set,
+        meaning another thread already claimed this URL.
+        """
+        with self._lock:
+            if any(i in self._set for i in items):
+                return False
+            self._set.update(items)
+            return True
 
 
 def _fetch_video_clip(
@@ -134,9 +169,17 @@ def _fetch_video_clip(
                 continue
             candidate = items[pos]
             term_pos[t_idx] = pos + 1
+            # Atomically claim the URL before downloading.  If a concurrent
+            # thread grabbed the same candidate between the `in used_urls`
+            # scan above and this point, skip it; the outer while-loop will
+            # try the next candidate on its next pass.
+            if hasattr(used_urls, 'try_claim'):
+                if not used_urls.try_claim(candidate.url):
+                    continue
+            else:
+                used_urls.add(candidate.url)
             progressed = True
             attempts += 1
-            used_urls.add(candidate.url)
 
             downloaded = material.save_video(
                 video_url=candidate.url,

@@ -213,7 +213,9 @@ def composite_lower_third(
     fo       = min(_LT_ANIM_OUT, gfx_dur / 4)
     fo_start = max(0.0, gfx_dur - fo)
 
-    has_blob = os.path.isfile(_LT_BLOB_PNG)
+    # The Revideo scene now renders a dynamically-sized dark rect backdrop behind
+    # the text, so the static blob PNG overlay is no longer needed.
+    has_blob = False  # was: os.path.isfile(_LT_BLOB_PNG)
 
     # colorkey turns the solid black background of the Revideo clip transparent.
     # Convert to rgba first so the key operates in RGB space (not YUV), then fade
@@ -221,6 +223,7 @@ def composite_lower_third(
     _text_chain = (
         f"scale={width}:{height},format=rgba,"
         f"colorkey=color=0x000000:similarity=0.01:blend=0.05,"
+        f"colorchannelmixer=aa=0.75,"
         f"fade=t=in:st=0:d={fi:.3f}:alpha=1,"
         f"fade=t=out:st={fo_start:.3f}:d={fo:.3f}:alpha=1"
     )

@@ -26,7 +26,7 @@ from app.services.pipeline._whisper import _get_sentence_timestamps, _uniform_ti
 from app.services.pipeline._planning import (
     _trim_clip, _get_visual_concepts, _build_query_ladder, _TRIM_BUFFER,
 )
-from app.services.pipeline._fetch import _fetch_clip
+from app.services.pipeline._fetch import _fetch_clip, _ThreadSafeURLSet
 from app.utils import subtitle, utils
 
 
@@ -170,7 +170,7 @@ def start(job_path: str) -> Optional[dict]:
 
     ordered_clips: List[str] = []
     planned_clip_durations: List[float] = []  # parallel to ordered_clips; frame-snap target for combine_videos
-    used_urls: set = set()  # tracks clip URLs used this run to prevent reuse
+    used_urls = _ThreadSafeURLSet()  # tracks clip URLs used this run to prevent reuse
     total_sentences = len(timings)
 
     # Video sentences: download multiple ~4-second clips to cover the sentence
@@ -345,11 +345,15 @@ def start(job_path: str) -> Optional[dict]:
                 from app.utils import graphics as _graphics
                 whisper_dur = sum(durations)
 
+                _GRAPHIC_MIN_DUR = 5.0  # list/infographic must be on-screen ≥5 s to be readable
                 if sent.get("graphic_type") == "list":
                     n_items = len(sent.get("variables", {}).get("items", []))
                     _list_anim_in = 0.80 + n_items * 0.30
-                    _trim_target  = max(whisper_dur, _list_anim_in + 0.50)
+                    _trim_target  = max(whisper_dur, _list_anim_in + 0.50, _GRAPHIC_MIN_DUR)
                     render_dur    = _trim_target + 0.40
+                elif sent.get("graphic_type") == "infographic":
+                    _trim_target = max(whisper_dur, _GRAPHIC_MIN_DUR)
+                    render_dur   = max(_trim_target, _MIN_ANIM_DUR)
                 else:
                     _trim_target = whisper_dur
                     render_dur   = max(whisper_dur, _MIN_ANIM_DUR)
@@ -552,6 +556,57 @@ def start(job_path: str) -> Optional[dict]:
                 else:
                     video_clip_count += 1
                 _sentence_got_clip.add(idx)
+            else:
+                # Fetch failed — insert a placeholder clip of the correct duration so
+                # the video timeline stays in sync with the audio narration.
+                # Without this, each failed fetch leaves a "hole": the narration plays
+                # for `clip_duration` seconds with no corresponding video, causing every
+                # subsequent clip to appear progressively earlier than the VO that
+                # describes it. Eight failures before a named-product sentence already
+                # produces ~32 s of drift at that cut.
+                ph_dur = clip_duration + trim_buffer
+                ph_path = os.path.join(clips_dir, f"clip-{meta['clip_idx']:04d}-ph.mp4")
+                ph_w, ph_h = video_aspect.to_resolution()
+                ph_ok = False
+                if ordered_clips:
+                    # Loop the previous clip so the screen isn't black.
+                    _prev = ordered_clips[-1]
+                    _ph_cmd = [
+                        utils.get_ffmpeg_binary(), "-y",
+                        "-stream_loop", "-1", "-i", _prev,
+                        "-t", f"{ph_dur:.6f}",
+                        "-vf", f"fps=30,scale={ph_w}:{ph_h}:flags=lanczos",
+                        "-c:v", "libx264", "-preset", "ultrafast",
+                        "-pix_fmt", "yuv420p", "-an", ph_path,
+                    ]
+                    _ph_r = subprocess.run(_ph_cmd, capture_output=True, timeout=60)
+                    ph_ok = _ph_r.returncode == 0
+                if not ph_ok:
+                    # Fallback: solid black clip.
+                    _ph_cmd = [
+                        utils.get_ffmpeg_binary(), "-y",
+                        "-f", "lavfi",
+                        "-i", f"color=c=black:s={ph_w}x{ph_h}:r=30",
+                        "-t", f"{ph_dur:.6f}",
+                        "-c:v", "libx264", "-preset", "ultrafast",
+                        "-pix_fmt", "yuv420p", "-an", ph_path,
+                    ]
+                    _ph_r = subprocess.run(_ph_cmd, capture_output=True, timeout=60)
+                    ph_ok = _ph_r.returncode == 0
+                if ph_ok:
+                    ordered_clips.append(ph_path)
+                    planned_clip_durations.append(ph_dur)
+                    obtained_duration += clip_duration
+                    video_clip_count += 1
+                    logger.warning(
+                        f"clip {meta['clip_idx']}: fetch failed — inserted "
+                        f"{clip_duration:.2f}s placeholder to maintain A/V sync"
+                    )
+                else:
+                    logger.error(
+                        f"clip {meta['clip_idx']}: fetch failed AND placeholder "
+                        f"generation failed — this sentence will cause drift"
+                    )
 
     logger.info(
         f"parallel clip fetch done in {time.monotonic() - _fetch_t0:.1f}s "

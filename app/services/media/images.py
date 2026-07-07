@@ -536,8 +536,16 @@ def download_image(
 
     def _claim(url: str, term: str, provider: str, local: str, note: str = "") -> str:
         if used_urls is not None:
-            used_urls.add(url)
-            used_urls.add(local)  # prevent same cached file reused via a different URL
+            if hasattr(used_urls, 'try_claim'):
+                # Atomically claim both the source URL and the local cache
+                # path.  If another thread beat us to this candidate, return
+                # '' so the caller can try the next one instead.
+                if not used_urls.try_claim(url, local):
+                    logger.debug(f"image URL already claimed by concurrent thread: {url}")
+                    return ''
+            else:
+                used_urls.add(url)
+                used_urls.add(local)  # prevent same cached file reused via a different URL
         logger.info(f"image obtained via {provider} for '{term}': {local}{note}")
         return local
 
@@ -615,9 +623,12 @@ def download_image(
                         continue
 
                 if not use_relevance:
-                    if dedup_emb is not None:
-                        recent_embeddings.append(dedup_emb)
-                    return _claim(url, term, provider, local)
+                    _r = _claim(url, term, provider, local)
+                    if _r:
+                        if dedup_emb is not None and recent_embeddings is not None:
+                            recent_embeddings.append(dedup_emb)
+                        return _r
+                    continue  # another thread claimed this URL; try next candidate
 
                 s = relevance.score(prompt, image_bytes)
                 if config.app.get("relevance_debug_log", False):
@@ -625,9 +636,12 @@ def download_image(
                 margin_ok = relevance.passes_margin(prompt, image_bytes, margin)
                 if margin_ok is None or margin_ok:
                     note = f" (score={s:.3f})" if s is not None else ""
-                    if dedup_emb is not None:
-                        recent_embeddings.append(dedup_emb)
-                    return _claim(url, term, provider, local, note)
+                    _r = _claim(url, term, provider, local, note)
+                    if _r:
+                        if dedup_emb is not None and recent_embeddings is not None:
+                            recent_embeddings.append(dedup_emb)
+                        return _r
+                    continue  # another thread claimed this URL; try next candidate
                 if s is not None and s > fallback_score:
                     fallback_score = s
                     fallback_path, fallback_url = local, url
@@ -639,9 +653,13 @@ def download_image(
                 f"no image cleared relevance margin {margin} for {search_terms}; "
                 f"using best available for '{fallback_term}' (score={fallback_score:.3f}): {fallback_path}"
             )
-            if fallback_emb is not None and recent_embeddings is not None:
-                recent_embeddings.append(fallback_emb)
-            return _claim(fallback_url, fallback_term, fallback_provider, fallback_path)
+            _r = _claim(fallback_url, fallback_term, fallback_provider, fallback_path)
+            if _r:
+                if fallback_emb is not None and recent_embeddings is not None:
+                    recent_embeddings.append(fallback_emb)
+                return _r
+            # Another thread claimed the fallback while we were scoring; no
+            # image found this call — let the higher-level caller fall back.
         return ""
 
     result = _try()
