@@ -3,6 +3,7 @@
 This module is the dependency base layer: it must NOT import from
 images.py or videos.py.
 """
+import random
 import threading
 import time
 
@@ -116,9 +117,10 @@ def _api_get_json(url: str, headers: dict = None, timeout: tuple = _HTTP_TIMEOUT
             verify=_get_tls_verify(), timeout=timeout,
         )
         if r.status_code == 429 and attempt < 2:
-            wait = 2 ** attempt  # 1 s, 2 s
-            logger.warning(f"429 rate limit from API (attempt {attempt + 1}/3) — retrying in {wait}s")
-            time.sleep(wait)
+            wait = 2 ** attempt  # 1 s, 2 s base
+            jitter = wait * random.uniform(0.0, 0.5)  # ±0–50% so workers don't retry in sync
+            logger.warning(f"429 rate limit from API (attempt {attempt + 1}/3) — retrying in {wait + jitter:.1f}s")
+            time.sleep(wait + jitter)
             continue
         r.raise_for_status()
         return r.json()

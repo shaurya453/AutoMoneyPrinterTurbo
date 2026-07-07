@@ -303,6 +303,10 @@ def start(job_path: str) -> Optional[dict]:
     clip_counter = 0  # unique index for clip filenames across all sentences
     obtained_duration = 0.0
     _seen_lower_third_labels: set = set()
+    # Planned submission counts — updated at submission time so the image-ratio cap
+    # has real numbers during Phase A (Phase B counters lag until futures complete).
+    _planned_image_count = 0
+    _planned_video_count = 0
 
     max_fetch_workers = int(config.app.get("clip_fetch_workers", 4))
 
@@ -414,16 +418,23 @@ def start(job_path: str) -> Optional[dict]:
                 concept_usage[c] += 1
 
             for clip_duration in durations:
-                # Image ratio cap is best-effort in parallel mode (counts are stale).
                 is_image_override = None
                 if is_image and sent.get("content_track", "broll") != "named":
-                    total_so_far = image_clip_count + video_clip_count
-                    projected_ratio = (image_clip_count + 1) / (total_so_far + 1)
-                    if projected_ratio > max_image_ratio:
+                    _total_planned = _planned_image_count + _planned_video_count
+                    _projected = (_planned_image_count + 1) / (_total_planned + 1)
+                    if _projected > max_image_ratio:
                         is_image_override = False
+                        _planned_video_count += 1
                         logger.info(
-                            f"clip {clip_counter}: image ratio cap — trying video first"
+                            f"clip {clip_counter}: image ratio cap "
+                            f"({_planned_image_count}/{_total_planned or 1} planned) — trying video first"
                         )
+                    else:
+                        _planned_image_count += 1
+                elif is_image:
+                    _planned_image_count += 1
+                else:
+                    _planned_video_count += 1
 
                 visual_effect = sent.get("visual_effect", "")
                 # Consecutive-repeat guard is applied in Phase B (ordering is known there).
@@ -490,13 +501,14 @@ def start(job_path: str) -> Optional[dict]:
             clip_duration = meta["clip_duration"]
 
             # Consecutive-repeat guard (deferred from Phase A where order was unknown).
+            # Only update _last_visual_effect when a clip is actually added to the timeline;
+            # a failed fetch never played its effect so it shouldn't suppress the next clip's.
             visual_effect = meta["visual_effect"]
             if visual_effect and visual_effect == _last_visual_effect:
                 logger.info(
                     f"clip {meta['clip_idx']}: skipping consecutive repeat overlay '{visual_effect}'"
                 )
                 visual_effect = ""
-            _last_visual_effect = visual_effect  # update regardless of fetch success
 
             if fetched:
                 clip_path, used_image = fetched
@@ -512,8 +524,11 @@ def start(job_path: str) -> Optional[dict]:
                     )
 
                 # lower_third composite — apply on the first successful clip of the sentence.
+                # Consume the slot regardless of success so a failed ffmpeg call doesn't
+                # cause all remaining clips in the sentence to retry the same broken composite.
                 lt_gfx_clip = meta.get("lt_gfx_clip")
                 if lt_gfx_clip and idx not in _lt_composited_sentences:
+                    _lt_composited_sentences.add(idx)
                     lt_out = clip_path.replace(".mp4", "_lt.mp4")
                     lt_w, lt_h = video_aspect.to_resolution()
                     lt_result = video.composite_lower_third(
@@ -522,13 +537,13 @@ def start(job_path: str) -> Optional[dict]:
                     )
                     if lt_result:
                         clip_path = lt_result
-                        _lt_composited_sentences.add(idx)
                     else:
                         logger.warning(
                             f"sentence {idx+1}: lower_third composite failed — "
                             "footage used without label overlay"
                         )
 
+                _last_visual_effect = visual_effect
                 ordered_clips.append(clip_path)
                 planned_clip_durations.append(clip_duration + trim_buffer)
                 obtained_duration += clip_duration
@@ -545,6 +560,28 @@ def start(job_path: str) -> Optional[dict]:
     for idx in range(len(clip_plans)):
         if idx not in _sentence_got_clip:
             logger.warning(f"sentence {idx+1}: skipping — no clip available")
+
+    # Seed recent_embs with embeddings from the last few main-pool clips so that
+    # gap-fill can deduplicate against them.  Workers passed recent_embeddings=None
+    # so the deque is still empty here; without seeding, gap-fill is blind to the
+    # entire main pool and can repeat visually identical shots.
+    if recent_embs is not None and ordered_clips:
+        from app.services.scoring import nsfw as _nsfw_scoring, relevance as _rel_scoring
+        if _rel_scoring.is_available():
+            _seed_clips = ordered_clips[-dedup_lookback:]
+            _seeded = 0
+            for _cp in _seed_clips:
+                try:
+                    _frames = _nsfw_scoring.sample_frame_bytes(_cp)
+                    if _frames:
+                        _emb = _rel_scoring.embed_image(_frames[0])
+                        if _emb is not None:
+                            recent_embs.append(_emb)
+                            _seeded += 1
+                except Exception:
+                    pass
+            if _seeded:
+                logger.info(f"gap-fill dedup: seeded {_seeded} embeddings from main clip pool")
 
     if not ordered_clips:
         logger.error("no clips obtained for any sentence — aborting")

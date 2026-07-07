@@ -35,7 +35,9 @@ _vlm_cache: dict = {}
 _vlm_cache_loaded = False
 _vlm_cache_lock = threading.Lock()
 
-# Per-run usage accumulators (reset at pipeline start via reset_usage()).
+# Per-run usage accumulators and circuit-breaker state; all guarded by one lock
+# so concurrent workers can't corrupt the counts or bypass the threshold.
+_vlm_stats_lock = threading.Lock()
 _total_calls = 0
 _total_input_tokens = 0
 _total_output_tokens = 0
@@ -223,25 +225,29 @@ def verify_image(
         with _vlm_cache_lock:
             _vlm_cache[img_md5] = score
             _save_vlm_cache()
-        _consecutive_rate_errors = 0
         global _total_calls, _total_input_tokens, _total_output_tokens
-        _total_calls += 1
-        if response.usage:
-            _total_input_tokens += response.usage.prompt_tokens or 0
-            _total_output_tokens += response.usage.completion_tokens or 0
+        with _vlm_stats_lock:
+            _consecutive_rate_errors = 0
+            _total_calls += 1
+            if response.usage:
+                _total_input_tokens += response.usage.prompt_tokens or 0
+                _total_output_tokens += response.usage.completion_tokens or 0
         return score
     except Exception as exc:
         exc_str = str(exc)
         if "429" in exc_str or "rate_limit" in exc_str.lower() or "quota" in exc_str.lower():
-            _consecutive_rate_errors += 1
-            if _consecutive_rate_errors >= _CIRCUIT_BREAKER_THRESHOLD:
-                _circuit_open = True
+            with _vlm_stats_lock:
+                _consecutive_rate_errors += 1
+                _current_errors = _consecutive_rate_errors
+                if _current_errors >= _CIRCUIT_BREAKER_THRESHOLD:
+                    _circuit_open = True
+            if _current_errors >= _CIRCUIT_BREAKER_THRESHOLD:
                 logger.warning(
-                    f"VLM circuit breaker tripped after {_consecutive_rate_errors} "
+                    f"VLM circuit breaker tripped after {_current_errors} "
                     f"consecutive rate errors — VLM disabled for this run (fail-open)"
                 )
             else:
-                logger.warning(f"VLM rate error ({_consecutive_rate_errors}/{_CIRCUIT_BREAKER_THRESHOLD}), fail-open")
+                logger.warning(f"VLM rate error ({_current_errors}/{_CIRCUIT_BREAKER_THRESHOLD}), fail-open")
         else:
             logger.warning(f"VLM verify failed (fail-open): {exc}")
         return None

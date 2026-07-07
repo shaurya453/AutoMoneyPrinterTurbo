@@ -49,7 +49,7 @@ Set job-root fields and patch each sentence. **Do not rebuild the array from scr
 
 ### `visual_concepts`
 
-1–3 **search queries** sent verbatim to Pexels, Pixabay, DDG, and Wikimedia. Think: what would you type into pexels.com to find this exact shot? Do not include `video_topic` words — the pipeline appends them automatically.
+1–3 **search queries** sent verbatim to Pexels, Pixabay, DDG, and Wikimedia. Think: what would you type into pexels.com to find this exact shot? Do not include bare `video_topic` words in your concepts — for `named_entity` videos the pipeline also tries `"{concept} {video_topic}"` as a rung automatically; for `thematic` videos concepts are used as-is (the topic appears only as a last-resort catch-all rung, not paired with each concept).
 
 **Query structure: subject + action or subject + setting (2–5 words)**
 - `[0]` = specific but realistically findable — mentally test it on pexels.com. If it returns fewer than 20 results, it will fail. Aim for terms that return 100+.

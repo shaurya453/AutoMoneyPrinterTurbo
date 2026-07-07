@@ -235,4 +235,4 @@ Check status: `pm2 list` — services are `portal-web` (Next.js, port 3000) and 
 - `zoompan` z values must be ≥ 1.0 — values < 1 produce negative x-offset → garbage output
 - `combine_videos()` expects all clips to be H.264 MP4 at target resolution and 30 fps
 - Revideo `renderVideo()` Puppeteer args go inside `settings.puppeteer.args`, not at top level
-- The pipeline is sequential — no parallel clip fetching; Revideo renders are also synchronous
+- Clip fetching is parallelised via `ThreadPoolExecutor` (`clip_fetch_workers` in config.toml, default 4). Revideo renders remain synchronous — Phase A renders graphics sequentially before footage-fetch futures are submitted. All scorer lazy-loads (CLIP model, NudeNet) must be thread-safe; use `_model_load_lock` (double-checked locking) as in `relevance.py`

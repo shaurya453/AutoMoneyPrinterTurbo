@@ -23,6 +23,7 @@ mirrors the SKIP_WHISPER=1 dry-run pattern in pipeline.py.
 
 import io
 import os
+import threading
 from typing import Any, List, Optional, Sequence, Tuple
 
 from loguru import logger
@@ -64,6 +65,7 @@ _JUNK_ANCHORS = [
 
 _model = None
 _model_load_attempted = False
+_model_load_lock = threading.Lock()
 _text_embedding_cache: dict = {}
 
 
@@ -104,7 +106,11 @@ def _get_model():
     global _model, _model_load_attempted
     if _model is not None or _model_load_attempted:
         return _model
-    _model_load_attempted = True
+    with _model_load_lock:
+        # Double-checked: another thread may have loaded while we waited.
+        if _model is not None or _model_load_attempted:
+            return _model
+        _model_load_attempted = True
 
     if not config.app.get("relevance_filter_enabled", True):
         logger.info("relevance filter disabled (relevance_filter_enabled=false)")
