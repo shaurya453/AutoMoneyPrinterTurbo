@@ -6,6 +6,7 @@ import subprocess
 import time
 from collections import Counter as _Counter
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, List, Optional, Tuple
 
 from loguru import logger
@@ -286,10 +287,9 @@ def start(job_path: str) -> Optional[dict]:
                 _seen_concepts.add(concept)
                 _all_concepts.append(concept)
 
-    # ---- Pass 2: fetch clips according to the plan ----
-    # Soft cap on the fraction of clips that may come from still images —
-    # backstops the enrichment agent's media_type choices regardless of how
-    # well it followed AGENT_GUIDE.md's image-ratio guidance.
+    # ---- Pass 2: fetch clips in parallel according to the plan ----
+    # Soft cap on the fraction of clips that may come from still images.
+    # In parallel mode this is best-effort — counts lag while futures are in-flight.
     max_image_ratio = float(job.get("max_image_ratio", config.app.get("max_image_ratio", 1.0)))
     image_clip_count = 0
     video_clip_count = 0
@@ -297,162 +297,211 @@ def start(job_path: str) -> Optional[dict]:
     # Concept-frequency guard: when the enrichment agent mode-collapses and
     # assigns the same visual_concepts to many sentences, the same search terms
     # exhaust their candidate pools quickly and produce visually monotone clips.
-    # Track per-concept usage and substitute fresh alternatives from the job's
-    # full concept pool once a concept has been used max_concept_reuse times.
     concept_usage: _Counter = _Counter()
     max_concept_reuse = int(config.app.get("max_concept_reuse", 2))
 
     clip_counter = 0  # unique index for clip filenames across all sentences
-    obtained_duration = 0.0  # sum of planned durations that yielded a clip
-    _last_visual_effect: str = ""  # no-consecutive-repeat for overlay effects
-    _seen_lower_third_labels: set = set()  # dedup: each label shown at most once
-    for idx, plan in enumerate(clip_plans):
-        sent = plan["sent"]
-        durations = plan["durations"]
-        is_image = plan["is_image"]
-        preview = (sent.get("text") or sent.get("graphic_type", "graphic"))[:60]
-        logger.info(
-            f"[{idx+1}/{total_sentences}] {plan['sent_audio_dur']:.2f}s audio → "
-            f"{len(durations)} clip(s) {'(image)' if is_image else ''} — {preview}"
-        )
+    obtained_duration = 0.0
+    _seen_lower_third_labels: set = set()
 
-        got_any = False
-        _lt_gfx_clip: Optional[str] = None   # lower_third Revideo clip pending composite
+    max_fetch_workers = int(config.app.get("clip_fetch_workers", 4))
 
-        # Narrated graphic — sentence has real VO text AND graphic_type set.
-        # Render a Revideo clip sized to the full Whisper-derived sentence duration
-        # instead of fetching stock footage.  If the render fails, falls through to
-        # the normal footage fetch so the sentence is never left visually empty.
-        # Exception: lower_third overlays ON footage rather than replacing it —
-        # the rendered clip is stashed in _lt_gfx_clip and composited after fetch.
-        if sent.get("graphic_type") and sent.get("text"):
-            from app.utils import graphics as _graphics
-            whisper_dur = sum(durations)       # exact audio slot from Whisper
+    def _fetch_clip_with_budget(budget_seconds: float, **kw):
+        """Set deadline at execution time (inside worker thread), not at submission time."""
+        kw["deadline"] = time.monotonic() + budget_seconds
+        return _fetch_clip(**kw)
 
-            # For list graphics, ensure all items finish animating in before the
-            # clip is trimmed.  Worst-case animIn across all 4 list variants is the
-            # cascade variant (C): titleTime≈0.52s + (n-1)×0.30s stagger + 0.58s
-            # sweep+fade ≈ 0.80 + n×0.30s.  We require at least 0.5s of dwell after
-            # the last item appears so the viewer can read it, then trim there rather
-            # than at whisper_dur.  A 0.40s pad on top gives room for the fade-out.
-            if sent.get("graphic_type") == "list":
-                n_items = len(sent.get("variables", {}).get("items", []))
-                _list_anim_in = 0.80 + n_items * 0.30   # worst-case animIn (cascade)
-                _trim_target  = max(whisper_dur, _list_anim_in + 0.50)   # +0.5s dwell
-                render_dur    = _trim_target + 0.40      # +fade-out
-            else:
-                _trim_target = whisper_dur
-                render_dur   = max(whisper_dur, _MIN_ANIM_DUR)
+    # _task_queue: ordered list of (future | None, metadata_dict).
+    # None future = standalone graphic, already rendered, no IO needed.
+    _task_queue: List[tuple] = []
 
-            gfx_path = os.path.join(clips_dir, f"clip-{clip_counter:04d}.mp4")
-            clip_counter += 1
-            w, h = video_aspect.to_resolution()
-            rendered = _graphics.render_graphic_clip(
-                graphic_type=sent["graphic_type"],
-                out_path=gfx_path,
-                duration=render_dur,
-                width=w,
-                height=h,
-                fps=30,
-                variables=sent.get("variables", {}),
-                style=sent.get("variables", {}).get("style"),
+    _fetch_t0 = time.monotonic()
+
+    with ThreadPoolExecutor(max_workers=max_fetch_workers) as executor:
+
+        # ---- Phase A: render graphics sequentially + submit footage fetch tasks ----
+        for idx, plan in enumerate(clip_plans):
+            sent = plan["sent"]
+            durations = plan["durations"]
+            is_image = plan["is_image"]
+            preview = (sent.get("text") or sent.get("graphic_type", "graphic"))[:60]
+            logger.info(
+                f"[{idx+1}/{total_sentences}] {plan['sent_audio_dur']:.2f}s audio → "
+                f"{len(durations)} clip(s) {'(image)' if is_image else ''} — {preview}"
             )
-            if rendered and render_dur > _trim_target:
-                # Clip rendered longer than target slot; trim to target.
-                trim_path = gfx_path.replace('.mp4', '-t.mp4')
-                if _trim_clip(rendered, _trim_target, trim_path):
-                    os.replace(trim_path, gfx_path)
+
+            # lower_third Revideo clip for this sentence (composited onto footage).
+            # Stored in every clip's metadata for the sentence so it can fall
+            # through to the second clip if the first fetch fails.
+            _lt_for_sentence: Optional[str] = None
+
+            # Narrated graphic — sentence has real VO text AND graphic_type set.
+            # Revideo renders are synchronous subprocesses; keep them sequential.
+            if sent.get("graphic_type") and sent.get("text"):
+                from app.utils import graphics as _graphics
+                whisper_dur = sum(durations)
+
+                if sent.get("graphic_type") == "list":
+                    n_items = len(sent.get("variables", {}).get("items", []))
+                    _list_anim_in = 0.80 + n_items * 0.30
+                    _trim_target  = max(whisper_dur, _list_anim_in + 0.50)
+                    render_dur    = _trim_target + 0.40
+                else:
+                    _trim_target = whisper_dur
+                    render_dur   = max(whisper_dur, _MIN_ANIM_DUR)
+
+                gfx_path = os.path.join(clips_dir, f"clip-{clip_counter:04d}.mp4")
+                clip_counter += 1
+                w, h = video_aspect.to_resolution()
+                rendered = _graphics.render_graphic_clip(
+                    graphic_type=sent["graphic_type"],
+                    out_path=gfx_path,
+                    duration=render_dur,
+                    width=w,
+                    height=h,
+                    fps=30,
+                    variables=sent.get("variables", {}),
+                    style=sent.get("variables", {}).get("style"),
+                )
+                if rendered and render_dur > _trim_target:
+                    trim_path = gfx_path.replace('.mp4', '-t.mp4')
+                    if _trim_clip(rendered, _trim_target, trim_path):
+                        os.replace(trim_path, gfx_path)
+                    else:
+                        logger.warning(
+                            f"sentence {idx+1}: anim trim failed — using full {render_dur:.2f}s clip"
+                        )
+                if rendered:
+                    if sent.get("graphic_type") == "lower_third":
+                        _lt_label = str(sent.get("variables", {}).get("label", "")).strip().lower()
+                        if _lt_label and _lt_label in _seen_lower_third_labels:
+                            logger.info(
+                                f"sentence {idx+1}: lower_third label '{_lt_label}' already shown — skipping"
+                            )
+                            rendered = None  # discard; fall through to plain footage fetch
+                        else:
+                            if _lt_label:
+                                _seen_lower_third_labels.add(_lt_label)
+                            _lt_for_sentence = rendered
+                    else:
+                        # Standalone graphic — enqueue directly; no fetch needed.
+                        _task_queue.append((None, {
+                            "type": "standalone_graphic",
+                            "clip_path": rendered,
+                            "clip_duration": _trim_target,
+                            "idx": idx,
+                        }))
+                        continue  # skip footage fetch for this sentence
                 else:
                     logger.warning(
-                        f"sentence {idx+1}: anim trim failed — using full {render_dur:.2f}s clip"
+                        f"sentence {idx+1}: narrated graphic render failed — falling back to footage"
                     )
-            if rendered:
-                if sent.get("graphic_type") == "lower_third":
-                    # lower_third overlays ON footage — stash and fall through to fetch.
-                    # Only show each label once: skip if already shown for this entity.
-                    _lt_label = str(sent.get("variables", {}).get("label", "")).strip().lower()
-                    if _lt_label and _lt_label in _seen_lower_third_labels:
-                        logger.info(
-                            f"sentence {idx+1}: lower_third label '{_lt_label}' already shown — skipping"
-                        )
-                        rendered = None  # discard; fall through to plain footage fetch
-                    else:
-                        if _lt_label:
-                            _seen_lower_third_labels.add(_lt_label)
-                        _lt_gfx_clip = rendered
-                else:
-                    ordered_clips.append(rendered)
-                    planned_clip_durations.append(_trim_target)
-                    got_any = True
-                    obtained_duration += _trim_target
-                    video_clip_count += 1
-                    continue  # standalone graphic — skip footage fetch
-            else:
-                logger.warning(
-                    f"sentence {idx+1}: narrated graphic render failed — falling back to footage"
-                )
-                # Fall through to footage fetch below
+                    # Fall through to footage fetch
 
-        # Concept-frequency guard: if all of this sentence's concepts are stale
-        # (used >= max_concept_reuse times), substitute fresh ones from the
-        # topic-wide pool so the search ladder broadens instead of cycling.
-        own_concepts = _get_visual_concepts(sent)
-        if (own_concepts
-                and sent.get("content_track", "broll") != "named"
-                and all(concept_usage[c] >= max_concept_reuse for c in own_concepts)):
-            fresh = [c for c in _all_concepts if concept_usage[c] < max_concept_reuse]
-            if fresh:
-                sent = {**sent, "visual_concepts": fresh[:2]}
-                logger.info(
-                    f"clip {clip_counter}: concepts {own_concepts} stale "
-                    f"(used >={max_concept_reuse}x) — substituting {fresh[:2]}"
-                )
-        for c in _get_visual_concepts(sent):
-            concept_usage[c] += 1
-
-        _sent_t0 = time.monotonic()
-        for clip_duration in durations:
-            is_image_override = None
-            if is_image and sent.get("content_track", "broll") != "named":
-                total_so_far = image_clip_count + video_clip_count
-                projected_ratio = (image_clip_count + 1) / (total_so_far + 1)
-                if projected_ratio > max_image_ratio:
-                    is_image_override = False
+            # Concept-frequency guard
+            own_concepts = _get_visual_concepts(sent)
+            if (own_concepts
+                    and sent.get("content_track", "broll") != "named"
+                    and all(concept_usage[c] >= max_concept_reuse for c in own_concepts)):
+                fresh = [c for c in _all_concepts if concept_usage[c] < max_concept_reuse]
+                if fresh:
+                    sent = {**sent, "visual_concepts": fresh[:2]}
                     logger.info(
-                        f"clip {clip_counter}: image ratio cap reached "
-                        f"({image_clip_count}/{total_so_far or 1} so far) — trying video first"
+                        f"clip {clip_counter}: concepts {own_concepts} stale "
+                        f"(used >={max_concept_reuse}x) — substituting {fresh[:2]}"
                     )
+            for c in _get_visual_concepts(sent):
+                concept_usage[c] += 1
 
-            visual_effect = sent.get("visual_effect", "")
+            for clip_duration in durations:
+                # Image ratio cap is best-effort in parallel mode (counts are stale).
+                is_image_override = None
+                if is_image and sent.get("content_track", "broll") != "named":
+                    total_so_far = image_clip_count + video_clip_count
+                    projected_ratio = (image_clip_count + 1) / (total_so_far + 1)
+                    if projected_ratio > max_image_ratio:
+                        is_image_override = False
+                        logger.info(
+                            f"clip {clip_counter}: image ratio cap — trying video first"
+                        )
+
+                visual_effect = sent.get("visual_effect", "")
+                # Consecutive-repeat guard is applied in Phase B (ordering is known there).
+
+                future = executor.submit(
+                    _fetch_clip_with_budget,
+                    budget_seconds=clip_budget_seconds,
+                    sentence=sent,
+                    sent_duration=clip_duration,
+                    trim_buffer=trim_buffer,
+                    source=video_source,
+                    video_aspect=video_aspect,
+                    clip_idx=clip_counter,
+                    clips_dir=clips_dir,
+                    used_urls=used_urls,
+                    fallback_terms=_all_concepts,
+                    is_image_override=is_image_override,
+                    video_topic=video_topic,
+                    video_type=video_type,
+                    recent_embeddings=None,  # dedup disabled during parallel fetch
+                    dedup_threshold=dedup_threshold,
+                    visual_effect=visual_effect,
+                )
+                _task_queue.append((future, {
+                    "type": "broll",
+                    "clip_idx": clip_counter,
+                    "sent": sent,
+                    "clip_duration": clip_duration,
+                    "is_image": is_image,
+                    "visual_effect": visual_effect,
+                    "lt_gfx_clip": _lt_for_sentence,  # same for all clips of sentence
+                    "idx": idx,
+                }))
+                clip_counter += 1
+
+        logger.info(
+            f"submitted {len(_task_queue)} clip tasks — "
+            f"{max_fetch_workers} workers fetching in parallel"
+        )
+
+        # ---- Phase B: collect results in original order + post-process ----
+        _last_visual_effect: str = ""
+        _lt_composited_sentences: set = set()  # lower_third applied for these sentence indices
+        _sentence_got_clip: set = set()
+
+        for future_or_none, meta in _task_queue:
+            idx = meta["idx"]
+
+            if meta["type"] == "standalone_graphic":
+                ordered_clips.append(meta["clip_path"])
+                planned_clip_durations.append(meta["clip_duration"])
+                obtained_duration += meta["clip_duration"]
+                video_clip_count += 1
+                _sentence_got_clip.add(idx)
+                continue
+
+            # Block until this specific clip's fetch completes.
+            try:
+                fetched = future_or_none.result()
+            except Exception as exc:
+                logger.warning(f"clip {meta['clip_idx']}: fetch raised — {exc}")
+                fetched = None
+
+            clip_duration = meta["clip_duration"]
+
+            # Consecutive-repeat guard (deferred from Phase A where order was unknown).
+            visual_effect = meta["visual_effect"]
             if visual_effect and visual_effect == _last_visual_effect:
                 logger.info(
-                    f"clip {clip_counter}: skipping consecutive repeat overlay '{visual_effect}'"
+                    f"clip {meta['clip_idx']}: skipping consecutive repeat overlay '{visual_effect}'"
                 )
                 visual_effect = ""
-            clip_deadline = time.monotonic() + clip_budget_seconds
-            fetched = _fetch_clip(
-                sentence=sent,
-                sent_duration=clip_duration,
-                trim_buffer=trim_buffer,
-                source=video_source,
-                video_aspect=video_aspect,
-                clip_idx=clip_counter,
-                clips_dir=clips_dir,
-                used_urls=used_urls,
-                fallback_terms=_all_concepts,
-                is_image_override=is_image_override,
-                video_topic=video_topic,
-                video_type=video_type,
-                recent_embeddings=recent_embs,
-                dedup_threshold=dedup_threshold,
-                visual_effect=visual_effect,
-                deadline=clip_deadline,
-            )
-            clip_counter += 1
-            _last_visual_effect = visual_effect  # update after potential dedup clear
+            _last_visual_effect = visual_effect  # update regardless of fetch success
+
             if fetched:
                 clip_path, used_image = fetched
-                content_track_sent = sent.get("content_track", "broll")
+                content_track_sent = meta["sent"].get("content_track", "broll")
+
                 if visual_effect and content_track_sent in ("broll", "named"):
                     effected_path = clip_path.replace(".mp4", f"_{visual_effect}.mp4")
                     eff_w, eff_h = video_aspect.to_resolution()
@@ -461,34 +510,40 @@ def start(job_path: str) -> Optional[dict]:
                         width=eff_w, height=eff_h,
                         threads=os.cpu_count() or 4,
                     )
-                # lower_third composite — overlay the Revideo label on this footage clip.
-                if _lt_gfx_clip:
+
+                # lower_third composite — apply on the first successful clip of the sentence.
+                lt_gfx_clip = meta.get("lt_gfx_clip")
+                if lt_gfx_clip and idx not in _lt_composited_sentences:
                     lt_out = clip_path.replace(".mp4", "_lt.mp4")
                     lt_w, lt_h = video_aspect.to_resolution()
                     lt_result = video.composite_lower_third(
-                        clip_path, _lt_gfx_clip, lt_out,
+                        clip_path, lt_gfx_clip, lt_out,
                         lt_w, lt_h, threads=os.cpu_count() or 4,
                     )
                     if lt_result:
                         clip_path = lt_result
+                        _lt_composited_sentences.add(idx)
                     else:
                         logger.warning(
                             f"sentence {idx+1}: lower_third composite failed — "
                             "footage used without label overlay"
                         )
-                    _lt_gfx_clip = None   # consume — don't apply to subsequent clips
 
                 ordered_clips.append(clip_path)
                 planned_clip_durations.append(clip_duration + trim_buffer)
-                got_any = True
                 obtained_duration += clip_duration
                 if used_image:
                     image_clip_count += 1
                 else:
                     video_clip_count += 1
+                _sentence_got_clip.add(idx)
 
-        logger.info(f"sentence {idx+1}: clip fetch took {time.monotonic() - _sent_t0:.1f}s")
-        if not got_any:
+    logger.info(
+        f"parallel clip fetch done in {time.monotonic() - _fetch_t0:.1f}s "
+        f"({len(ordered_clips)} clips obtained, {max_fetch_workers} workers)"
+    )
+    for idx in range(len(clip_plans)):
+        if idx not in _sentence_got_clip:
             logger.warning(f"sentence {idx+1}: skipping — no clip available")
 
     if not ordered_clips:
