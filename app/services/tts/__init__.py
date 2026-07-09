@@ -35,6 +35,22 @@ def is_no_voice(voice_name: Union[str, None]) -> bool:
     return str(voice_name or "").strip().lower() in _NO_VOICE_ALIASES
 
 
+def resolve_tts_engine(voice_name: str) -> tuple[str, str]:
+    """Return (engine, voice_name_with_prefix_stripped) for a job's voice_name.
+
+    Shared by tts() and the post-render quality report (_quality.py) so the
+    prefix->engine mapping lives in exactly one place.
+    """
+    engine = str(config.app.get("tts_engine", "edge")).lower()
+    if voice_name.lower().startswith(_KOKORO_PREFIX):
+        return "kokoro", voice_name[len(_KOKORO_PREFIX):]
+    if voice_name.lower().startswith(_SUPERTONIC_PREFIX):
+        return "supertonic", voice_name[len(_SUPERTONIC_PREFIX):]
+    if voice_name.lower().startswith(_MINIMAX_PREFIX):
+        return "minimax", voice_name[len(_MINIMAX_PREFIX):]
+    return engine, voice_name
+
+
 def tts(
     text: str,
     voice_name: str,
@@ -46,17 +62,7 @@ def tts(
     # paragraph break with an audible pause and prosody reset.
     text = re.sub(r'\s*\n\s*', ' ', text).strip()
 
-    engine = str(config.app.get("tts_engine", "edge")).lower()
-
-    if voice_name.lower().startswith(_KOKORO_PREFIX):
-        engine = "kokoro"
-        voice_name = voice_name[len(_KOKORO_PREFIX):]
-    elif voice_name.lower().startswith(_SUPERTONIC_PREFIX):
-        engine = "supertonic"
-        voice_name = voice_name[len(_SUPERTONIC_PREFIX):]
-    elif voice_name.lower().startswith(_MINIMAX_PREFIX):
-        engine = "minimax"
-        voice_name = voice_name[len(_MINIMAX_PREFIX):]
+    engine, voice_name = resolve_tts_engine(voice_name)
 
     if is_no_voice(voice_name):
         duration_seconds = estimate_no_voice_duration(text)

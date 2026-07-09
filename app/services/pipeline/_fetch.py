@@ -1,6 +1,7 @@
 """Clip fetch: download + verify stock video or image for each sentence."""
 import io
 import os
+import random
 import threading
 import time
 from typing import Any, List, Optional, Tuple
@@ -71,6 +72,7 @@ def _fetch_video_clip(
     recent_embeddings: Optional[Any] = None,
     dedup_threshold: float = 0.92,
     deadline: Optional[float] = None,
+    report: Optional[dict] = None,
 ) -> Optional[str]:
     """Download + trim a stock-video clip, verifying each candidate against
     the NSFW pixel gate and a CLIP relevance margin before accepting it.
@@ -81,9 +83,31 @@ def _fetch_video_clip(
     relevance-rejected -- is marked in `used_urls` so it's never retried by
     this or a later sentence.
 
+    report: optional dict keyed by clip_idx (see _orchestrate.py's
+        quality_report). When provided, this call records
+        {provider, content_track, media_type, rejections, used_dedup_fallback,
+        accepted} for the post-render quality report. Different clip_idx keys
+        never collide across ThreadPoolExecutor workers, so no lock is needed
+        for this side-channel dict (same reasoning as used_urls/
+        recent_embeddings elsewhere in this file). When None (the default),
+        this parameter has zero effect on behavior.
+
     Returns None if no candidates are found at all, or none pass
     verification within the attempt budget.
     """
+    _rejections: List[str] = []
+    _content_track = sentence.get("content_track", "broll")
+
+    def _record(accepted: bool, provider: str = "", used_dedup_fallback: bool = False) -> None:
+        if report is not None:
+            report[clip_idx] = {
+                "provider": provider,
+                "content_track": _content_track,
+                "media_type": "video",
+                "rejections": list(_rejections),
+                "used_dedup_fallback": used_dedup_fallback,
+                "accepted": accepted,
+            }
     search_terms = query_ladder if query_ladder is not None else _get_visual_concepts(sentence)
     if not search_terms:
         return None
@@ -96,7 +120,15 @@ def _fetch_video_clip(
     )
 
     min_duration = max(1, int(sent_duration))
-    max_attempts = int(config.app.get("max_video_download_attempts", 3))
+    base_max_attempts = int(config.app.get("max_video_download_attempts", 3))
+    if sentence.get("content_track", "broll") == "named":
+        # Named/specific-entity sentences are always tried as images first
+        # (see _fetch_clip) -- video is only a fallback for them -- but keep
+        # the same extra rigor here for consistency and for named_entity
+        # broll that explicitly requests video.
+        max_attempts = int(config.app.get("max_video_download_attempts_named", base_max_attempts + 3))
+    else:
+        max_attempts = base_max_attempts
     nsfw_frame_samples = int(config.app.get("nsfw_frame_samples", 4))
     relevance_frame_samples = int(config.app.get("relevance_video_frame_samples", 4))
     relevance_pool = config.app.get("relevance_video_pool", "mean")
@@ -148,6 +180,7 @@ def _fetch_video_clip(
     # slot can still be filled instead of coming back empty.
     _dedup_fallback_tmp = os.path.join(clips_dir, f"clip-{clip_idx:04d}-dfb.mp4")
     dedup_fallback_emb = None
+    dedup_fallback_provider = ""
 
     attempts = 0
     while attempts < max_attempts:
@@ -187,11 +220,13 @@ def _fetch_video_clip(
             )
             if not downloaded:
                 logger.warning(f"clip {clip_idx}: video download failed for {candidate.url}")
+                _rejections.append("download")
                 continue
 
             ok = _trim_clip(downloaded, sent_duration + trim_buffer, out_path)
             if not ok:
                 logger.warning(f"clip {clip_idx}: trim failed for {candidate.url}")
+                _rejections.append("trim")
                 continue
 
             frames = []
@@ -206,6 +241,7 @@ def _fetch_video_clip(
                         os.remove(out_path)
                     except Exception:
                         pass
+                    _rejections.append("frame_extract")
                     continue
 
             if nsfw.is_available() and not nsfw.passes(nsfw.is_nsfw_frames(frames)):
@@ -214,6 +250,7 @@ def _fetch_video_clip(
                     os.remove(out_path)
                 except Exception:
                     pass
+                _rejections.append("nsfw")
                 continue
 
             if vlm.is_enabled() and frames:
@@ -231,6 +268,7 @@ def _fetch_video_clip(
                         os.remove(out_path)
                     except Exception:
                         pass
+                    _rejections.append("vlm")
                     continue
 
             # Motion gate — reject static clips (photographs exported as MP4,
@@ -254,6 +292,7 @@ def _fetch_video_clip(
                             os.remove(out_path)
                         except Exception:
                             pass
+                        _rejections.append("motion")
                         continue
                 except Exception as _me:
                     logger.debug(f"motion check skipped: {_me}")
@@ -270,20 +309,23 @@ def _fetch_video_clip(
                         os.remove(out_path)
                     except Exception:
                         pass
+                    _rejections.append("relevance")
                     continue
 
             if recent_embeddings is not None and frames:
                 dedup_emb = relevance.embed_image(frames[0])
                 if dedup_emb is not None:
-                    if relevance.too_similar(dedup_emb, recent_embeddings, dedup_threshold):
+                    if not recent_embeddings.try_claim(dedup_emb, dedup_threshold):
                         logger.info(
-                            f"clip {clip_idx}: rejected near-duplicate video candidate: {candidate.url}"
+                            f"clip {clip_idx}: rejected near-duplicate video candidate "
+                            f"(or claimed by a concurrent thread first): {candidate.url}"
                         )
                         # Save first dedup-rejected clip as last-resort fallback.
                         if not os.path.exists(_dedup_fallback_tmp):
                             try:
                                 os.rename(out_path, _dedup_fallback_tmp)
                                 dedup_fallback_emb = dedup_emb
+                                dedup_fallback_provider = getattr(candidate, "provider", "")
                             except Exception:
                                 try:
                                     os.remove(out_path)
@@ -294,15 +336,16 @@ def _fetch_video_clip(
                                 os.remove(out_path)
                             except Exception:
                                 pass
+                        _rejections.append("dedup")
                         continue
-                    # Accepted — clean up any saved fallback.
+                    # Claimed — clean up any saved fallback.
                     if os.path.exists(_dedup_fallback_tmp):
                         try:
                             os.remove(_dedup_fallback_tmp)
                         except Exception:
                             pass
-                    recent_embeddings.append(dedup_emb)
 
+            _record(accepted=True, provider=getattr(candidate, "provider", ""))
             return out_path
 
         if not progressed:
@@ -318,7 +361,8 @@ def _fetch_video_clip(
                 f"using best-passing dedup fallback"
             )
             if dedup_fallback_emb is not None and recent_embeddings is not None:
-                recent_embeddings.append(dedup_fallback_emb)
+                recent_embeddings.force_add(dedup_fallback_emb)
+            _record(accepted=True, provider=dedup_fallback_provider, used_dedup_fallback=True)
             return out_path
         except Exception as _fe:
             logger.debug(f"dedup fallback rename failed: {_fe}")
@@ -331,6 +375,7 @@ def _fetch_video_clip(
         f"clip {clip_idx}: no video candidate passed verification for "
         f"{search_terms} (tried {attempts}/{max_attempts} attempts)"
     )
+    _record(accepted=False)
     return None
 
 
@@ -350,16 +395,24 @@ def _fetch_image_clip(
     recent_embeddings: Optional[Any] = None,
     dedup_threshold: float = 0.92,
     deadline: Optional[float] = None,
+    rng: random.Random = random,
+    report: Optional[dict] = None,
 ) -> Optional[str]:
     """Download an image and render a Ken Burns clip. None if no image found.
 
     used_urls is mutated in-place on success (see material.download_image).
     Every downloaded candidate passes the NSFW gate and a CLIP relevance
     margin against `caption_prompt` inside material.download_image.
+
+    report: optional dict keyed by clip_idx -- see _fetch_video_clip's
+        docstring for the shared convention. When None (the default), zero
+        effect on behavior.
     """
     search_terms = query_ladder if query_ladder is not None else _get_visual_concepts(sentence)
     if not search_terms:
         return None
+    _content_track = sentence.get("content_track", "broll")
+    _download_report: dict = {} if report is not None else None
 
     width, height = VideoAspect(video_aspect).to_resolution()
     out_path = os.path.join(clips_dir, f"clip-{clip_idx:04d}.mp4")
@@ -386,7 +439,26 @@ def _fetch_image_clip(
         avoid=sentence.get("avoid") or [],
         serper_term=serper_term,
         deadline=deadline,
+        content_track=_content_track,
+        report=_download_report,
     )
+    if report is not None:
+        report[clip_idx] = {
+            "provider": _download_report.get("provider", ""),
+            "content_track": _content_track,
+            "media_type": "image",
+            "rejections": _download_report.get("rejections", []),
+            "used_dedup_fallback": False,
+            "accepted": bool(image_path),
+            # Source image path -- lets the placeholder-fallback branch in
+            # _orchestrate.py re-render this exact still at a longer duration
+            # instead of looping the finished Ken Burns clip (which would
+            # replay the baked-in animation from frame 0 on the loop).
+            "image_path": image_path or "",
+        }
+        if "vlm_compare_used" in _download_report:
+            report[clip_idx]["vlm_compare_used"] = _download_report["vlm_compare_used"]
+            report[clip_idx]["vlm_compare_pool_size"] = _download_report["vlm_compare_pool_size"]
     if not image_path:
         return None
 
@@ -397,9 +469,12 @@ def _fetch_image_clip(
         height=height,
         output_path=out_path,
         effect=effect,
+        rng=rng,
     )
     if not result:
         logger.warning(f"clip {clip_idx}: Ken Burns render failed")
+        if report is not None:
+            report[clip_idx]["accepted"] = False
         return None
 
     return out_path
@@ -422,6 +497,8 @@ def _fetch_clip(
     dedup_threshold: float = 0.92,
     visual_effect: str = "",
     deadline: Optional[float] = None,
+    rng: random.Random = random,
+    report: Optional[dict] = None,
 ) -> Optional[Tuple[str, bool]]:
     """
     Fetch a clip (stock video or Ken Burns image) for one sentence.
@@ -479,14 +556,14 @@ def _fetch_clip(
     content_track = sentence.get("content_track", "broll")
     named_source_order = config.app.get(
         "named_track_image_source_order",
-        ["serper", "duckduckgo", "wikimedia", "pexels", "pixabay", "unsplash"],
+        ["serper", "duckduckgo", "pexels", "pixabay", "unsplash", "wikimedia"],
     )
 
     args_video = (sentence, sent_duration, trim_buffer, source, video_aspect, clip_idx, clips_dir, used_urls, caption_prompt, query_ladder)
     args_image = (sentence, sent_duration, trim_buffer, video_aspect, clip_idx, clips_dir, used_urls, caption_prompt, query_ladder)
-    dedup_kw = {"recent_embeddings": recent_embeddings, "dedup_threshold": dedup_threshold, "deadline": deadline}
+    dedup_kw = {"recent_embeddings": recent_embeddings, "dedup_threshold": dedup_threshold, "deadline": deadline, "report": report}
     topic_kw = {"video_topic": video_topic}
-    image_kw = {"effect": visual_effect}
+    image_kw = {"effect": visual_effect, "rng": rng}
 
     if content_track == "named":
         # Named/specific subjects are always served as images via Serper,

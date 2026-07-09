@@ -251,3 +251,115 @@ def verify_image(
         else:
             logger.warning(f"VLM verify failed (fail-open): {exc}")
         return None
+
+
+_COMPARE_MAX_CANDIDATES = 5
+
+
+def compare_candidates(
+    candidates: List[bytes],
+    narration: str,
+    visual_caption: str,
+    video_topic: str,
+    must_show: List[str] = None,
+    avoid: List[str] = None,
+) -> Optional[int]:
+    """Show several already-individually-accepted candidates to the VLM in
+    ONE request and return the 0-based index of the best match, or None on
+    any failure (fail-open — caller should default to candidates[0]).
+
+    Unlike verify_image(), this scores a *set* of images relative to each
+    other rather than one image in isolation, so it isn't cached (a
+    comparative verdict depends on the whole set shown, not any single
+    image's bytes) and shares verify_image()'s circuit breaker / usage
+    counters rather than keeping its own.
+
+    candidates is capped at _COMPARE_MAX_CANDIDATES regardless of how many
+    are passed in, so a misconfigured pool size can't produce a runaway
+    single request.
+    """
+    global _consecutive_rate_errors, _circuit_open, _total_calls, _total_input_tokens, _total_output_tokens
+    client = _get_client()
+    if client is None or not candidates:
+        return None
+    if _circuit_open:
+        return None
+
+    candidates = candidates[:_COMPARE_MAX_CANDIDATES]
+    jpegs = [_to_jpeg(c) for c in candidates]
+    valid = [(i, jb) for i, jb in enumerate(jpegs) if jb]
+    if len(valid) < 2:
+        # Fewer than 2 decodable images — nothing meaningful to compare.
+        return None
+
+    model = str(config.app.get("vlm_model", "gpt-4.1-nano"))
+    must_show_str = ", ".join(must_show) if must_show else "anything relevant"
+    avoid_str = ", ".join(avoid) if avoid else "watermarks, text overlays, cartoons"
+
+    prompt = (
+        "You are a footage curator for a documentary video. Below are several "
+        "candidate images (numbered starting at 0, in the order shown), all "
+        "already individually screened as acceptable. Pick the SINGLE best match "
+        "for the narration moment described below.\n\n"
+        f'Narration: "{narration}"\n'
+        f'Visual intent: "{visual_caption}"\n'
+        f'Overall topic: "{video_topic}"\n'
+        f"Should show: {must_show_str}\n"
+        f"Avoid: {avoid_str}\n\n"
+        "Be strict about specificity: if the visual intent names a specific product, "
+        "person, or place, prefer the candidate that most precisely matches it over one "
+        "that is merely a plausible generic substitute.\n\n"
+        'Return JSON only: {"choice": <0-based index of the best image>, "reason": "short string"}'
+    )
+
+    content = [{"type": "text", "text": prompt}]
+    for i, jb in valid:
+        b64 = base64.standard_b64encode(jb).decode("utf-8")
+        content.append({"type": "text", "text": f"Image {i}:"})
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "low"},
+        })
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": content}],
+            response_format={"type": "json_object"},
+            max_tokens=100,
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        data = json.loads(raw)
+        choice = int(data.get("choice", 0))
+        reason = str(data.get("reason", ""))
+        if config.app.get("relevance_debug_log", False):
+            logger.debug(f"VLM compare: choice={choice} reason={reason!r}")
+        with _vlm_stats_lock:
+            _consecutive_rate_errors = 0
+            _total_calls += 1
+            if response.usage:
+                _total_input_tokens += response.usage.prompt_tokens or 0
+                _total_output_tokens += response.usage.completion_tokens or 0
+        valid_indices = {i for i, _ in valid}
+        if choice not in valid_indices:
+            logger.debug(f"VLM compare returned out-of-range choice {choice}, ignoring")
+            return None
+        return choice
+    except Exception as exc:
+        exc_str = str(exc)
+        if "429" in exc_str or "rate_limit" in exc_str.lower() or "quota" in exc_str.lower():
+            with _vlm_stats_lock:
+                _consecutive_rate_errors += 1
+                _current_errors = _consecutive_rate_errors
+                if _current_errors >= _CIRCUIT_BREAKER_THRESHOLD:
+                    _circuit_open = True
+            if _current_errors >= _CIRCUIT_BREAKER_THRESHOLD:
+                logger.warning(
+                    f"VLM circuit breaker tripped after {_current_errors} "
+                    f"consecutive rate errors — VLM disabled for this run (fail-open)"
+                )
+            else:
+                logger.warning(f"VLM rate error ({_current_errors}/{_CIRCUIT_BREAKER_THRESHOLD}), fail-open")
+        else:
+            logger.warning(f"VLM compare failed (fail-open): {exc}")
+        return None

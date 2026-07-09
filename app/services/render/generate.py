@@ -2,6 +2,7 @@ import glob
 import json
 import math
 import os
+import random
 from typing import Optional
 
 import numpy as np
@@ -38,7 +39,7 @@ from ._common import (
 )
 
 
-def get_bgm_file(bgm_type: str = "random", bgm_file: str = ""):
+def get_bgm_file(bgm_type: str = "random", bgm_file: str = "", rng: random.Random = random):
     if not bgm_type:
         return ""
 
@@ -68,8 +69,7 @@ def get_bgm_file(bgm_type: str = "random", bgm_file: str = ""):
         if not files:
             logger.warning(f"no bgm files found in song directory: {song_dir}")
             return ""
-        import random
-        return random.choice(files)
+        return rng.choice(files)
 
     return ""
 
@@ -359,6 +359,7 @@ def generate_video(
     subtitle_path: str,
     output_file: str,
     params: VideoParams,
+    rng: random.Random = random,
 ):
     aspect = VideoAspect(params.video_aspect)
     video_width, video_height = aspect.to_resolution()
@@ -498,7 +499,7 @@ def generate_video(
 
     voice_audio_clip = audio_clip
     bgm_audio_clip = None
-    bgm_file = get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file)
+    bgm_file = get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file, rng=rng)
     if bgm_file:
         try:
             duck_ratio = float(config.app.get("bgm_duck_ratio", 0.15))

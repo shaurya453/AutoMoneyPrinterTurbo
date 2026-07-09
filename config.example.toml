@@ -49,7 +49,7 @@ serper_api_keys = []
 # Provider order for content_track="named" sentences. "serper" (Google
 # Images) is first -- most likely to have a real photo of a specific named
 # product/person/place/event that stock-photo libraries don't carry.
-named_track_image_source_order = ["serper", "duckduckgo", "wikimedia", "pexels", "pixabay", "unsplash"]
+named_track_image_source_order = ["serper", "duckduckgo", "pexels", "pixabay", "unsplash", "wikimedia"]
 
 # ---------------------------------------------------------------------------
 # Footage/image mix and relevance filtering
@@ -87,6 +87,39 @@ relevance_video_pool = "mean"  # "mean" | "max"
 # How many candidates (downloaded + verified against the NSFW gate and the
 # relevance margin) are tried per video clip slot before giving up.
 max_video_download_attempts = 3
+
+# Same as above, but for content_track="named" sentences (a specific
+# product/person/place). Video is only a fallback for named sentences (they
+# always try an image first, see named_track_image_source_order), but this
+# keeps the extra rigor consistent for named_entity broll that explicitly
+# requests video. Defaults to max_video_download_attempts + 3 if unset.
+# max_video_download_attempts_named = 6
+
+# Time budget (seconds) for each Phase B "rescue fetch" attempt -- an extra
+# attempt using generic fallback terms when a slot's primary fetch has
+# already exhausted the job's own concept pool. Without a rescue, a failed
+# slot falls back to looping the previous clip, which is the "same clip
+# repeats over and over" artifact. Kept short since this only runs for the
+# minority of slots that already failed once.
+clip_rescue_budget_seconds = 25
+
+# How many distinct generic gap-fill terms to try (each within its own
+# clip_rescue_budget_seconds) before giving up and falling back to the
+# placeholder loop. A single term can turn up zero candidates just as easily
+# as the sentence's own concepts did -- more attempts meaningfully cut how
+# often a slot falls through to the placeholder loop.
+clip_rescue_max_attempts = 3
+
+# How many search-result candidates are downloaded and relevance-scored per
+# search term (when relevance filtering is on) before moving to the next
+# term. Higher = more thorough but more download/scoring cost per sentence.
+image_candidates_per_term = 6
+
+# Same as above, but for content_track="named" sentences. Named entities
+# benefit more from trying harder to find the one real photo; generic
+# broll's pool is broad enough that extra candidates rarely change the
+# outcome.
+image_candidates_per_term_named = 10
 
 # Log every candidate's relevance score at debug level (for calibration).
 relevance_debug_log = false
@@ -135,6 +168,21 @@ vlm_model = "gpt-4.1-nano"
 # (0.0–1.0). 0.55 means "must be a reasonable match" without being too strict.
 vlm_threshold = 0.55
 
+# Comparative pooling: instead of claiming the first image candidate that
+# individually passes NSFW + the vlm_threshold check above, gather several
+# passing candidates and show them to the VLM together in one request, which
+# picks the single best match -- more reliable than independent per-candidate
+# scoring for "which of these is right." "off" | "named" | "all" -- which
+# content_track values this applies to. Default "named" spends the extra VLM
+# call only where a wrong pick is most noticeable (a specific product/person/
+# place); "broll" stays on today's cheaper first-pass-accept behavior.
+vlm_compare_scope = "named"
+
+# How many individually-accepted candidates to gather before running one
+# comparative call. Higher = better odds of the true best match, more VLM
+# cost/latency per pooled sentence. Capped at 5 regardless of this value.
+vlm_compare_pool_size = 3
+
 # ---------------------------------------------------------------------------
 # Embedding-based de-duplication at clip selection
 # Rejects any candidate whose CLIP embedding is too similar to a recently
@@ -152,9 +200,12 @@ dedup_enabled = true
 dedup_similarity_threshold = 0.92
 
 # How many of the most recently placed shots to compare each new candidate
-# against.  Larger windows reduce repetition over longer stretches at the
-# cost of a wider de-dup exclusion zone.
-dedup_lookback_window = 8
+# against.  -1 = unbounded (remembers every accepted clip for the whole job
+# -- recommended, since a bounded window forgets old entries once that many
+# newer clips are accepted, letting the same stock footage resurface later
+# in a long video).  0 disables de-dup entirely; a positive N bounds the
+# window to the last N clips.
+dedup_lookback_window = -1
 
 # ---------------------------------------------------------------------------
 # Coverr — supplemental cinematic B-roll source

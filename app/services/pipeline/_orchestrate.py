@@ -1,11 +1,12 @@
 """Pipeline orchestrator — the main start() entry point."""
+import hashlib
 import json
 import math
 import os
+import random
 import subprocess
 import time
-from collections import Counter as _Counter
-from collections import deque
+from collections import Counter as _Counter, deque as _deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, List, Optional, Tuple
 
@@ -21,12 +22,13 @@ from app.models.schema import (
 from app.services import media as material
 from app.services import render as video
 from app.services import tts as voice
-from app.services.scoring import vlm
+from app.services.scoring import relevance, vlm
 from app.services.pipeline._whisper import _get_sentence_timestamps, _uniform_timestamps
 from app.services.pipeline._planning import (
     _trim_clip, _get_visual_concepts, _build_query_ladder, _TRIM_BUFFER,
 )
 from app.services.pipeline._fetch import _fetch_clip, _ThreadSafeURLSet
+from app.services.pipeline._quality import write_quality_report
 from app.utils import subtitle, utils
 
 
@@ -93,11 +95,32 @@ def start(job_path: str) -> Optional[dict]:
     video_topic: str = job.get("video_topic", "") or job.get("video_title", "")
     video_type: str = job.get("video_type", "thematic")
 
+    # Deterministic per-job RNG: Ken Burns animations, graphic variants,
+    # transitions, and BGM picks are reproducible across reruns of the same
+    # job.json (same job_path + same script content -> same seed), while a
+    # genuinely different job still gets its own independent sequence.
+    # Falls back to the global `random` module (unseeded) wherever a
+    # function's `rng` parameter isn't threaded through yet.
+    _seed_material = f"{job_path}:{video_script}".encode("utf-8")
+    job_seed = int(hashlib.sha256(_seed_material).hexdigest(), 16) & 0xFFFFFFFF
+    job_rng = random.Random(job_seed)
+
     dedup_enabled: bool = bool(config.app.get("dedup_enabled", True))
     dedup_threshold: float = float(config.app.get("dedup_similarity_threshold", 0.92))
     dedup_lookback: int = int(config.app.get("dedup_lookback_window", 8))
-    recent_embs: Optional[Any] = deque(maxlen=dedup_lookback) if dedup_enabled else None
+    # Thread-safe: shared by every ThreadPoolExecutor worker in the main
+    # clip-fetch pool below, not just the sequential gap-fill pass.
+    # -1 (recommended) => unbounded, i.e. remembers every accepted clip for
+    # the whole job. A bounded window forgets old entries once that many
+    # newer clips are accepted, letting the same stock footage resurface
+    # later in a long video once it ages out of the window.
+    recent_embs: Optional[Any] = (
+        relevance.ThreadSafeEmbeddingWindow(maxlen=None if dedup_lookback < 0 else dedup_lookback)
+        if dedup_enabled else None
+    )
     clip_budget_seconds: float = float(config.app.get("clip_fetch_budget_seconds", 180))
+    rescue_budget_seconds: float = float(config.app.get("clip_rescue_budget_seconds", 25))
+    rescue_max_attempts: int = int(config.app.get("clip_rescue_max_attempts", 3))
 
     if not video_script:
         logger.error("job.video_script is empty — nothing to do")
@@ -318,6 +341,82 @@ def start(job_path: str) -> Optional[dict]:
     # _task_queue: ordered list of (future | None, metadata_dict).
     # None future = standalone graphic, already rendered, no IO needed.
     _task_queue: List[tuple] = []
+    # Populated in-place by _fetch_video_clip/_fetch_image_clip (side channel,
+    # see their docstrings); aggregated into <title>.quality.json at the end
+    # of this function. Different clip_idx keys per thread, so no lock needed.
+    quality_report: dict = {}
+
+    # Generic, job-vocabulary-independent terms -- used both as a last-resort
+    # gap-fill source (below) and as the Phase B rescue fetch for a slot whose
+    # primary fetch exhausted the job's own concept pool. Different from what
+    # already failed, so we get fresh URLs instead of re-hitting the same
+    # rejected/consumed candidates. Sourced from the enrichment agent's
+    # per-job gapfill_terms (summarized from the whole script/topic, same
+    # convention as motif_palette -- see AGENT_GUIDE.md) so filler footage
+    # stays loosely on-theme instead of pulling from a single global list
+    # shared by every video regardless of subject. Falls back to a generic
+    # hardcoded safety net only when the agent didn't populate the field
+    # (old job.json) or gave too few usable entries.
+    _HARDCODED_GAPFILL_SAFETY_NET = [
+        "retail store interior", "city street pedestrians", "office workers meeting",
+        "nature landscape aerial", "documentary interview setting", "warehouse logistics",
+        "business presentation", "urban architecture", "market stall vendor",
+        "factory production line",
+    ]
+    _job_gapfill_terms = [
+        t for t in (job.get("gapfill_terms") or []) if isinstance(t, str) and t.strip()
+    ]
+    if len(_job_gapfill_terms) < 3:
+        logger.warning(
+            f"job.gapfill_terms has only {len(_job_gapfill_terms)} usable entries "
+            "(need >= 3) — falling back to generic hardcoded gap-fill terms. "
+            "This job.json may predate the per-job gap-fill feature, or the "
+            "enrichment agent didn't populate it."
+        )
+        _job_gapfill_terms = _HARDCODED_GAPFILL_SAFETY_NET
+    _rescue_idx = 0
+
+    # entity_name -> deduped, ordered list of every visual_concepts[0] seen
+    # across sentences sharing that entity_name. AGENT_GUIDE mandates
+    # visual_concepts[0] rotate within a named section (product, a feature,
+    # the brand, a comparison product, ...), so a sentence's OWN concepts
+    # aren't the only Serper-searchable terms for its product -- its section
+    # siblings already have other real, on-product terms. When a
+    # lower_third-bearing sentence's primary fetch fails, these "cousin"
+    # terms are tried before the fully generic _job_gapfill_terms, so a
+    # rescue fetch is far less likely to land on a visually unrelated
+    # generic image directly underneath a specific product-name label.
+    _entity_concepts_map: dict = {}
+    for _s in job.get("sentences", []):
+        _ename = (_s.get("entity_name") or "").strip()
+        if not _ename:
+            continue
+        _c0 = (_s.get("visual_concepts") or [None])[0]
+        if not _c0:
+            continue
+        _bucket = _entity_concepts_map.setdefault(_ename, [])
+        if _c0 not in _bucket:
+            _bucket.append(_c0)
+
+    # Last few successfully-fetched real (non-placeholder) clips, most recent
+    # last. Used both to anchor a single placeholder (most recent) and, when
+    # several placeholders land back to back, to cycle through distinct
+    # anchors so a run of consecutive failures doesn't visibly loop the exact
+    # same footage for every one of them (see the placeholder branch below).
+    _recent_real_clips: "_deque[str]" = _deque(maxlen=3)
+    # clip_path -> source image_path, populated only for image-sourced (Ken
+    # Burns) clips. Lets the placeholder branch re-render the same still at a
+    # longer duration instead of looping the finished clip -- see below.
+    _recent_real_image_sources: dict = {}
+    _placeholder_run_len = 0
+    # (timeline_position, duration_owed, clip_idx) for slots where BOTH the
+    # real fetch AND every placeholder attempt failed -- a true hole in
+    # ordered_clips. Left unfilled, everything after this position in the
+    # final mux is offset earlier than the VO describing it. Filled
+    # positionally after Phase B (see below) rather than by the tail-only
+    # gap-fill pass, which only corrects the aggregate total duration, not
+    # where the hole is.
+    _catastrophic_gaps: List[Tuple[int, float, int]] = []
 
     _fetch_t0 = time.monotonic()
 
@@ -370,6 +469,7 @@ def start(job_path: str) -> Optional[dict]:
                     fps=30,
                     variables=sent.get("variables", {}),
                     style=sent.get("variables", {}).get("style"),
+                    rng=job_rng,
                 )
                 if rendered and render_dur > _trim_target:
                     trim_path = gfx_path.replace('.mp4', '-t.mp4')
@@ -443,6 +543,15 @@ def start(job_path: str) -> Optional[dict]:
                 visual_effect = sent.get("visual_effect", "")
                 # Consecutive-repeat guard is applied in Phase B (ordering is known there).
 
+                # A single random.Random instance isn't safe to share across
+                # ThreadPoolExecutor workers (concurrent mutation of its
+                # internal state), and even with a lock, thread-scheduling
+                # order would make the sequence depend on wall-clock timing,
+                # not job content -- defeating reproducibility. Instead,
+                # derive one independent, deterministic RNG per clip from
+                # job_seed + clip_counter, both known at submission time.
+                _clip_rng = random.Random(job_seed + clip_counter)
+
                 future = executor.submit(
                     _fetch_clip_with_budget,
                     budget_seconds=clip_budget_seconds,
@@ -458,9 +567,11 @@ def start(job_path: str) -> Optional[dict]:
                     is_image_override=is_image_override,
                     video_topic=video_topic,
                     video_type=video_type,
-                    recent_embeddings=None,  # dedup disabled during parallel fetch
+                    recent_embeddings=recent_embs,  # ThreadSafeEmbeddingWindow -- safe to share
                     dedup_threshold=dedup_threshold,
                     visual_effect=visual_effect,
+                    rng=_clip_rng,
+                    report=quality_report,
                 )
                 _task_queue.append((future, {
                     "type": "broll",
@@ -504,13 +615,107 @@ def start(job_path: str) -> Optional[dict]:
 
             clip_duration = meta["clip_duration"]
 
-            # Consecutive-repeat guard (deferred from Phase A where order was unknown).
-            # Only update _last_visual_effect when a clip is actually added to the timeline;
-            # a failed fetch never played its effect so it shouldn't suppress the next clip's.
+            # Rescue fetch: the primary attempt already exhausted this sentence's
+            # own concept ladder AND the job-wide concept pool (fallback_terms=
+            # _all_concepts in Phase A). Retrying with that same pool would just
+            # re-hit already-rejected/consumed candidates, so use deliberately
+            # different, generic vocabulary instead -- same reasoning as gap-fill
+            # Phase 2 below. Without this, a failed slot falls straight through to
+            # looping the previous clip (see the placeholder branch below), which
+            # is the "same clip repeats over and over" artifact this must avoid.
+            # Tries up to rescue_max_attempts distinct gapfill terms (not just
+            # one) before giving up -- a single generic term can just as easily
+            # turn up zero candidates as the sentence's own concepts did, and
+            # every extra attempt meaningfully cuts how often we fall through
+            # to the placeholder loop below.
+            #
+            # When this sentence carries a lower_third (meta["lt_gfx_clip"]),
+            # a generic gap-fill image is especially jarring -- a specific
+            # product-name label rendered over unrelated stock footage. Other
+            # sentences in the same named section already found real,
+            # Serper-searchable terms for this exact entity (that's the whole
+            # point of the visual_concepts[0] rotation rule), so try those
+            # "cousin" terms first, before falling back to the fully generic
+            # _job_gapfill_terms pool.
+            if not fetched:
+                _rescue_pool: List[str] = []
+                if meta.get("lt_gfx_clip"):
+                    _ename = (meta["sent"].get("entity_name") or "").strip()
+                    if _ename:
+                        _own_concepts = set(_get_visual_concepts(meta["sent"]))
+                        _rescue_pool = [
+                            c for c in _entity_concepts_map.get(_ename, [])
+                            if c not in _own_concepts
+                        ]
+                _rescue_attempts_total = min(
+                    rescue_max_attempts, len(_rescue_pool) + len(_job_gapfill_terms)
+                )
+                for _attempt in range(_rescue_attempts_total):
+                    if _attempt < len(_rescue_pool):
+                        _rescue_term = _rescue_pool[_attempt]
+                        _rescue_kind = "entity-cousin"
+                    else:
+                        _rescue_term = _job_gapfill_terms[_rescue_idx % len(_job_gapfill_terms)]
+                        _rescue_idx += 1
+                        _rescue_kind = "generic"
+                    logger.warning(
+                        f"clip {meta['clip_idx']}: primary fetch failed — attempting "
+                        f"{_rescue_kind} rescue fetch {_attempt + 1}/{_rescue_attempts_total} ('{_rescue_term}')"
+                    )
+                    fetched = _fetch_clip(
+                        sentence={
+                            "visual_concepts": [_rescue_term],
+                            "media_type": "video",
+                            # entity-cousin terms are real named-entity search
+                            # phrases (same caliber as this sentence's own
+                            # visual_concepts[0] would be) -- route them
+                            # through the same named-entity search order
+                            # (Serper/Google Images first) rather than generic
+                            # stock-video search, for better product-relevance
+                            # odds. Generic gapfill terms keep "broll" as before.
+                            "content_track": "named" if _rescue_kind == "entity-cousin" else "broll",
+                            "visual_caption": _rescue_term,
+                        },
+                        sent_duration=clip_duration,
+                        trim_buffer=trim_buffer,
+                        source=video_source,
+                        video_aspect=video_aspect,
+                        clip_idx=meta["clip_idx"],
+                        clips_dir=clips_dir,
+                        used_urls=used_urls,
+                        video_topic=video_topic,
+                        video_type=video_type,
+                        recent_embeddings=recent_embs,
+                        dedup_threshold=dedup_threshold,
+                        deadline=time.monotonic() + rescue_budget_seconds,
+                        rng=job_rng,
+                        report=quality_report,
+                    )
+                    if fetched:
+                        logger.info(
+                            f"clip {meta['clip_idx']}: rescue fetch succeeded "
+                            f"on attempt {_attempt + 1}"
+                        )
+                        quality_report.setdefault(meta["clip_idx"], {})["rescued"] = True
+                        quality_report[meta["clip_idx"]]["rescue_attempts"] = _attempt + 1
+                        break
+
+            # Consecutive-effect guard (deferred from Phase A where order was unknown).
+            # AGENT_GUIDE's graphics-audit rule is "no two consecutive sentences may
+            # have an effect (globally)" -- ANY effect back-to-back, not just a
+            # repeated identical one. This is a render-time backstop: worker.mjs's
+            # enforceVisualEffectSpacing() is the primary fix (cleans job.json
+            # itself), but Section C's eligibility list is computed before the same
+            # LLM call's own Section B sentence deletions, so adjacency can still
+            # shift after the prompt was built -- this catches anything that slips
+            # through. Only update _last_visual_effect when a clip is actually added
+            # to the timeline; a failed fetch never played its effect so it
+            # shouldn't suppress the next clip's.
             visual_effect = meta["visual_effect"]
-            if visual_effect and visual_effect == _last_visual_effect:
+            if visual_effect and _last_visual_effect:
                 logger.info(
-                    f"clip {meta['clip_idx']}: skipping consecutive repeat overlay '{visual_effect}'"
+                    f"clip {meta['clip_idx']}: skipping consecutive overlay '{visual_effect}' "
+                    f"(previous clip already had '{_last_visual_effect}')"
                 )
                 visual_effect = ""
 
@@ -549,6 +754,12 @@ def start(job_path: str) -> Optional[dict]:
 
                 _last_visual_effect = visual_effect
                 ordered_clips.append(clip_path)
+                _recent_real_clips.append(clip_path)
+                if used_image:
+                    _img_src = (quality_report.get(meta["clip_idx"]) or {}).get("image_path", "")
+                    if _img_src:
+                        _recent_real_image_sources[clip_path] = _img_src
+                _placeholder_run_len = 0
                 planned_clip_durations.append(clip_duration + trim_buffer)
                 obtained_duration += clip_duration
                 if used_image:
@@ -568,14 +779,67 @@ def start(job_path: str) -> Optional[dict]:
                 ph_path = os.path.join(clips_dir, f"clip-{meta['clip_idx']:04d}-ph.mp4")
                 ph_w, ph_h = video_aspect.to_resolution()
                 ph_ok = False
-                if ordered_clips:
-                    # Loop the previous clip so the screen isn't black.
-                    _prev = ordered_clips[-1]
+                # Anchor on a REAL (non-placeholder) clip, never a placeholder --
+                # looping a loop would compound the repeated-footage artifact.
+                # When several placeholders land back to back (this branch fires
+                # again before any real clip succeeds), _placeholder_run_len
+                # walks through _recent_real_clips (most recent first) instead of
+                # always anchor 0, so consecutive placeholders don't all show the
+                # exact same looped footage. If only one real clip exists yet,
+                # there's nothing distinct to cycle to -- mirror the 2nd+ one in
+                # a run so it's at least not a frame-for-frame repeat.
+                _anchor_pool = list(reversed(_recent_real_clips)) or (
+                    [ordered_clips[-1]] if ordered_clips else []
+                )
+                _prev = (
+                    _anchor_pool[_placeholder_run_len % len(_anchor_pool)]
+                    if _anchor_pool else None
+                )
+                _mirror_repeat = _placeholder_run_len > 0 and len(_anchor_pool) == 1
+
+                # Prefer regenerating over looping: if the anchor is a Ken
+                # Burns/3D still-image render, its source image is known
+                # (_recent_real_image_sources), so re-render ONE continuous
+                # animation at the exact fill duration instead of
+                # stream_loop-ing the already-rendered clip. stream_loop
+                # replays the baked-in animation from frame 0 whenever
+                # ph_dur exceeds the anchor's own length -- the "clip
+                # repeats including its animation" artifact this avoids.
+                # Falls through to stream_loop when the anchor came from
+                # stock video (no source image to re-animate) or regen fails.
+                _prev_image_src = _recent_real_image_sources.get(_prev) if _prev else None
+                if _prev_image_src:
+                    try:
+                        _regen_result = video.render_ken_burns_clip(
+                            image_path=_prev_image_src,
+                            duration=ph_dur,
+                            width=ph_w,
+                            height=ph_h,
+                            output_path=ph_path,
+                            rng=job_rng,
+                        )
+                    except Exception as _regen_exc:
+                        logger.warning(
+                            f"clip {meta['clip_idx']}: placeholder animation regenerate "
+                            f"raised — {_regen_exc}"
+                        )
+                        _regen_result = ""
+                    if _regen_result:
+                        ph_ok = True
+                        logger.info(
+                            f"clip {meta['clip_idx']}: placeholder filled by regenerating "
+                            f"the anchor's animation continuously for {ph_dur:.2f}s "
+                            "(no loop/repeat)"
+                        )
+                if not ph_ok and _prev:
+                    _ph_vf = f"fps=30,scale={ph_w}:{ph_h}:flags=lanczos"
+                    if _mirror_repeat:
+                        _ph_vf = "hflip," + _ph_vf
                     _ph_cmd = [
                         utils.get_ffmpeg_binary(), "-y",
                         "-stream_loop", "-1", "-i", _prev,
                         "-t", f"{ph_dur:.6f}",
-                        "-vf", f"fps=30,scale={ph_w}:{ph_h}:flags=lanczos",
+                        "-vf", _ph_vf,
                         "-c:v", "libx264", "-preset", "ultrafast",
                         "-pix_fmt", "yuv420p", "-an", ph_path,
                     ]
@@ -593,19 +857,35 @@ def start(job_path: str) -> Optional[dict]:
                     ]
                     _ph_r = subprocess.run(_ph_cmd, capture_output=True, timeout=60)
                     ph_ok = _ph_r.returncode == 0
+                if not ph_ok:
+                    # Both attempts above can fail transiently under CPU/IO
+                    # contention (many concurrent fetch-worker threads racing
+                    # ffmpeg calls) rather than a hard systemic failure. A
+                    # solid-color render is about as cheap as ffmpeg gets, so
+                    # one retry with a much longer timeout is nearly free and
+                    # catches the transient case before conceding a real gap.
+                    _ph_r = subprocess.run(_ph_cmd, capture_output=True, timeout=180)
+                    ph_ok = _ph_r.returncode == 0
                 if ph_ok:
                     ordered_clips.append(ph_path)
                     planned_clip_durations.append(ph_dur)
                     obtained_duration += clip_duration
                     video_clip_count += 1
+                    _placeholder_run_len += 1
+                    quality_report.setdefault(meta["clip_idx"], {})["placeholder_used"] = True
                     logger.warning(
                         f"clip {meta['clip_idx']}: fetch failed — inserted "
                         f"{clip_duration:.2f}s placeholder to maintain A/V sync"
+                        + (" (mirrored, no distinct anchor available)" if _mirror_repeat else "")
                     )
                 else:
+                    quality_report.setdefault(meta["clip_idx"], {})["catastrophic_gap"] = True
+                    quality_report[meta["clip_idx"]]["catastrophic_gap_duration"] = ph_dur
+                    _catastrophic_gaps.append((len(ordered_clips), ph_dur, meta["clip_idx"]))
                     logger.error(
-                        f"clip {meta['clip_idx']}: fetch failed AND placeholder "
-                        f"generation failed — this sentence will cause drift"
+                        f"clip {meta['clip_idx']}: fetch failed AND placeholder generation "
+                        f"failed after retries — {ph_dur:.2f}s gap recorded at timeline "
+                        f"position {len(ordered_clips)} for position-aware gap-fill"
                     )
 
     logger.info(
@@ -615,28 +895,6 @@ def start(job_path: str) -> Optional[dict]:
     for idx in range(len(clip_plans)):
         if idx not in _sentence_got_clip:
             logger.warning(f"sentence {idx+1}: skipping — no clip available")
-
-    # Seed recent_embs with embeddings from the last few main-pool clips so that
-    # gap-fill can deduplicate against them.  Workers passed recent_embeddings=None
-    # so the deque is still empty here; without seeding, gap-fill is blind to the
-    # entire main pool and can repeat visually identical shots.
-    if recent_embs is not None and ordered_clips:
-        from app.services.scoring import nsfw as _nsfw_scoring, relevance as _rel_scoring
-        if _rel_scoring.is_available():
-            _seed_clips = ordered_clips[-dedup_lookback:]
-            _seeded = 0
-            for _cp in _seed_clips:
-                try:
-                    _frames = _nsfw_scoring.sample_frame_bytes(_cp)
-                    if _frames:
-                        _emb = _rel_scoring.embed_image(_frames[0])
-                        if _emb is not None:
-                            recent_embs.append(_emb)
-                            _seeded += 1
-                except Exception:
-                    pass
-            if _seeded:
-                logger.info(f"gap-fill dedup: seeded {_seeded} embeddings from main clip pool")
 
     if not ordered_clips:
         logger.error("no clips obtained for any sentence — aborting")
@@ -650,17 +908,94 @@ def start(job_path: str) -> Optional[dict]:
             f"({image_clip_count / _total_clips:.0%} image)"
         )
 
+    # ---- Position-aware gap-fill: patch catastrophic holes at their exact
+    # timeline position, not the tail. A tail-only fix (the pass below) makes
+    # the total video duration match the audio again, but everything between
+    # the hole and the end stays shifted relative to the VO describing it --
+    # this fixes that by inserting compensating footage exactly where the
+    # hole is, before the tail pass ever runs.
+    if _catastrophic_gaps:
+        logger.warning(
+            f"patching {len(_catastrophic_gaps)} catastrophic gap(s) at their "
+            "recorded timeline position (not the tail)"
+        )
+        _gap_offset = 0
+        for _gap_i, (_gap_pos, _gap_dur, _orig_clip_idx) in enumerate(_catastrophic_gaps):
+            _filler_idx = clip_counter
+            clip_counter += 1
+            _gap_concept = None
+            if _all_concepts:
+                _gap_concept = _all_concepts[_gap_i % len(_all_concepts)]
+            elif _job_gapfill_terms:
+                _gap_concept = _job_gapfill_terms[_gap_i % len(_job_gapfill_terms)]
+
+            _gap_fetched = None
+            if _gap_concept:
+                _gap_fetched = _fetch_clip(
+                    sentence={
+                        "visual_concepts": [_gap_concept],
+                        "media_type": "video",
+                        "content_track": "broll",
+                        "visual_caption": _gap_concept,
+                    },
+                    sent_duration=_gap_dur,
+                    trim_buffer=0.0,
+                    source=video_source,
+                    video_aspect=video_aspect,
+                    clip_idx=_filler_idx,
+                    clips_dir=clips_dir,
+                    used_urls=used_urls,
+                    video_topic=video_topic,
+                    video_type=video_type,
+                    recent_embeddings=recent_embs,
+                    dedup_threshold=dedup_threshold,
+                    rng=job_rng,
+                    report=quality_report,
+                )
+
+            _gap_clip_path = _gap_fetched[0] if _gap_fetched else None
+            if not _gap_clip_path:
+                # Last resort: solid black, same as the per-sentence
+                # placeholder fallback above -- guarantees SOMETHING occupies
+                # this position rather than leaving a hole.
+                _bw, _bh = video_aspect.to_resolution()
+                _black_path = os.path.join(clips_dir, f"clip-{_filler_idx:04d}-gapfix.mp4")
+                _black_cmd = [
+                    utils.get_ffmpeg_binary(), "-y",
+                    "-f", "lavfi",
+                    "-i", f"color=c=black:s={_bw}x{_bh}:r=30",
+                    "-t", f"{_gap_dur:.6f}",
+                    "-c:v", "libx264", "-preset", "ultrafast",
+                    "-pix_fmt", "yuv420p", "-an", _black_path,
+                ]
+                _black_r = subprocess.run(_black_cmd, capture_output=True, timeout=180)
+                if _black_r.returncode == 0:
+                    _gap_clip_path = _black_path
+
+            _insert_at = _gap_pos + _gap_offset
+            if _gap_clip_path:
+                ordered_clips.insert(_insert_at, _gap_clip_path)
+                planned_clip_durations.insert(_insert_at, _gap_dur)
+                obtained_duration += _gap_dur
+                video_clip_count += 1
+                _gap_offset += 1
+                quality_report[_orig_clip_idx]["catastrophic_gap_recovered"] = True
+                logger.info(
+                    f"gap at position {_insert_at}: patched with {_gap_dur:.2f}s of "
+                    "filler footage in place"
+                )
+            else:
+                quality_report[_orig_clip_idx]["catastrophic_gap_recovered"] = False
+                logger.error(
+                    f"gap at position {_insert_at}: position-aware patch also failed — "
+                    f"{_gap_dur:.2f}s of drift will remain in this job"
+                )
+
     # ---- Gap-fill: cover any shortfall with extra unique clips. ----
     # Phase 1: cycle through the job's own concept pool (already assembled above).
-    # Phase 2: when that pool is exhausted, try a set of generic fallback terms
-    # that are deliberately different from what the job used, so we get fresh URLs.
-    _GENERIC_GAPFILL_FALLBACKS = [
-        "retail store interior", "city street pedestrians", "office workers meeting",
-        "nature landscape aerial", "documentary interview setting", "warehouse logistics",
-        "business presentation", "urban architecture", "market stall vendor",
-        "factory production line",
-    ]
-    if obtained_duration < audio_duration - 0.5 and (_all_concepts or _GENERIC_GAPFILL_FALLBACKS):
+    # Phase 2: when that pool is exhausted, try _job_gapfill_terms (defined
+    # above, near quality_report -- also reused by the Phase B rescue fetch).
+    if obtained_duration < audio_duration - 0.5 and (_all_concepts or _job_gapfill_terms):
         max_gap_fill_attempts = len(_all_concepts) * 3 + 20
         attempts = 0
         logger.info(
@@ -689,6 +1024,8 @@ def start(job_path: str) -> Optional[dict]:
                 video_type=video_type,
                 recent_embeddings=recent_embs,
                 dedup_threshold=dedup_threshold,
+                rng=job_rng,
+                report=quality_report,
             )
             clip_counter += 1
             if fetched:
@@ -699,7 +1036,7 @@ def start(job_path: str) -> Optional[dict]:
         # so they produce fresh URLs even when the primary pool is completely dry.
         if obtained_duration < audio_duration - 0.5:
             logger.info("gap-fill phase 1 exhausted — trying generic fallback terms")
-            for fb_concept in _GENERIC_GAPFILL_FALLBACKS:
+            for fb_concept in _job_gapfill_terms:
                 if obtained_duration >= audio_duration - 0.5:
                     break
                 filler_sentence = {
@@ -721,6 +1058,8 @@ def start(job_path: str) -> Optional[dict]:
                     video_type=video_type,
                     recent_embeddings=recent_embs,
                     dedup_threshold=dedup_threshold,
+                    rng=job_rng,
+                    report=quality_report,
                 )
                 clip_counter += 1
                 if fetched:
@@ -754,6 +1093,7 @@ def start(job_path: str) -> Optional[dict]:
             max_clip_duration=999,
             threads=os.cpu_count() or 4,
             planned_clip_durations=planned_clip_durations,
+            rng=job_rng,
         )
     except Exception:
         logger.exception("combine_videos() raised — aborting")
@@ -921,6 +1261,7 @@ def start(job_path: str) -> Optional[dict]:
             subtitle_path=subtitle_path,
             output_file=output_file,
             params=params,
+            rng=job_rng,
         )
     except Exception:
         logger.exception("generate_video() raised — aborting")
@@ -930,6 +1271,19 @@ def start(job_path: str) -> Optional[dict]:
         logger.error("final video not found after generate_video()")
         return None
 
+    vlm_usage = vlm.get_usage()
+    tts_provider, _ = voice.resolve_tts_engine(voice_name)
+    quality = write_quality_report(
+        work_dir=work_dir,
+        title=os.path.basename(work_dir),
+        quality_report=quality_report,
+        sentences=sentences,
+        sentence_got_clip=_sentence_got_clip,
+        tts_char_count=len(video_script),
+        tts_provider=tts_provider,
+        vlm_usage=vlm_usage,
+    )
+
     result = {
         "task_id": task_id,
         "video": output_file,
@@ -938,7 +1292,8 @@ def start(job_path: str) -> Optional[dict]:
         "combined": combined_path,
         "clips": ordered_clips,
         "audio_duration": audio_duration,
-        "vlm_usage": vlm.get_usage(),
+        "vlm_usage": vlm_usage,
+        "quality_report_path": quality.get("_path"),
     }
 
     logger.success(f"pipeline complete → {output_file}")

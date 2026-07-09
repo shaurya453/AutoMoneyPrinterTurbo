@@ -123,7 +123,11 @@ def slideout_transition(clip: Clip, t: float, side: str) -> Clip:
 # Ken Burns helpers
 # ---------------------------------------------------------------------------
 
-def _pick_animation(allowed: list[str] | None = None, effect: str = "neutral") -> str:
+def _pick_animation(
+    allowed: list[str] | None = None,
+    effect: str = "neutral",
+    rng: random.Random = random,
+) -> str:
     global _last_ken_burns_animation
     pool_source = list(allowed) if allowed else list(_KEN_BURNS_ANIMATIONS)
     weights = _EFFECT_ANIM_WEIGHTS.get(effect, {})
@@ -133,7 +137,7 @@ def _pick_animation(allowed: list[str] | None = None, effect: str = "neutral") -
             weighted.extend([a] * weights.get(a, 1))
     if not weighted:
         weighted = pool_source  # single-entry pool: allow repeat rather than crash
-    choice = random.choice(weighted)
+    choice = rng.choice(weighted)
     _last_ken_burns_animation = choice
     return choice
 
@@ -186,27 +190,6 @@ def _perspective_coeffs(dst_pts, src_pts) -> list:
         b.append(sy)
     coeffs = np.linalg.solve(np.array(A, dtype=np.float64), np.array(b, dtype=np.float64))
     return coeffs.tolist()
-
-
-def _ffmpeg_persp_quad(tilt_pts: list, W: int, H: int) -> tuple:
-    """
-    Convert tilt_pts (where each image corner appears in the output at max tilt,
-    order TL/TR/BR/BL) into the 8 source-space coordinates FFmpeg's perspective
-    filter expects: which source pixel fills each output corner (TL TR BL BR).
-    Returns (x0,y0, x1,y1, x2,y2, x3,y3) as floats.
-    """
-    src_pts = [(0, 0), (W, 0), (W, H), (0, H)]   # image corners, same TL/TR/BR/BL order
-    a, bc, c, d, e, f, g, h = _perspective_coeffs(tilt_pts, src_pts)
-
-    def src_at(dx: float, dy: float):
-        denom = g * dx + h * dy + 1.0
-        return (a * dx + bc * dy + c) / denom, (d * dx + e * dy + f) / denom
-
-    tl = src_at(0, 0)
-    tr = src_at(W, 0)
-    bl = src_at(0, H)
-    br = src_at(W, H)
-    return (*tl, *tr, *bl, *br)  # x0,y0,x1,y1,x2,y2,x3,y3
 
 
 def _render_3d_effect(
@@ -838,6 +821,7 @@ def render_ken_burns_clip(
     output_path: str,
     threads: int = 2,
     effect: str = "",
+    rng: random.Random = random,
 ) -> str:
     """
     Render a Ken Burns clip from image_path to an MP4 at output_path.
@@ -861,7 +845,7 @@ def render_ken_burns_clip(
     if not is_landscape:
         # Portrait: FIT at 95%, blurred background, fade/zoom.
         frame_scale = 0.95
-        animation = _pick_animation(["fade", "zoom_in", "zoom_out"])
+        animation = _pick_animation(["fade", "zoom_in", "zoom_out"], rng=rng)
     else:
         # Landscape: cover-crop + random animation from overflow-derived pool.
         cover_scale = max(width / img_w, height / img_h)
@@ -874,7 +858,7 @@ def render_ken_burns_clip(
         if v_excess > height * 0.02:
             allowed.append("pan_ud")
 
-        animation = _pick_animation(allowed, effect)
+        animation = _pick_animation(allowed, effect, rng=rng)
         frame_scale = 1.0
         logger.info(
             f"Ken Burns: landscape cover-mode, animation={animation}, "
@@ -889,7 +873,7 @@ def render_ken_burns_clip(
             return output_path
         logger.warning(f"3D effect failed for {image_path}, falling back to pan/zoom")
         allowed_fallback = [a for a in allowed if "screen_3d" not in a]
-        animation = _pick_animation(allowed_fallback or ["zoom_in"], effect)
+        animation = _pick_animation(allowed_fallback or ["zoom_in"], effect, rng=rng)
 
     # Prefer FFmpeg (sub-pixel smooth motion) over MoviePy (integer rounding jitter).
     try:

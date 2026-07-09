@@ -62,7 +62,11 @@ STYLE_MAP: dict = {
 _last_variant: dict = {}
 
 
-def _pick_variant(graphic_type: str, style: Optional[str] = None) -> int:
+def _pick_variant(
+    graphic_type: str,
+    style: Optional[str] = None,
+    rng: random.Random = random,
+) -> int:
     """
     Return a variant index for the given graphic type.
 
@@ -86,7 +90,7 @@ def _pick_variant(graphic_type: str, style: Optional[str] = None) -> int:
     choices = [i for i in range(pool_size) if i != last]
     if not choices:
         choices = list(range(pool_size))
-    chosen = random.choice(choices)
+    chosen = rng.choice(choices)
     _last_variant[graphic_type] = chosen
     return chosen
 
@@ -100,6 +104,7 @@ def render_graphic_clip(
     fps: int = 30,
     variables: Optional[dict] = None,
     style: Optional[str] = None,
+    rng: random.Random = random,
 ) -> Optional[str]:
     """
     Render a Revideo graphic segment. Returns the output MP4 path, or None on failure.
@@ -113,6 +118,9 @@ def render_graphic_clip(
         variables:    Key/value pairs forwarded to the Revideo scene.
         style:        Optional named style (e.g. "editorial", "callouts") — maps to a
                       specific variant, bypassing the no-consecutive rotation.
+        rng:          Source of randomness for variant/background rotation. Defaults
+                      to the global `random` module; pass a seeded `random.Random`
+                      for reproducible-per-job selection.
     """
     global _last_bg_video
 
@@ -126,13 +134,13 @@ def render_graphic_clip(
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
-    variant = _pick_variant(graphic_type, style)
+    variant = _pick_variant(graphic_type, style, rng=rng)
     merged_vars = dict(variables or {})
 
     # Inject background for infographic/list scenes, enforcing no-consecutive-repeat.
     if graphic_type in ("infographic", "list"):
         choices = [v for v in _BG_VIDEOS if v != _last_bg_video] or _BG_VIDEOS
-        chosen_bg = random.choice(choices)
+        chosen_bg = rng.choice(choices)
         _last_bg_video = chosen_bg
         merged_vars["bgVideo"] = chosen_bg
 

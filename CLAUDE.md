@@ -48,6 +48,7 @@ Re-running with the same title creates `<title> (2)`, `<title> (3)`, etc. automa
 | `app/services/pipeline/_planning.py` | Clip planning: query building, duration estimation, ffmpeg trim |
 | `app/services/pipeline/_fetch.py` | Clip fetching: search → NSFW gate → relevance → Ken Burns |
 | `app/services/pipeline/_orchestrate.py` | `start()` function: orchestrates all pipeline stages |
+| `app/services/pipeline/_quality.py` | `write_quality_report()` — aggregates per-clip fetch/rescue/placeholder/gap outcomes into `<title>.quality.json` |
 | `app/services/render/` | FFmpeg/MoviePy rendering package |
 | `app/services/render/ken_burns.py` | Ken Burns animations, `render_ken_burns_clip()` |
 | `app/services/render/combine.py` | `combine_videos()`, xfade concat, `XFADE_CLIP_LIMIT` |
@@ -100,10 +101,41 @@ Lives at `revideo-worker/` (inside the repository root).
 4. **Pass 2 — clip fetch / render** — for each sentence:
    - `"graphic"` → `graphics.render_graphic_clip()` (subprocess to `revideo-worker/render.js`)
    - `"named"` or `"broll"` → `_fetch_clip()` (search → NSFW gate → relevance → Ken Burns for images)
-5. **Gap-fill** — if total footage < audio, extra generic clips are fetched
+5. **Clip-fetch resilience** — rescue fetch → placeholder → position-aware gap-fill → tail gap-fill (see below)
 6. **Outro extension** — last clip looped to reach `audio_duration + 2 s`
 7. **`combine_videos()`** — sequential concat with xfade crossfade → `temp/combined.mp4`
 8. **`generate_video()`** — subtitles (Pillow), fade-out, BGM duck → `final.mp4`
+
+### Clip-fetch resilience (rescue → placeholder → gap-fill)
+
+Four layered fallbacks in `_orchestrate.py`'s Phase B keep the timeline in
+sync when a fetch fails, narrowest/most-relevant first:
+
+1. **Rescue fetch** — a sentence whose primary search failed entirely
+   retries against `_job_gapfill_terms` (per-job, topically-loose terms from
+   `job.gapfill_terms`, falling back to a hardcoded safety net for old
+   job.json files). Sentences carrying a `lower_third` graphic try their
+   named section's other `visual_concepts[0]` values first
+   (`_entity_concepts_map`, grouped by `entity_name`) before falling back to
+   fully generic terms — a generic image under a specific product-name label
+   is the most visually jarring case, so it gets the most relevant rescue.
+2. **Placeholder** — if rescue also fails, the slot is filled with footage
+   of the exact planned duration so audio/video stay in sync
+   (`_recent_real_clips`, cycling through the last 3 real clips so
+   consecutive failures don't repeat the exact same footage). If the anchor
+   is a Ken Burns still image, its source image (`_recent_real_image_sources`)
+   is re-rendered continuously via `render_ken_burns_clip()` for the full
+   needed duration instead of `stream_loop`-ing the finished clip — looping
+   would replay the baked-in animation from frame 0 partway through. Stock-
+   video anchors (no source image) fall back to `stream_loop` + mirror-flip.
+3. **Position-aware gap-fill** — the rare case where both the fetch and
+   every placeholder attempt fail (`catastrophic_gap` in `quality.json`) is
+   patched *at its exact timeline position*, not the tail — a tail-only fix
+   would make the total video duration match the audio again while
+   everything downstream of the hole stays permanently offset from the VO.
+4. **Tail gap-fill** — after all of the above, if total footage duration
+   still falls short of the audio, extra generic clips are appended to the
+   end until they match (or the concept/gapfill-term pool is exhausted).
 
 ### Ken Burns (still images)
 
@@ -154,7 +186,9 @@ Named style hints (e.g. `"style": "callouts"`) map to specific variants — see 
 
 Created by `sentence_prep.py`, enriched by the AI agent, consumed by `cli.py`.
 
-Top-level fields an agent must set: `video_topic`, `video_type`, `motif_palette` (thematic only), and per-sentence `visual_concepts`, `content_track`, `visual_caption`, `media_type`.
+Top-level fields an agent must set: `video_topic`, `video_type`, `motif_palette` (thematic only), `gapfill_terms` (10 generic-but-on-topic filler terms, used by rescue/gap-fill fallbacks above), and per-sentence `visual_concepts`, `content_track`, `visual_caption`, `media_type`.
+
+Named-entity sentences (`content_track: "named"`) also carry `entity_name` — the full, non-rotating canonical name of the product/person (brand + product + SPF/size/shade/model), constant across every sentence in that named section even as `visual_concepts[0]` rotates. Portal's graphics-audit pass (`worker.mjs`) uses it to group a section's sentences and generate its `lower_third` label deterministically — see portal's `CLAUDE.md`.
 
 For graphic sentences, the agent sets `content_track: "graphic"`, `graphic_type`, `duration`, `variables`, and leaves `text: ""`. Graphic sentences must **not** appear in `video_script`.
 
@@ -206,13 +240,17 @@ ffprobe -v error -show_entries format=duration -of compact /tmp/test.mp4
 
 ## Portal Integration
 
-This pipeline is the backend for `/home/deploy/portal/` (Next.js + SQLite). The `portal-worker` PM2 process drives two phases:
+This pipeline is the backend for `/home/deploy/portal/` (Next.js + SQLite). The `portal-worker` PM2 process drives the job pipeline:
 
-1. **Phase 1** — AI agent (Claude via CLI) reads `AGENT_GUIDE.md`, writes the script, runs `sentence_prep.py`, enriches `job.json`, prints `JOB_JSON_PATH: /absolute/path`
-2. **Gate** — worker runs `venv/bin/python scripts/validate_job.py <path>`: `VALIDATION_ERROR` blocks Phase 2; `VALIDATION_WARNINGS` is logged but proceeds
-3. **Phase 2** — worker runs `venv/bin/python cli.py --job <path>`
+1. **Phase 1** — AI agent (Claude or Codex via CLI) reads `AGENT_GUIDE.md`, writes the script, runs `sentence_prep.py`, enriches `job.json`, prints `JOB_JSON_PATH: /absolute/path`
+2. **Graphics audit** — `runGraphicsAudit()` in portal's `scripts/worker.mjs` deterministically assigns one `lower_third` per named-entity section (grouped by `entity_name`, no LLM involved), then an LLM pass handles optional list/infographic graphics and visual-effect distribution. See portal's `CLAUDE.md` for details.
+3. **Gate** — worker runs `venv/bin/python scripts/validate_job.py <path>`: `VALIDATION_ERROR` blocks Phase 2; `VALIDATION_WARNINGS` is logged but proceeds
+4. **Phase 2** — worker runs `venv/bin/python cli.py --job <path>`
 
 Check status: `pm2 list` — services are `portal-web` (Next.js, port 3000) and `portal-worker`.
+`pm2` isn't on PATH by default in a fresh shell — it's installed at
+`~/.npm-global/bin/pm2`. Either run `export PATH="$HOME/.npm-global/bin:$PATH"`
+first, or call it directly as `~/.npm-global/bin/pm2 <command>`.
 
 ---
 
@@ -236,3 +274,5 @@ Check status: `pm2 list` — services are `portal-web` (Next.js, port 3000) and 
 - `combine_videos()` expects all clips to be H.264 MP4 at target resolution and 30 fps
 - Revideo `renderVideo()` Puppeteer args go inside `settings.puppeteer.args`, not at top level
 - Clip fetching is parallelised via `ThreadPoolExecutor` (`clip_fetch_workers` in config.toml, default 4). Revideo renders remain synchronous — Phase A renders graphics sequentially before footage-fetch futures are submitted. All scorer lazy-loads (CLIP model, NudeNet) must be thread-safe; use `_model_load_lock` (double-checked locking) as in `relevance.py`
+- `entity_name` must be set (and identical) on every sentence in a named section — if the enrichment agent leaves it blank, portal's graphics-audit pass falls back to a fragile brand-token heuristic (leading word of `visual_concepts[0]`, lowercased) that can mislabel or duplicate `lower_third`s when `visual_concepts[0]` rotates within the section
+- A job's `quality.json` can report `catastrophic_gap_count > 0` — a slot where the real fetch *and* every placeholder attempt failed. Check `catastrophic_gap_unrecovered_count`: 0 means the position-aware gap-fill pass patched it in place (no drift); anything above 0 means real, uncorrected timeline drift starting at that clip

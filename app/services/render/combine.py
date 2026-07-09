@@ -216,6 +216,7 @@ def combine_videos(
     max_clip_duration: int = 5,
     threads: int = 2,
     planned_clip_durations: Optional[List[float]] = None,
+    rng: random.Random = random,
 ) -> str:
     audio_clip = AudioFileClip(audio_file)
     try:
@@ -314,10 +315,10 @@ def combine_videos(
         src_start = subclipped_item.start_time
         src_end = subclipped_item.end_time
 
-        shuffle_side = random.choice(["left", "right", "top", "bottom"])
+        shuffle_side = rng.choice(["left", "right", "top", "bottom"])
         transition_func = _TRANSITION_DISPATCH.get(transition_value)
         if transition_func == "shuffle":
-            transition_func = random.choice(_SHUFFLE_TRANSITIONS)
+            transition_func = rng.choice(_SHUFFLE_TRANSITIONS)
 
         # Compute snap duration (frame-aligned planned duration) for both paths.
         raw_dur = src_end - src_start

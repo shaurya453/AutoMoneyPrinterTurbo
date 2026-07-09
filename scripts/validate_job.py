@@ -86,6 +86,13 @@ def main():
     if not data.get("video_topic", "").strip():
         warnings.append("video_topic is missing — concept anchoring will be weak")
 
+    _gapfill_terms = [t for t in (data.get("gapfill_terms") or []) if isinstance(t, str) and t.strip()]
+    if len(_gapfill_terms) < 5:
+        warnings.append(
+            "gapfill_terms is missing or has fewer than 5 usable entries — "
+            "gap-fill/rescue fetches will fall back to generic hardcoded terms"
+        )
+
     if data.get("video_type") not in ("thematic", "named_entity"):
         warnings.append(
             f"video_type={data.get('video_type')!r} — expected 'thematic' or 'named_entity'"
@@ -163,6 +170,13 @@ def main():
         effect = (sent.get("visual_effect") or "").strip()
         if effect and effect not in _VALID_VISUAL_EFFECTS:
             warnings.append(f"sentence {i}: unknown visual_effect={effect!r}")
+
+        if track == "named" and not (sent.get("entity_name") or "").strip():
+            warnings.append(
+                f"sentence {i}: content_track='named' but entity_name is missing — "
+                "the graphics pass will fall back to a brand-token heuristic, which can "
+                "mislabel or duplicate lower-thirds and produce truncated on-screen text"
+            )
 
     # ── Hook Zone checks (sentences 0–4) ────────────────────────────────────
     hook_effect_count  = 0

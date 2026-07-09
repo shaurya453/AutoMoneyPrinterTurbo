@@ -437,7 +437,7 @@ _IMAGE_PROVIDERS = {
     "serper": search_images_serper,
 }
 
-_DEFAULT_IMAGE_SOURCE_ORDER = ["duckduckgo", "wikimedia", "pexels", "pixabay", "unsplash"]
+_DEFAULT_IMAGE_SOURCE_ORDER = ["duckduckgo", "pexels", "pixabay", "unsplash", "wikimedia"]
 
 _CANDIDATES_PER_TERM = 6
 
@@ -457,6 +457,8 @@ def download_image(
     avoid: List[str] = None,
     serper_term: str = "",
     deadline: Optional[float] = None,
+    content_track: str = "broll",
+    report: Optional[dict] = None,
 ) -> str:
     """
     Search for a still image using multiple providers in priority order and
@@ -465,6 +467,13 @@ def download_image(
 
     source_order: provider names to try in order.  Defaults to
         ["duckduckgo", "wikimedia", "pexels", "pixabay", "unsplash"].
+
+    content_track: "named" sentences (a specific product/person/place) get a
+        larger per-term candidate slice (image_candidates_per_term_named,
+        default 10) than generic "broll" (image_candidates_per_term, default
+        6) when relevance filtering is active -- named entities benefit more
+        from trying harder to find the one real match, while broll's search
+        pool is broad enough that extra candidates rarely change the outcome.
 
     used_urls: if provided, mutated in-place with the chosen image's source
         URL so subsequent calls across the run won't reuse the same image.
@@ -534,7 +543,13 @@ def download_image(
             i += 1
         return candidates
 
-    def _claim(url: str, term: str, provider: str, local: str, note: str = "") -> str:
+    def _claim(url: str, term: str, provider: str, local: str, dedup_emb=None, note: str = "") -> str:
+        """The single authoritative commit point for a candidate -- owns both
+        URL-uniqueness and visual-uniqueness atomically. Acceptance isn't
+        decided until here (relevance-margin scoring and VLM comparative
+        pooling both run before this), so this is the correct place for the
+        dedup embedding to actually claim its window slot, not the earlier
+        soft contains_similar() pre-filter."""
         if used_urls is not None:
             if hasattr(used_urls, 'try_claim'):
                 # Atomically claim both the source URL and the local cache
@@ -546,7 +561,13 @@ def download_image(
             else:
                 used_urls.add(url)
                 used_urls.add(local)  # prevent same cached file reused via a different URL
+        if recent_embeddings is not None and dedup_emb is not None:
+            if not recent_embeddings.try_claim(dedup_emb, dedup_threshold):
+                logger.info(f"image candidate raced out by a concurrent near-duplicate claim: {url}")
+                return ''
         logger.info(f"image obtained via {provider} for '{term}': {local}{note}")
+        if report is not None:
+            report["provider"] = provider
         return local
 
     def _try() -> str:
@@ -554,13 +575,45 @@ def download_image(
         fallback_score = float("-inf")
         fallback_emb = None
         vlm_img_threshold = float(config.app.get("vlm_image_threshold", 0.30))
+        candidates_per_term = int(config.app.get(
+            "image_candidates_per_term_named" if content_track == "named"
+            else "image_candidates_per_term",
+            10 if content_track == "named" else _CANDIDATES_PER_TERM,
+        ))
+
+        # Comparative VLM pooling: instead of claiming the first candidate that
+        # individually passes every gate, gather up to vlm_compare_pool_size
+        # accepted candidates, then show them to the VLM together in one call
+        # and take its pick -- more reliable than independent per-candidate
+        # threshold scoring for "which of these is the best match." Scoped by
+        # vlm_compare_scope ("off" | "named" | "all", default "named") so the
+        # extra VLM cost is spent where a wrong pick is most noticeable.
+        compare_scope = str(config.app.get("vlm_compare_scope", "named")).strip().lower()
+        compare_mode = vlm.is_enabled() and (
+            compare_scope == "all" or (compare_scope == "named" and content_track == "named")
+        )
+        pool_size = int(config.app.get("vlm_compare_pool_size", 3)) if compare_mode else 1
+        # Each entry: (provider, term, url, local, image_bytes, dedup_emb).
+        pool: list = []
+
+        # Rejected candidates are intentionally left on disk, not deleted.
+        # The local cache (save_image) is shared and keyed by URL hash
+        # across every ThreadPoolExecutor worker in the run, so a sibling
+        # thread evaluating a *different* sentence can independently
+        # discover and accept the exact same URL (e.g. a named product
+        # mentioned in two sentences) while this thread is rejecting it on
+        # its own narration/VLM prompt. Deleting here raced that sibling
+        # thread's read of the same file, crashing its fetch with a
+        # FileNotFoundError. The cache is content-addressed, so leaving
+        # rejected candidates in place only costs disk space, not
+        # correctness.
 
         for term in search_terms:
             if deadline is not None and time.monotonic() > deadline:
                 logger.warning(f"image search deadline reached — stopping at term '{term}'")
                 break
             candidates = _gather_urls(term)
-            iter_candidates = candidates if not use_relevance else candidates[:_CANDIDATES_PER_TERM]
+            iter_candidates = candidates if not use_relevance else candidates[:candidates_per_term]
             prompt = caption_prompt or term
 
             for provider, url in iter_candidates:
@@ -581,14 +634,8 @@ def download_image(
 
                 if not nsfw.passes(nsfw.is_nsfw_image(image_bytes)):
                     logger.info(f"rejected NSFW image candidate: {url}")
-                    # Guard: don't delete a file we're holding as the relevance
-                    # fallback — same base-URL can produce the same cached path
-                    # for a different URL variant, orphaning the fallback pointer.
-                    if local != fallback_path:
-                        try:
-                            os.remove(local)
-                        except Exception:
-                            pass
+                    if report is not None:
+                        report.setdefault("rejections", []).append("nsfw")
                     continue
 
                 if vlm.is_enabled():
@@ -601,62 +648,98 @@ def download_image(
                         # Mark as used so subsequent clips in this sentence skip re-download.
                         if used_urls is not None:
                             used_urls.add(url)
-                        if local != fallback_path:
-                            try:
-                                os.remove(local)
-                            except Exception:
-                                pass
+                        if report is not None:
+                            report.setdefault("rejections", []).append("vlm")
                         continue
 
                 dedup_emb = None
                 if recent_embeddings is not None:
                     dedup_emb = relevance.embed_image(image_bytes)
-                    if dedup_emb is not None and relevance.too_similar(
-                        dedup_emb, recent_embeddings, dedup_threshold
+                    # Soft pre-filter only (read-only peek) -- avoids wasting a
+                    # relevance score / VLM call / pool slot on an already-known
+                    # duplicate. The authoritative claim happens in _claim(),
+                    # since acceptance isn't decided until after relevance-margin
+                    # scoring and (in compare_mode) VLM comparative pooling.
+                    if dedup_emb is not None and recent_embeddings.contains_similar(
+                        dedup_emb, dedup_threshold
                     ):
                         logger.info(f"skipping near-duplicate image candidate: {url}")
-                        if local != fallback_path:
-                            try:
-                                os.remove(local)
-                            except Exception:
-                                pass
+                        if report is not None:
+                            report.setdefault("rejections", []).append("dedup")
                         continue
 
                 if not use_relevance:
-                    _r = _claim(url, term, provider, local)
+                    if compare_mode:
+                        pool.append((provider, term, url, local, image_bytes, dedup_emb))
+                        if len(pool) >= pool_size:
+                            break
+                        continue
+                    _r = _claim(url, term, provider, local, dedup_emb=dedup_emb)
                     if _r:
-                        if dedup_emb is not None and recent_embeddings is not None:
-                            recent_embeddings.append(dedup_emb)
                         return _r
-                    continue  # another thread claimed this URL; try next candidate
+                    continue  # another thread claimed this URL/embedding; try next candidate
 
                 s = relevance.score(prompt, image_bytes)
                 if config.app.get("relevance_debug_log", False):
                     logger.debug(f"relevance[image] prompt={prompt!r} score={s} url={url}")
                 margin_ok = relevance.passes_margin(prompt, image_bytes, margin)
                 if margin_ok is None or margin_ok:
+                    if compare_mode:
+                        pool.append((provider, term, url, local, image_bytes, dedup_emb))
+                        if len(pool) >= pool_size:
+                            break
+                        continue
                     note = f" (score={s:.3f})" if s is not None else ""
-                    _r = _claim(url, term, provider, local, note)
+                    _r = _claim(url, term, provider, local, dedup_emb=dedup_emb, note=note)
                     if _r:
-                        if dedup_emb is not None and recent_embeddings is not None:
-                            recent_embeddings.append(dedup_emb)
                         return _r
-                    continue  # another thread claimed this URL; try next candidate
+                    continue  # another thread claimed this URL/embedding; try next candidate
                 if s is not None and s > fallback_score:
                     fallback_score = s
                     fallback_path, fallback_url = local, url
                     fallback_provider, fallback_term = provider, term
                     fallback_emb = dedup_emb
 
+            if compare_mode and len(pool) >= pool_size:
+                break  # enough pooled candidates -- stop trying further terms too
+
+        if compare_mode and pool:
+            if len(pool) == 1:
+                provider, term, url, local, image_bytes, dedup_emb = pool[0]
+                _r = _claim(url, term, provider, local, dedup_emb=dedup_emb)
+                if _r:
+                    return _r
+                # Raced by a concurrent thread -- fall through to the
+                # relevance-fallback logic below, same as any other dead end.
+            else:
+                winner_idx = vlm.compare_candidates(
+                    [p[4] for p in pool], narration, visual_caption, video_topic,
+                    must_show or [], avoid or [],
+                )
+                if winner_idx is None or not (0 <= winner_idx < len(pool)):
+                    winner_idx = 0  # fail-open: default to the first pooled candidate
+                provider, term, url, local, image_bytes, dedup_emb = pool[winner_idx]
+                for i, entry in enumerate(pool):
+                    if i != winner_idx:
+                        try:
+                            os.remove(entry[3])
+                        except Exception:
+                            pass
+                _r = _claim(url, term, provider, local, dedup_emb=dedup_emb)
+                if _r:
+                    if report is not None:
+                        report["vlm_compare_used"] = True
+                        report["vlm_compare_pool_size"] = len(pool)
+                    return _r
+                # Raced by a concurrent thread -- fall through, same as above.
+
         if fallback_path:
             logger.warning(
                 f"no image cleared relevance margin {margin} for {search_terms}; "
                 f"using best available for '{fallback_term}' (score={fallback_score:.3f}): {fallback_path}"
             )
-            _r = _claim(fallback_url, fallback_term, fallback_provider, fallback_path)
+            _r = _claim(fallback_url, fallback_term, fallback_provider, fallback_path, dedup_emb=fallback_emb)
             if _r:
-                if fallback_emb is not None and recent_embeddings is not None:
-                    recent_embeddings.append(fallback_emb)
                 return _r
             # Another thread claimed the fallback while we were scoring; no
             # image found this call — let the higher-level caller fall back.

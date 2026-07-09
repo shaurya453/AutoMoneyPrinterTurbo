@@ -24,7 +24,7 @@ mirrors the SKIP_WHISPER=1 dry-run pattern in pipeline.py.
 import io
 import os
 import threading
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Tuple
 
 from loguru import logger
 
@@ -390,24 +390,67 @@ def embed_image(image_bytes: bytes) -> "Optional[Any]":
         return None
 
 
-def too_similar(
-    embedding: "Any",
-    recent: "Sequence[Any]",
-    threshold: float,
-) -> bool:
-    """True if `embedding` has a cosine similarity >= `threshold` to ANY vector in
-    `recent`.  Both vectors must be L2-normalised (as returned by `embed_image`)
-    so the similarity equals the dot product.  Returns False when `recent` is
-    empty or when numpy is unavailable.
-    """
-    if not recent:
-        return False
-    try:
-        import numpy as np
+class ThreadSafeEmbeddingWindow:
+    """Thread-safe bounded window of recent CLIP embeddings for near-duplicate
+    rejection across ThreadPoolExecutor workers. Embeddings must be
+    L2-normalised (as returned by `embed_image`) so cosine similarity equals
+    the dot product.
 
-        for prev in recent:
-            if float(np.dot(embedding, prev)) >= threshold:
-                return True
-    except Exception as exc:
-        logger.debug(f"too_similar check failed: {exc}")
-    return False
+    Replaces a bare deque + free-function check: two worker threads doing
+    "check similarity, then append" on a shared deque have a TOCTOU race
+    (both can check against the same not-yet-updated window and both accept
+    near-duplicate candidates) -- the same class of race `_ThreadSafeURLSet`
+    (pipeline/_fetch.py) already solves for `used_urls` via an atomic
+    `try_claim()`. This class provides the equivalent for embeddings.
+
+    maxlen=None makes the window unbounded (remembers every embedding for
+    the life of the instance) -- the right choice for a per-job window,
+    since a bounded window forgets footage was already used once enough
+    other clips are accepted, letting the same stock photo/video resurface
+    later in the same video.
+    """
+
+    def __init__(self, maxlen: Optional[int]) -> None:
+        from collections import deque
+
+        self._lock = threading.Lock()
+        self._window = deque(maxlen=maxlen)
+
+    def _similar_locked(self, embedding: "Any", threshold: float) -> bool:
+        try:
+            import numpy as np
+
+            return any(float(np.dot(embedding, prev)) >= threshold for prev in self._window)
+        except Exception as exc:
+            logger.debug(f"embedding similarity check failed: {exc}")
+            return False
+
+    def contains_similar(self, embedding: "Any", threshold: float) -> bool:
+        """Read-only peek. For an early/soft pre-filter -- skip a candidate
+        that's already an obvious near-duplicate before spending further
+        work on it -- NOT the authoritative accept/reject decision."""
+        with self._lock:
+            return self._similar_locked(embedding, threshold)
+
+    def try_claim(self, embedding: "Any", threshold: float) -> bool:
+        """Atomic check-and-add in one critical section. True and adds the
+        embedding if nothing in the window is within `threshold` of it;
+        False (does not add) if something already is -- including something
+        added by another thread since this thread's last `contains_similar`
+        peek. This is the only operation that should gate final acceptance.
+        """
+        with self._lock:
+            if self._similar_locked(embedding, threshold):
+                return False
+            self._window.append(embedding)
+            return True
+
+    def force_add(self, embedding: "Any") -> None:
+        """Unconditional add, no check. For the rare case where a candidate
+        is used despite being a known duplicate (e.g. every candidate was
+        rejected as a near-duplicate and the pipeline falls back to the
+        first-rejected one rather than return nothing) -- the window should
+        still reflect what's actually in the final video, without that
+        acceptance retroactively blocking anything."""
+        with self._lock:
+            self._window.append(embedding)
