@@ -1,0 +1,35 @@
+{
+  "_readme": "Single source of truth for graphic variant metadata. render.js reads 'project' paths (relative to revideo-worker/); graphics.py derives pool sizes and the style->variant map from the same arrays. Adding a variant = new scene+project file + one entry here.",
+  "bg_videos": [
+    "/blue_gradient_bg.mp4",
+    "/orange_gradient_bg.mp4",
+    "/green_gradient_bg.mp4",
+    "/monochrome_gradient_bg.mp4"
+  ],
+  "types": {
+    "lower_third": {
+      "uses_bg_video": false,
+      "variants": [
+        {"project": "src/projects/lower-third.ts", "styles": [], "label": "left-anchored label, only variant"}
+      ]
+    },
+    "infographic": {
+      "uses_bg_video": true,
+      "variants": [
+        {"project": "src/projects/infographic.ts", "styles": ["bars"], "label": "A - vertical bars"},
+        {"project": "src/projects/infographic-b.ts", "styles": ["horizontal"], "label": "B - horizontal bars"},
+        {"project": "src/projects/infographic-c.ts", "styles": ["lollipop"], "label": "C - lollipop chart"},
+        {"project": "src/projects/infographic-d.ts", "styles": ["callouts"], "label": "D - number callouts, best for 2-3 stats"}
+      ]
+    },
+    "list": {
+      "uses_bg_video": true,
+      "variants": [
+        {"project": "src/projects/list.ts", "styles": ["bullets"], "label": "A - bullet list, slides from left"},
+        {"project": "src/projects/list-b.ts", "styles": ["numbered"], "label": "B - numbered list, drops from above"},
+        {"project": "src/projects/list-c.ts", "styles": ["cascade"], "label": "C - cascade reveal, bar sweep"},
+        {"project": "src/projects/list-d.ts", "styles": ["grid"], "label": "D - card grid"}
+      ]
+    }
+  }
+}

@@ -43,11 +43,6 @@ _OVERLAY_FADE_DUR = 0.5   # seconds — fade-in at start, fade-out at end
 _LT_ANIM_IN  = 0.40   # seconds — fade-in
 _LT_ANIM_OUT = 0.35   # seconds — fade-out
 
-# Optional user-supplied full-frame RGBA blob PNG for the lower_third backdrop.
-_LT_BLOB_PNG = os.path.normpath(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "resource", "graphics", "lower_third_shadow.png")
-)
-
 
 def apply_visual_effect(
     clip_path: str,
@@ -194,13 +189,11 @@ def composite_lower_third(
     """
     Composite a lower_third Revideo clip (white text on black) over stock footage.
 
-    Pure alpha-compositing strategy — no blend modes:
-      1. Blob PNG (RGBA): overlaid on footage via its native alpha channel.
-      2. Text clip (white on black): black is keyed out with `colorkey`, giving
-         the text clip a proper alpha channel; then overlaid the same way.
-
-    Both layers fade in/out via FFmpeg `fade=alpha=1` on their alpha channels.
-    Falls back to text-only (no blob) if the PNG is absent.
+    Pure alpha-compositing strategy — no blend modes. The Revideo clip is
+    white text on solid black with its own dynamically-sized dark backdrop;
+    the black is keyed out with `colorkey`, giving the text clip a proper
+    alpha channel, which is then overlaid onto the footage. Both fades run
+    via FFmpeg `fade=alpha=1` on the alpha channel.
     """
     codec = _get_configured_video_codec()
     footage_dur = _probe_duration(footage_path)
@@ -213,10 +206,6 @@ def composite_lower_third(
     fo       = min(_LT_ANIM_OUT, gfx_dur / 4)
     fo_start = max(0.0, gfx_dur - fo)
 
-    # The Revideo scene now renders a dynamically-sized dark rect backdrop behind
-    # the text, so the static blob PNG overlay is no longer needed.
-    has_blob = False  # was: os.path.isfile(_LT_BLOB_PNG)
-
     # colorkey turns the solid black background of the Revideo clip transparent.
     # Convert to rgba first so the key operates in RGB space (not YUV), then fade
     # the alpha channel in/out for the lower-third animation.
@@ -228,50 +217,24 @@ def composite_lower_third(
         f"fade=t=out:st={fo_start:.3f}:d={fo:.3f}:alpha=1"
     )
 
-    if has_blob:
-        # Input 0: footage | Input 1: Revideo text clip | Input 2: blob PNG (via -loop 1)
-        filter_complex = (
-            f"[0:v]scale={width}:{height},format=rgba[footage];"
-            f"[2:v]scale={width}:{height},format=rgba,"
-            f"fade=t=in:st=0:d={fi:.3f}:alpha=1,"
-            f"fade=t=out:st={fo_start:.3f}:d={fo:.3f}:alpha=1[blob];"
-            f"[footage][blob]overlay=0:0[with_blob];"
-            f"[1:v]{_text_chain}[text];"
-            f"[with_blob][text]overlay=0:0,format=yuv420p[out]"
-        )
-        cmd = [
-            utils.get_ffmpeg_binary(), "-y",
-            "-i", footage_path,
-            "-i", graphic_path,
-            "-loop", "1", "-t", f"{gfx_dur + 0.1:.3f}", "-i", _LT_BLOB_PNG,
-            "-filter_complex", filter_complex,
-            "-map", "[out]",
-            "-map", "0:a?", "-c:a", "copy",
-            "-t", f"{footage_dur:.6f}",
-            "-c:v", codec, *_fast_preset_args(codec),
-            "-pix_fmt", "yuv420p",
-            "-threads", str(threads),
-            output_path,
-        ]
-    else:
-        filter_complex = (
-            f"[0:v]scale={width}:{height},format=rgba[footage];"
-            f"[1:v]{_text_chain}[text];"
-            f"[footage][text]overlay=0:0,format=yuv420p[out]"
-        )
-        cmd = [
-            utils.get_ffmpeg_binary(), "-y",
-            "-i", footage_path,
-            "-i", graphic_path,
-            "-filter_complex", filter_complex,
-            "-map", "[out]",
-            "-map", "0:a?", "-c:a", "copy",
-            "-t", f"{footage_dur:.6f}",
-            "-c:v", codec, *_fast_preset_args(codec),
-            "-pix_fmt", "yuv420p",
-            "-threads", str(threads),
-            output_path,
-        ]
+    filter_complex = (
+        f"[0:v]scale={width}:{height},format=rgba[footage];"
+        f"[1:v]{_text_chain}[text];"
+        f"[footage][text]overlay=0:0,format=yuv420p[out]"
+    )
+    cmd = [
+        utils.get_ffmpeg_binary(), "-y",
+        "-i", footage_path,
+        "-i", graphic_path,
+        "-filter_complex", filter_complex,
+        "-map", "[out]",
+        "-map", "0:a?", "-c:a", "copy",
+        "-t", f"{footage_dur:.6f}",
+        "-c:v", codec, *_fast_preset_args(codec),
+        "-pix_fmt", "yuv420p",
+        "-threads", str(threads),
+        output_path,
+    ]
 
     try:
         result = subprocess.run(cmd, capture_output=True, timeout=300)

@@ -103,43 +103,54 @@ def _ensure_model_files() -> str:
 
 
 def _get_model():
+    """Thread-safe lazy load of the CLIP model.
+
+    The download + session construction happens INSIDE the lock so that
+    concurrent fetch workers block until the model is ready. (A previous
+    version released the lock before loading; threads arriving during the
+    load — up to minutes on first run while ~600MB of model files download —
+    saw "load already attempted" and silently skipped every relevance,
+    dedup, and rerank check.)
+    """
     global _model, _model_load_attempted
-    if _model is not None or _model_load_attempted:
+    if _model_load_attempted:  # fast path, no lock once load finished
         return _model
     with _model_load_lock:
-        # Double-checked: another thread may have loaded while we waited.
-        if _model is not None or _model_load_attempted:
+        if _model_load_attempted:
             return _model
-        _model_load_attempted = True
 
-    if not config.app.get("relevance_filter_enabled", True):
-        logger.info("relevance filter disabled (relevance_filter_enabled=false)")
-        return None
+        try:
+            if not config.app.get("relevance_filter_enabled", True):
+                logger.info("relevance filter disabled (relevance_filter_enabled=false)")
+                return None
+            try:
+                import onnxruntime as ort
+                from tokenizers import Tokenizer
 
-    try:
-        import onnxruntime as ort
-        from tokenizers import Tokenizer
+                model_dir = _ensure_model_files()
 
-        model_dir = _ensure_model_files()
+                vision_session = ort.InferenceSession(
+                    os.path.join(model_dir, "vision.onnx"), providers=["CPUExecutionProvider"]
+                )
+                text_session = ort.InferenceSession(
+                    os.path.join(model_dir, "text.onnx"), providers=["CPUExecutionProvider"]
+                )
+                tokenizer = Tokenizer.from_file(os.path.join(model_dir, "tokenizer.json"))
+                tokenizer.enable_padding(
+                    length=_MAX_TOKENS, pad_id=_EOT_TOKEN_ID, pad_token="<|endoftext|>"
+                )
+                tokenizer.enable_truncation(max_length=_MAX_TOKENS)
 
-        vision_session = ort.InferenceSession(
-            os.path.join(model_dir, "vision.onnx"), providers=["CPUExecutionProvider"]
-        )
-        text_session = ort.InferenceSession(
-            os.path.join(model_dir, "text.onnx"), providers=["CPUExecutionProvider"]
-        )
-        tokenizer = Tokenizer.from_file(os.path.join(model_dir, "tokenizer.json"))
-        tokenizer.enable_padding(
-            length=_MAX_TOKENS, pad_id=_EOT_TOKEN_ID, pad_token="<|endoftext|>"
-        )
-        tokenizer.enable_truncation(max_length=_MAX_TOKENS)
-
-        _model = (vision_session, text_session, tokenizer)
-        logger.info("relevance filter: CLIP model loaded")
-    except Exception as exc:
-        logger.warning(f"relevance filter unavailable, continuing without it: {exc}")
-        _model = None
-    return _model
+                _model = (vision_session, text_session, tokenizer)
+                logger.info("relevance filter: CLIP model loaded")
+            except Exception as exc:
+                logger.warning(f"relevance filter unavailable, continuing without it: {exc}")
+                _model = None
+            return _model
+        finally:
+            # Set only after _model holds the final result — lock-free
+            # fast-path readers must never see attempted=True mid-load.
+            _model_load_attempted = True
 
 
 def is_available() -> bool:

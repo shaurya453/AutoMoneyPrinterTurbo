@@ -12,40 +12,29 @@
  *   variables  – key/value pairs passed to the Revideo scene
  */
 import {renderVideo} from '@revideo/renderer';
+import fs from 'fs';
 import path from 'path';
 import {fileURLToPath} from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Gradient background MP4s served from revideo-worker/public/ by Vite.
-// Symlinks in public/ point to resource/*.mp4 — no file:// needed.
-const BG_VIDEOS = [
-  '/blue_gradient_bg.mp4',
-  '/orange_gradient_bg.mp4',
-  '/green_gradient_bg.mp4',
-  '/monochrome_gradient_bg.mp4',
-];
+// Single source of truth for variant metadata, shared with graphics.py.
+// Gradient backgrounds are served from revideo-worker/public/ by Vite
+// (symlinks in public/ point to resource/*.mp4 — no file:// needed).
+const MANIFEST = JSON.parse(
+  fs.readFileSync(path.join(__dirname, 'variants.json'), 'utf-8'),
+);
+const BG_VIDEOS = MANIFEST.bg_videos;
 
 // Maps graphic type → ordered pool of Revideo project files (one per variant).
 // Variant 0 is the default (original). The caller passes a `variant` index so
 // graphics.py can enforce no-consecutive-repeat selection without needing state here.
-const VARIANT_POOL = {
-  lower_third: [
-    path.join(__dirname, 'src', 'projects', 'lower-third.ts'),    // only variant
-  ],
-  infographic: [
-    path.join(__dirname, 'src', 'projects', 'infographic.ts'),    // A — vertical bars
-    path.join(__dirname, 'src', 'projects', 'infographic-b.ts'),  // B — horizontal bars
-    path.join(__dirname, 'src', 'projects', 'infographic-c.ts'),  // C — lollipop chart
-    path.join(__dirname, 'src', 'projects', 'infographic-d.ts'),  // D — number callouts
-  ],
-  list: [
-    path.join(__dirname, 'src', 'projects', 'list.ts'),           // A — bullet list (slides from left)
-    path.join(__dirname, 'src', 'projects', 'list-b.ts'),         // B — numbered list (drops from above)
-    path.join(__dirname, 'src', 'projects', 'list-c.ts'),         // C — cascade reveal (bar sweep)
-    path.join(__dirname, 'src', 'projects', 'list-d.ts'),         // D — card grid
-  ],
-};
+const VARIANT_POOL = Object.fromEntries(
+  Object.entries(MANIFEST.types).map(([type, cfg]) => [
+    type,
+    cfg.variants.map(v => path.join(__dirname, v.project)),
+  ]),
+);
 
 async function main() {
   // Read all stdin
@@ -88,10 +77,8 @@ async function main() {
   // Inject a gradient background for infographic and list types.
   // Python (graphics.py) picks the background for no-consecutive-repeat enforcement;
   // fall back to random selection only when called standalone (e.g. manual testing).
-  if (type === 'infographic' || type === 'list') {
-    if (!variables.bgVideo) {
-      variables.bgVideo = BG_VIDEOS[Math.floor(Math.random() * BG_VIDEOS.length)];
-    }
+  if (MANIFEST.types[type].uses_bg_video && !variables.bgVideo) {
+    variables.bgVideo = BG_VIDEOS[Math.floor(Math.random() * BG_VIDEOS.length)];
   }
 
   try {

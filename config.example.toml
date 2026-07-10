@@ -84,6 +84,17 @@ relevance_margin = 0.02
 relevance_video_frame_samples = 4
 relevance_video_pool = "mean"  # "mean" | "max"
 
+# Parallel clip-fetch workers. Fetching is network/API bound (stock search +
+# download + NSFW/CLIP/VLM screening), so more workers shorten the fetch
+# phase roughly linearly until provider rate limits push back.
+clip_fetch_workers = 6
+
+# Final render engine. true = single-pass ffmpeg (libass subtitle burn-in,
+# pre-rendered BGM duck, ~5x faster than the MoviePy compositor). Word
+# highlights, rounded subtitle backgrounds, and custom subtitle positions
+# automatically fall back to MoviePy, as does any ffmpeg failure.
+ffmpeg_final_render = true
+
 # How many candidates (downloaded + verified against the NSFW gate and the
 # relevance margin) are tried per video clip slot before giving up.
 max_video_download_attempts = 3

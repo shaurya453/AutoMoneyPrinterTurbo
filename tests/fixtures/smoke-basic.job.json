@@ -1,0 +1,61 @@
+{
+  "task_id": "00000000-0000-0000-0000-00000000b451",
+  "video_title": "smoke-basic",
+  "video_script": "City streets fill with people every morning.\nOffice workers gather for their daily meetings.\nMarkets and shops open their doors to customers.\nBy evening the city lights begin to glow.",
+  "sentences": [
+    {
+      "text": "City streets fill with people every morning.",
+      "visual_concepts": ["city street crowd walking", "morning commute pedestrians", "downtown sidewalk rush"],
+      "content_track": "broll",
+      "media_type": "video",
+      "visual_caption": "busy city street filling with morning commuters",
+      "visual_effect": "warmth"
+    },
+    {
+      "text": "Office workers gather for their daily meetings.",
+      "visual_concepts": ["office meeting room team", "coworkers discussion table", "business presentation whiteboard"],
+      "content_track": "broll",
+      "media_type": "video",
+      "visual_caption": "office workers gathered around a meeting table"
+    },
+    {
+      "text": "Markets and shops open their doors to customers.",
+      "visual_concepts": ["shop owner opening store", "market stall produce", "retail storefront morning"],
+      "content_track": "broll",
+      "media_type": "video",
+      "visual_caption": "shopkeeper opening a storefront for the day",
+      "visual_effect": "nature"
+    },
+    {
+      "text": "By evening the city lights begin to glow.",
+      "visual_concepts": ["city skyline dusk lights", "evening street lamps glow", "night cityscape aerial"],
+      "content_track": "broll",
+      "media_type": "image",
+      "visual_caption": "city skyline glowing at dusk"
+    }
+  ],
+  "voice_name": "en-US-AriaNeural",
+  "voice_rate": 1.0,
+  "video_aspect": "16:9",
+  "subtitle_enabled": true,
+  "subtitle_highlight": false,
+  "font_name": "Inter_18pt-SemiBold.ttf",
+  "text_fore_color": "#FFFFFF",
+  "font_size": 30,
+  "stroke_color": "#000000",
+  "stroke_width": 1.5,
+  "subtitle_position": "bottom",
+  "bgm_search_term": "",
+  "bgm_file": "random",
+  "bgm_volume": 0.15,
+  "video_source": "pexels",
+  "video_topic": "daily life in a modern city",
+  "video_type": "thematic",
+  "gapfill_terms": [
+    "city street pedestrians",
+    "office workers meeting",
+    "market stall vendor",
+    "urban architecture",
+    "city skyline evening"
+  ]
+}

@@ -15,7 +15,9 @@ Hard errors (exit 1):
 
 Warnings (exit 0, logged by worker):
   - video_topic missing
+  - video_topic shares no words with video_title (likely a section theme)
   - video_type not thematic/named_entity
+  - video_type='thematic' with 3+ distinct entity_names (should be named_entity)
   - lower_third used on a sentence that is not content_track='named'
   - graphic sentence missing variables dict (would render blank)
   - Any broll/named sentence missing visual_concepts or visual_caption
@@ -83,14 +85,50 @@ def main():
         sys.exit(1)
 
     # ── Soft checks ──────────────────────────────────────────────────────────
-    if not data.get("video_topic", "").strip():
+    video_topic = data.get("video_topic", "").strip()
+    if not video_topic:
         warnings.append("video_topic is missing — concept anchoring will be weak")
+    else:
+        # video_topic anchors EVERY relevance check and search ladder in the
+        # job. A topic that shares no meaningful words with the title is
+        # almost always a section theme or hook (e.g. "midday grease test"
+        # for a tinted-sunscreen review) — it poisons footage selection for
+        # the entire video.
+        title = (data.get("video_title") or "").strip()
+        if title:
+            _STOP = {
+                "a", "an", "and", "as", "at", "but", "by", "for", "from",
+                "how", "in", "is", "it", "of", "on", "or", "our", "so",
+                "than", "that", "the", "this", "to", "we", "what", "when",
+                "why", "with", "you", "your", "not", "one", "only",
+            }
+
+            def _tokens(s):
+                return {
+                    w.strip(".,!?:;\"'()[]-–—").lower()
+                    for w in s.split()
+                } - _STOP - {""}
+
+            topic_tokens = _tokens(video_topic)
+            title_tokens = _tokens(title)
+            # Also match on simple singular/plural stems so
+            # "sunscreens" (title) matches "sunscreen" (topic).
+            title_stems = title_tokens | {t.rstrip("s") for t in title_tokens}
+            topic_stems = topic_tokens | {t.rstrip("s") for t in topic_tokens}
+            if topic_tokens and title_tokens and not (topic_stems & title_stems):
+                warnings.append(
+                    f"video_topic {video_topic!r} shares no words with the title "
+                    f"{title!r} — it looks like a section theme, not the video's "
+                    "subject. This anchors every search and relevance check; a "
+                    "wrong topic degrades footage for the whole video"
+                )
 
     _gapfill_terms = [t for t in (data.get("gapfill_terms") or []) if isinstance(t, str) and t.strip()]
-    if len(_gapfill_terms) < 5:
+    if len(_gapfill_terms) < 10:
         warnings.append(
-            "gapfill_terms is missing or has fewer than 5 usable entries — "
-            "gap-fill/rescue fetches will fall back to generic hardcoded terms"
+            f"gapfill_terms has only {len(_gapfill_terms)} usable entries "
+            "(AGENT_GUIDE asks for 15–20) — a long video can burn a dozen "
+            "rescue fetches, and a thin pool recycles the same generic imagery"
         )
 
     if data.get("video_type") not in ("thematic", "named_entity"):
@@ -102,6 +140,7 @@ def main():
     concept0_counts: dict = {}    # concept[0] → count
     enrichable: list = []         # (sentence_index, concept0) for non-graphic sentences
     non_lt_graphic_indices: list = []  # sentence indices with infographic/list graphic_type
+    named_entities: set = set()   # distinct entity_name values on named sentences
 
     text_errors = []
 
@@ -171,12 +210,16 @@ def main():
         if effect and effect not in _VALID_VISUAL_EFFECTS:
             warnings.append(f"sentence {i}: unknown visual_effect={effect!r}")
 
-        if track == "named" and not (sent.get("entity_name") or "").strip():
-            warnings.append(
-                f"sentence {i}: content_track='named' but entity_name is missing — "
-                "the graphics pass will fall back to a brand-token heuristic, which can "
-                "mislabel or duplicate lower-thirds and produce truncated on-screen text"
-            )
+        if track == "named":
+            entity = (sent.get("entity_name") or "").strip()
+            if entity:
+                named_entities.add(entity.lower())
+            else:
+                warnings.append(
+                    f"sentence {i}: content_track='named' but entity_name is missing — "
+                    "the graphics pass will fall back to a brand-token heuristic, which can "
+                    "mislabel or duplicate lower-thirds and produce truncated on-screen text"
+                )
 
     # ── Hook Zone checks (sentences 0–4) ────────────────────────────────────
     hook_effect_count  = 0
@@ -227,6 +270,18 @@ def main():
             flush=True,
         )
         sys.exit(1)
+
+    # ── video_type sanity ────────────────────────────────────────────────────
+    # A review/ranking that names 3+ distinct entities should be named_entity:
+    # thematic mode uses bare-concept ladders that stock libraries can't match
+    # to specific products, so most named sections degrade to generic footage.
+    if data.get("video_type") == "thematic" and len(named_entities) >= 3:
+        warnings.append(
+            f"video_type='thematic' but {len(named_entities)} distinct named "
+            "entities are present — reviews/rankings naming 3+ products should "
+            "use video_type='named_entity' (routes product sentences to Google "
+            "Images and anchors ladders correctly)"
+        )
 
     # ── Effect aggregate checks ──────────────────────────────────────────────
     enrichable_tracks = [

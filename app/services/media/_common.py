@@ -3,6 +3,7 @@
 This module is the dependency base layer: it must NOT import from
 images.py or videos.py.
 """
+import os
 import random
 import threading
 import time
@@ -12,7 +13,7 @@ from loguru import logger
 from PIL import Image, UnidentifiedImageError
 
 from app.config import config
-from app.utils import utils  # noqa: F401 — re-exported for submodule convenience
+from app.utils import utils
 
 # ---------------------------------------------------------------------------
 # Thread-safe API key rotation
@@ -41,6 +42,13 @@ _SLOW_IMAGE_DOMAINS = {
     "a.allegroimg.com",
     "imgs.699pic.com",
     "assets.699pic.com",
+    # Facebook/Instagram "lookaside" crawler endpoints serve an HTML page,
+    # never the image — every download "succeeds" then fails raster validation.
+    "lookaside.fbsbx.com",
+    "lookaside.instagram.com",
+    "tiktok.com",
+    # Hotlink-protected: every direct download returns 403.
+    "stockcake.com",
 }
 
 # Hosts that returned HTTP 429 during this process run; populated dynamically.
@@ -48,6 +56,90 @@ _SLOW_IMAGE_DOMAINS = {
 _BLOCKED_HOST_TTL_SECONDS = 300  # 5 minutes
 _per_run_blocked_hosts: dict = {}
 _blocked_hosts_lock = threading.Lock()
+
+# Per-host download-failure circuit breaker: hotlink-protected publishers
+# (403 on every image) and HTML-serving endpoints fail reliably, so after
+# _HOST_FAILURE_BLOCK_THRESHOLD failures without an intervening success the
+# host joins _per_run_blocked_hosts for the TTL instead of being re-attempted
+# for every candidate the search providers surface from it.
+_HOST_FAILURE_BLOCK_THRESHOLD = 3
+_host_failure_counts: dict = {}
+
+# Image URLs that failed to download (or weren't decodable) this run — a URL
+# that 403'd for one worker thread will 403 for every other sentence too, so
+# don't let it occupy a candidate slot again.
+_failed_image_urls: set = set()
+
+# Search providers on temporary cooldown (quota exhausted, rate-limited, or
+# stalling). Maps provider name → monotonic reactivation timestamp.
+_provider_cooldowns: dict = {}
+
+
+def is_host_blocked(host: str) -> bool:
+    """True if `host` is currently 429-blocked or failure-blocked."""
+    with _blocked_hosts_lock:
+        unblock_at = _per_run_blocked_hosts.get(host)
+        if unblock_at is None:
+            return False
+        if time.monotonic() < unblock_at:
+            return True
+        del _per_run_blocked_hosts[host]
+        return False
+
+
+def block_host(host: str, ttl: float = _BLOCKED_HOST_TTL_SECONDS) -> None:
+    with _blocked_hosts_lock:
+        _per_run_blocked_hosts[host] = time.monotonic() + ttl
+
+
+def register_host_failure(host: str) -> bool:
+    """Count a download failure against `host`; block it once the threshold
+    is hit. Returns True when this call newly blocked the host (so the caller
+    can log it once)."""
+    if not host:
+        return False
+    with _blocked_hosts_lock:
+        count = _host_failure_counts.get(host, 0) + 1
+        _host_failure_counts[host] = count
+        if count >= _HOST_FAILURE_BLOCK_THRESHOLD:
+            _per_run_blocked_hosts[host] = time.monotonic() + _BLOCKED_HOST_TTL_SECONDS
+            _host_failure_counts[host] = 0
+            return True
+    return False
+
+
+def register_host_success(host: str) -> None:
+    """A successful download resets the host's failure streak."""
+    if not host:
+        return
+    with _blocked_hosts_lock:
+        _host_failure_counts.pop(host, None)
+
+
+def mark_failed_url(url: str) -> None:
+    with _blocked_hosts_lock:
+        _failed_image_urls.add(url)
+
+
+def is_failed_url(url: str) -> bool:
+    with _blocked_hosts_lock:
+        return url in _failed_image_urls
+
+
+def provider_on_cooldown(provider: str) -> bool:
+    with _blocked_hosts_lock:
+        until = _provider_cooldowns.get(provider)
+        if until is None:
+            return False
+        if time.monotonic() < until:
+            return True
+        del _provider_cooldowns[provider]
+        return False
+
+
+def set_provider_cooldown(provider: str, seconds: float) -> None:
+    with _blocked_hosts_lock:
+        _provider_cooldowns[provider] = time.monotonic() + seconds
 
 # ---------------------------------------------------------------------------
 # TLS verification
@@ -84,9 +176,10 @@ def _get_tls_verify() -> bool:
 def get_api_key(cfg_key: str):
     api_keys = config.app.get(cfg_key)
     if not api_keys:
+        # NOTE: never include config contents in this message — it holds live
+        # API keys, and this exception can end up in worker logs.
         raise ValueError(
-            f"\n\n##### {cfg_key} is not set #####\n\nPlease set it in the config.toml file: {config.config_file}\n\n"
-            f"{utils.to_json(config.app)}"
+            f"{cfg_key} is not set — please set it in {config.config_file}"
         )
 
     # if only one key is provided, return it
@@ -160,6 +253,102 @@ def _download_bytes(url: str) -> bytes:
     except Exception as e:
         logger.debug(f"thumbnail download failed: {url} => {e}")
         return b""
+
+
+# ---------------------------------------------------------------------------
+# Download-cache housekeeping
+# ---------------------------------------------------------------------------
+
+_CACHE_SUBDIRS = ("cache_videos", "cache_images", "cache_bgm")
+
+
+def _touch_cache_file(path: str) -> None:
+    """Bump a cache file's mtime on reuse so LRU pruning sees it as fresh."""
+    try:
+        os.utime(path, None)
+    except OSError:
+        pass
+
+
+def prune_cache_dirs() -> None:
+    """LRU-prune the download caches (cache_videos / cache_images / cache_bgm).
+
+    Two limits, both config-tunable:
+      - cache_max_age_days (default 30): delete anything not touched since
+        then. save_video/save_image bump mtime on cache hits, so "touched"
+        means "used by some job", not just "downloaded".
+      - cache_max_total_gb (default 10): after the age pass, delete
+        oldest-first until the combined size fits.
+
+    Called once at pipeline start — the single-worker portal setup means no
+    other job can be holding these files at that point. Stale .part files
+    (interrupted downloads) older than an hour are always removed.
+    """
+    max_age_days = float(config.app.get("cache_max_age_days", 30))
+    max_total_gb = float(config.app.get("cache_max_total_gb", 10))
+    now = time.time()
+
+    entries = []  # (mtime, size, path)
+    for sub in _CACHE_SUBDIRS:
+        d = utils.storage_dir(sub)
+        if not os.path.isdir(d):
+            continue
+        try:
+            with os.scandir(d) as it:
+                for entry in it:
+                    if not entry.is_file():
+                        continue
+                    try:
+                        st = entry.stat()
+                    except OSError:
+                        continue
+                    if entry.name.endswith(".part") and now - st.st_mtime > 3600:
+                        try:
+                            os.remove(entry.path)
+                        except OSError:
+                            pass
+                        continue
+                    entries.append((st.st_mtime, st.st_size, entry.path))
+        except OSError as exc:
+            logger.debug(f"cache prune: could not scan {d}: {exc}")
+
+    removed_count = 0
+    removed_bytes = 0
+
+    def _remove(size: int, path: str) -> bool:
+        nonlocal removed_count, removed_bytes
+        try:
+            os.remove(path)
+            removed_count += 1
+            removed_bytes += size
+            return True
+        except OSError:
+            return False
+
+    age_cutoff = now - max_age_days * 86400
+    kept = []
+    for mtime, size, path in entries:
+        if mtime < age_cutoff:
+            _remove(size, path)
+        else:
+            kept.append((mtime, size, path))
+
+    max_total_bytes = int(max_total_gb * 1024**3)
+    total = sum(size for _, size, _ in kept)
+    if total > max_total_bytes:
+        kept.sort()  # oldest mtime first
+        for mtime, size, path in kept:
+            if total <= max_total_bytes:
+                break
+            if _remove(size, path):
+                total -= size
+
+    if removed_count:
+        logger.info(
+            f"cache prune: removed {removed_count} file(s), "
+            f"{removed_bytes / 1024**3:.2f} GB freed "
+            f"(age>{max_age_days:g}d or size cap {max_total_gb:g} GB)"
+        )
 
 
 # ---------------------------------------------------------------------------

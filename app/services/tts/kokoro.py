@@ -63,6 +63,10 @@ def kokoro_tts(
 
     logger.info(f"kokoro tts start | voice={voice_name} lang={voice_lang} speed={speed}")
 
+    # Hard timeout so a hung kokoro binary can't stall the pipeline until the
+    # portal's 8h Phase-2 zombie guard fires (every other subprocess in the
+    # repo has one). Long scripts take minutes, so keep this generous.
+    timeout_seconds = float(config.app.get("kokoro_timeout_seconds", 1800))
     try:
         proc = subprocess.run(
             cmd,
@@ -70,11 +74,15 @@ def kokoro_tts(
             cwd=model_dir or None,
             capture_output=True,
             check=False,
+            timeout=timeout_seconds,
         )
         if proc.returncode != 0:
             output = (proc.stderr or proc.stdout or b"").decode(errors="ignore")
             logger.error(f"kokoro tts failed: {output[:400]}")
             return None
+    except subprocess.TimeoutExpired:
+        logger.error(f"kokoro tts timed out after {timeout_seconds:g}s")
+        return None
     except Exception as exc:
         logger.error(f"kokoro tts exception: {exc}")
         return None
@@ -84,7 +92,14 @@ def kokoro_tts(
         ffmpeg_binary, "-y", "-i", wav_file,
         "-codec:a", "libmp3lame", "-q:a", "4", voice_file,
     ]
-    if subprocess.run(mp3_cmd, capture_output=True, text=True, check=False).returncode != 0:
+    try:
+        mp3_ok = subprocess.run(
+            mp3_cmd, capture_output=True, text=True, check=False, timeout=300
+        ).returncode == 0
+    except subprocess.TimeoutExpired:
+        logger.error("kokoro wav→mp3 conversion timed out after 300s")
+        return None
+    if not mp3_ok:
         logger.error("failed to convert kokoro wav to mp3")
         return None
 

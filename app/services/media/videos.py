@@ -1,6 +1,7 @@
 """Video and BGM search providers, download, and save utilities."""
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import List
 from urllib.parse import urlencode, urlparse
 
@@ -15,6 +16,7 @@ from app.services.media._common import (
     _api_get_json,
     _download_bytes,
     _get_tls_verify,
+    _touch_cache_file,
     get_api_key,
 )
 from app.services.scoring import relevance
@@ -103,10 +105,17 @@ def _rerank_by_thumbnail(
 
     candidates = items[:_MAX_RERANK_CANDIDATES]
     rest = items[_MAX_RERANK_CANDIDATES:]
-    pairs = [
-        (item, _download_bytes(item.thumbnail) if item.thumbnail else b"")
-        for item in candidates
-    ]
+    # Thumbnails are small; fetch them concurrently instead of one blocking
+    # HTTP GET at a time (up to 25 per search). Bounded pool — this already
+    # runs inside a clip-fetch worker thread.
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        thumb_bytes = list(
+            pool.map(
+                lambda item: _download_bytes(item.thumbnail) if item.thumbnail else b"",
+                candidates,
+            )
+        )
+    pairs = list(zip(candidates, thumb_bytes))
     ranked = relevance.rank(prompt, pairs, kind=kind)
     return [item for item, _ in ranked] + rest
 
@@ -124,7 +133,11 @@ def search_videos_pexels(
     aspect = VideoAspect(video_aspect)
     video_orientation = aspect.name
     video_width, video_height = aspect.to_resolution()
-    api_key = get_api_key("pexels_api_keys")
+    try:
+        api_key = get_api_key("pexels_api_keys")
+    except ValueError:
+        logger.warning("pexels_api_keys not configured, skipping Pexels video search")
+        return []
     headers = {
         "Authorization": api_key,
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
@@ -194,7 +207,11 @@ def search_videos_pixabay(
 
     video_width, video_height = aspect.to_resolution()
 
-    api_key = get_api_key("pixabay_api_keys")
+    try:
+        api_key = get_api_key("pixabay_api_keys")
+    except ValueError:
+        logger.warning("pixabay_api_keys not configured, skipping Pixabay video search")
+        return []
     # Build URL
     params = {
         "q": search_term,
@@ -367,30 +384,38 @@ def save_video(video_url: str, save_dir: str = "") -> str:
     # if video already exists and is a plausible size, return the path
     if os.path.exists(video_path) and os.path.getsize(video_path) > 4096:
         logger.info(f"video already exists: {video_path}")
+        _touch_cache_file(video_path)
         return video_path
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
     }
 
-    # if video does not exist, download it
+    # Stream to a .part file rather than buffering the whole video in memory —
+    # stock clips run 100MB+, and several fetch workers download concurrently.
+    part_path = video_path + ".part"
     try:
-        r = requests.get(
+        with requests.get(
             video_url,
             headers=headers,
             proxies=config.proxy,
             verify=_get_tls_verify(),
             timeout=_HTTP_TIMEOUT_MEDIA,
-        )
-        r.raise_for_status()
-        with open(video_path, "wb") as f:
-            f.write(r.content)
+            stream=True,
+        ) as r:
+            r.raise_for_status()
+            with open(part_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+        os.replace(part_path, video_path)
     except Exception as e:
         logger.warning(f"failed to download video {video_url}: {e}")
-        try:
-            os.remove(video_path)
-        except Exception:
-            pass
+        for p in (part_path, video_path):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
         return ""
 
     if os.path.exists(video_path) and os.path.getsize(video_path) > 0:

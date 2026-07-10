@@ -1,8 +1,9 @@
 """Image search providers, download, and save utilities."""
+import itertools
 import os
 import re
 import time
-from typing import List, Optional, Tuple
+from typing import Iterator, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse
 
 import requests
@@ -10,16 +11,22 @@ from loguru import logger
 
 from app.config import config
 from app.services.media._common import (
-    _BLOCKED_HOST_TTL_SECONDS,
     _HTTP_TIMEOUT_IMAGE,
     _SLOW_IMAGE_DOMAINS,
     _api_get_json,
     _api_post_json,
-    _blocked_hosts_lock,
     _get_tls_verify,
     _is_valid_raster_image,
-    _per_run_blocked_hosts,
+    _touch_cache_file,
+    block_host,
     get_api_key,
+    is_failed_url,
+    is_host_blocked,
+    mark_failed_url,
+    provider_on_cooldown,
+    register_host_failure,
+    register_host_success,
+    set_provider_cooldown,
 )
 from app.services.scoring import nsfw, relevance, vlm
 from app.utils import utils
@@ -44,6 +51,9 @@ _WATERMARKED_IMAGE_DOMAINS = {
     "bridgemanimages.com", "imagebroker.com", "robertharding.com",
     "mauritiusimages.com", "eyeem.com", "pixta.net", "yayimages.com",
     "vecteezy.com", "freepik.com",
+    # Chinese stock-preview sites — every public image carries a heavy
+    # watermark (and most direct downloads 403 anyway).
+    "pngtree.com", "lovepik.com", "pikbest.com", "699pic.com",
 }
 
 # URL path fragments that indicate a watermarked comp/preview image.
@@ -189,6 +199,8 @@ def search_images_pixabay(search_term: str, n: int = 5) -> List[str]:
 
 def search_images_unsplash(search_term: str, n: int = 5) -> List[str]:
     """Return up to n image URLs from Unsplash API."""
+    if provider_on_cooldown("unsplash"):
+        return []
     try:
         api_key = get_api_key("unsplash_api_keys")
     except ValueError:
@@ -205,12 +217,24 @@ def search_images_unsplash(search_term: str, n: int = 5) -> List[str]:
             if p.get("urls")
         ]
     except Exception as e:
-        logger.error(f"Unsplash image search failed: {e}")
+        if isinstance(e, requests.HTTPError) and e.response is not None \
+                and e.response.status_code == 403:
+            # Unsplash signals quota exhaustion with 403 (demo tier: 50
+            # requests/hour). Hammering it just burns worker time.
+            set_provider_cooldown("unsplash", 15 * 60)
+            logger.warning(
+                "Unsplash returned 403 (hourly request quota exhausted) — "
+                "pausing Unsplash searches for 15 min"
+            )
+        else:
+            logger.error(f"Unsplash image search failed: {e}")
         return []
 
 
 def search_images_wikimedia(search_term: str, n: int = 5) -> List[str]:
     """Return up to n image URLs from Wikimedia Commons (no API key required)."""
+    if provider_on_cooldown("wikimedia"):
+        return []
     params = {
         "action": "query",
         "generator": "search",
@@ -238,7 +262,18 @@ def search_images_wikimedia(search_term: str, n: int = 5) -> List[str]:
                     urls.append(thumb)
         return urls
     except Exception as e:
-        logger.error(f"Wikimedia image search failed: {e}")
+        if isinstance(e, requests.HTTPError) and e.response is not None \
+                and e.response.status_code == 429:
+            # Commons rate-limits aggressively under parallel fetch — the
+            # in-request retries already slept through ~5s of backoff, so
+            # rest the whole provider instead of re-hitting it per term.
+            set_provider_cooldown("wikimedia", 5 * 60)
+            logger.warning(
+                "Wikimedia Commons keeps rate-limiting (429) — pausing "
+                "Wikimedia searches for 5 min"
+            )
+        else:
+            logger.error(f"Wikimedia image search failed: {e}")
         return []
 
 
@@ -249,6 +284,8 @@ def search_images_ddg(search_term: str, n: int = 5) -> List[str]:
     those crop poorly into the target video frame's Ken Burns window. Also
     filters out known watermarked stock-photo domains.
     """
+    if provider_on_cooldown("duckduckgo"):
+        return []
     try:
         from ddgs import DDGS
     except ImportError:
@@ -263,13 +300,19 @@ def search_images_ddg(search_term: str, n: int = 5) -> List[str]:
         # falls back to ignores it entirely -- so this alone is not
         # sufficient. The _is_nsfw_result() check below is the real
         # defense-in-depth filter for results that slip through.
-        results = DDGS(proxy=proxy, timeout=30).images(
+        # timeout=10: when DDG rate-limits it stalls rather than erroring,
+        # so a long timeout just holds a fetch worker hostage.
+        results = DDGS(proxy=proxy, timeout=10).images(
             query=search_term,
             max_results=n * 3,
             safesearch="on",
         )
     except Exception as e:
-        logger.error(f"DuckDuckGo image search failed: {e}")
+        # DDG failures are almost always rate-limit stalls; one predicts
+        # more, so rest the provider briefly instead of timing out on every
+        # term. The other providers keep the round-robin supplied meanwhile.
+        set_provider_cooldown("duckduckgo", 60)
+        logger.warning(f"DuckDuckGo image search failed ({e}) — pausing DDG searches for 60s")
         return []
 
     urls = []
@@ -372,11 +415,16 @@ def save_image(image_url: str, save_dir: str = "") -> str:
     if os.path.exists(image_path) and os.path.getsize(image_path) > 0:
         if _is_valid_raster_image(image_path):
             logger.info(f"image already cached: {image_path}")
+            _touch_cache_file(image_path)
             return image_path
         logger.warning(f"cached image is not a valid raster image, re-downloading: {image_path}")
         os.remove(image_path)
 
-    # Fast-skip known-slow / currently 429-blocked hosts without connecting.
+    # Fast-skip known-dead URLs and known-slow / currently blocked hosts
+    # without connecting.
+    if is_failed_url(image_url):
+        logger.debug(f"skipping previously failed image URL: {image_url}")
+        return ""
     try:
         _host = urlparse(image_url).netloc.lower().split(":")[0]
     except Exception:
@@ -385,14 +433,9 @@ def save_image(image_url: str, save_dir: str = "") -> str:
         if any(_host == d or _host.endswith("." + d) for d in _SLOW_IMAGE_DOMAINS):
             logger.debug(f"skipping slow-domain image: {image_url}")
             return ""
-        with _blocked_hosts_lock:
-            _unblock_at = _per_run_blocked_hosts.get(_host)
-            if _unblock_at is not None:
-                if time.monotonic() < _unblock_at:
-                    logger.debug(f"skipping 429-blocked host {_host}")
-                    return ""
-                else:
-                    del _per_run_blocked_hosts[_host]
+        if is_host_blocked(_host):
+            logger.debug(f"skipping blocked host {_host}")
+            return ""
 
     headers = {
         "User-Agent": (
@@ -407,8 +450,7 @@ def save_image(image_url: str, save_dir: str = "") -> str:
             verify=_get_tls_verify(), timeout=_HTTP_TIMEOUT_IMAGE,
         )
         if r.status_code == 429:
-            with _blocked_hosts_lock:
-                _per_run_blocked_hosts[_host] = time.monotonic() + _BLOCKED_HOST_TTL_SECONDS
+            block_host(_host)
             logger.warning(f"429 from {_host} — blocked for 5 min: {image_url}")
             return ""
         r.raise_for_status()
@@ -416,11 +458,18 @@ def save_image(image_url: str, save_dir: str = "") -> str:
             fh.write(r.content)
         if os.path.exists(image_path) and os.path.getsize(image_path) > 0:
             if _is_valid_raster_image(image_path):
+                register_host_success(_host)
                 return image_path
             logger.warning(f"downloaded file is not a valid raster image, discarding: {image_url}")
             os.remove(image_path)
+            mark_failed_url(image_url)
+            if register_host_failure(_host):
+                logger.warning(f"{_host} keeps serving non-image responses — blocked for 5 min")
     except Exception as e:
         logger.error(f"image download failed: {image_url} => {e}")
+        mark_failed_url(image_url)
+        if register_host_failure(_host):
+            logger.warning(f"repeated download failures from {_host} — blocked for 5 min")
     return ""
 
 
@@ -466,7 +515,8 @@ def download_image(
     providers and terms are exhausted.
 
     source_order: provider names to try in order.  Defaults to
-        ["duckduckgo", "wikimedia", "pexels", "pixabay", "unsplash"].
+        _DEFAULT_IMAGE_SOURCE_ORDER (duckduckgo, pexels, pixabay, unsplash,
+        wikimedia).
 
     content_track: "named" sentences (a specific product/person/place) get a
         larger per-term candidate slice (image_candidates_per_term_named,
@@ -504,13 +554,24 @@ def download_image(
     )
     margin = float(config.app.get("relevance_margin", 0.02))
 
-    def _gather_urls(term: str) -> List[Tuple[str, str]]:
-        per_provider: List[Tuple[str, List[str]]] = []
-        for provider in source_order:
-            fn = _IMAGE_PROVIDERS.get(provider)
-            if fn is None:
-                logger.warning(f"unknown image provider: {provider}")
-                continue
+    def _gather_urls(term: str) -> Iterator[Tuple[str, str]]:
+        """Yield (provider, url) candidates, round-robin across providers.
+
+        Round-robin so a relevance-limited slice (_CANDIDATES_PER_TERM) still
+        draws from multiple sources instead of being dominated by whichever
+        provider is first in source_order (e.g. DuckDuckGo, which usually
+        returns the most results but is also the least curated source).
+
+        Lazy: each provider's search API is only queried when the rotation
+        first reaches it. If the consumer accepts an early candidate (the
+        common case), the remaining providers are never queried at all —
+        the old eager version burned quota on every provider per term even
+        when candidate #1 was accepted.
+        """
+        fetched: dict = {}  # provider -> filtered url list
+
+        def _fetch(provider: str) -> List[str]:
+            fn = _IMAGE_PROVIDERS[provider]
             # DDG draws from the broad open web, so individual hosts are more
             # likely to block hotlinking (e.g. Akamai-protected CDNs) -- request
             # more candidates so a working one is likely among them.
@@ -519,29 +580,33 @@ def download_image(
             # names — verbose concept strings like "JBL L100 Century alnico
             # drivers front view" return nothing. Use the short override when set.
             query = serper_term if (provider == "serper" and serper_term) else term
-            urls = [
+            return [
                 url for url in fn(query, n=n)
-                if url and (used_urls is None or url not in used_urls)
+                if url
+                and (used_urls is None or url not in used_urls)
+                and not is_failed_url(url)  # dead URLs must not occupy candidate slots
             ]
-            per_provider.append((provider, urls))
 
-        # Interleave round-robin across providers so a relevance-limited
-        # slice (_CANDIDATES_PER_TERM) still draws from multiple sources
-        # instead of being dominated by whichever provider is first in
-        # source_order (e.g. DuckDuckGo, which usually returns the most
-        # results but is also the least curated/highest-risk source).
-        candidates: List[Tuple[str, str]] = []
+        providers = []
+        for provider in source_order:
+            if provider in _IMAGE_PROVIDERS:
+                providers.append(provider)
+            else:
+                logger.warning(f"unknown image provider: {provider}")
+
         i = 0
         while True:
-            added = False
-            for provider, urls in per_provider:
+            yielded = False
+            for provider in providers:
+                if provider not in fetched:
+                    fetched[provider] = _fetch(provider)
+                urls = fetched[provider]
                 if i < len(urls):
-                    candidates.append((provider, urls[i]))
-                    added = True
-            if not added:
+                    yield provider, urls[i]
+                    yielded = True
+            if not yielded:
                 break
             i += 1
-        return candidates
 
     def _claim(url: str, term: str, provider: str, local: str, dedup_emb=None, note: str = "") -> str:
         """The single authoritative commit point for a candidate -- owns both
@@ -612,8 +677,12 @@ def download_image(
             if deadline is not None and time.monotonic() > deadline:
                 logger.warning(f"image search deadline reached — stopping at term '{term}'")
                 break
-            candidates = _gather_urls(term)
-            iter_candidates = candidates if not use_relevance else candidates[:candidates_per_term]
+            candidates = _gather_urls(term)  # lazy generator — providers queried on demand
+            iter_candidates = (
+                candidates
+                if not use_relevance
+                else itertools.islice(candidates, candidates_per_term)
+            )
             prompt = caption_prompt or term
 
             for provider, url in iter_candidates:
@@ -634,6 +703,11 @@ def download_image(
 
                 if not nsfw.passes(nsfw.is_nsfw_image(image_bytes)):
                     logger.info(f"rejected NSFW image candidate: {url}")
+                    # Mark as used so no later sentence re-downloads and
+                    # re-scans the same rejected image (same convention as the
+                    # VLM rejection below and the video path's try_claim).
+                    if used_urls is not None:
+                        used_urls.add(url)
                     if report is not None:
                         report.setdefault("rejections", []).append("nsfw")
                     continue
@@ -719,12 +793,11 @@ def download_image(
                 if winner_idx is None or not (0 <= winner_idx < len(pool)):
                     winner_idx = 0  # fail-open: default to the first pooled candidate
                 provider, term, url, local, image_bytes, dedup_emb = pool[winner_idx]
-                for i, entry in enumerate(pool):
-                    if i != winner_idx:
-                        try:
-                            os.remove(entry[3])
-                        except Exception:
-                            pass
+                # Pool losers are intentionally NOT deleted from disk — the
+                # cache is content-addressed and shared across worker threads,
+                # so a sibling thread may hold the same local path for its own
+                # candidate (see the "left on disk, not deleted" note above);
+                # deleting here recreates exactly that FileNotFoundError race.
                 _r = _claim(url, term, provider, local, dedup_emb=dedup_emb)
                 if _r:
                     if report is not None:

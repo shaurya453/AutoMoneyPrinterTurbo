@@ -26,6 +26,7 @@ from app.services.scoring import relevance, vlm
 from app.services.pipeline._whisper import _get_sentence_timestamps, _uniform_timestamps
 from app.services.pipeline._planning import (
     _trim_clip, _get_visual_concepts, _build_query_ladder, _TRIM_BUFFER,
+    plan_clip_slots, _CLIP_TARGET, _MIN_ANIM_DUR, _OUTRO_TAIL,
 )
 from app.services.pipeline._fetch import _fetch_clip, _ThreadSafeURLSet
 from app.services.pipeline._quality import write_quality_report
@@ -88,6 +89,12 @@ def start(job_path: str) -> Optional[dict]:
         job = json.load(fh)
 
     vlm.reset_usage()
+    # LRU-prune the download caches before any fetch — they otherwise grow
+    # without bound (see cache_max_age_days / cache_max_total_gb in config).
+    try:
+        material.prune_cache_dirs()
+    except Exception as exc:
+        logger.warning(f"cache prune failed (continuing): {exc}")
 
     task_id = job.get("task_id") or utils.get_uuid()
     sentences: list = job.get("sentences", [])
@@ -196,95 +203,9 @@ def start(job_path: str) -> Optional[dict]:
     used_urls = _ThreadSafeURLSet()  # tracks clip URLs used this run to prevent reuse
     total_sentences = len(timings)
 
-    # Video sentences: download multiple ~4-second clips to cover the sentence
-    # duration without repeating footage.
-    # Image sentences: capped at _IMAGE_CLIP_MAX seconds each — long sentences
-    # split into multiple clips so a single still never holds for the full
-    # narration. Each sub-clip fetches a different image (used_urls dedupes).
-    _CLIP_TARGET = 4.0
-    _MIN_VISUAL_DUR = 2.0  # absolute floor for any single clip's duration
-    _MIN_ANIM_DUR = 2.5  # conservative cover for all 4 title-card animation variants
-    _IMAGE_CLIP_MAX = 7.0  # max seconds per individual Ken Burns image clip
-
     # ---- Pass 1: plan per-sentence clip durations using absolute resync.
-    #
-    # Each sentence's footage starts no earlier than max(when its narration
-    # begins, when the previous sentence's footage ends) -- guaranteeing
-    # footage never precedes the VO -- and runs until the next sentence's
-    # narration begins (or audio_duration for the last sentence), floored at
-    # num_clips * _MIN_VISUAL_DUR. This keeps the cumulative footage timeline
-    # tracking absolute whisper timestamps directly, instead of drifting via
-    # per-sentence duration sums.
-    t0 = timings[0][1]
-    rel_starts = [max(0.0, t_start - t0) for _, t_start, _ in timings]
-
-    cum_end = 0.0
-    clip_plans = []
-    for idx, (sent, t_start, t_end) in enumerate(timings):
-        sent_audio_dur = max(0.0, t_end - t_start)
-        is_image = sent.get("media_type") == "image"
-
-        start_k = max(rel_starts[idx], cum_end)
-        if idx + 1 < len(timings):
-            next_rel = rel_starts[idx + 1]
-            target_end_k = max(next_rel, start_k)
-        else:
-            target_end_k = max(audio_duration, start_k)
-        raw_total = target_end_k - start_k
-
-        if sent_audio_dur <= 0:
-            num_clips = 1
-        elif is_image:
-            # Cap each image slot so long sentences show multiple images
-            # rather than freezing on a single still for the full duration.
-            if raw_total > _IMAGE_CLIP_MAX:
-                ideal = max(1, round(raw_total / _IMAGE_CLIP_MAX))
-                max_by_min = max(1, int(raw_total // _MIN_VISUAL_DUR))
-                num_clips = max(1, min(ideal, max_by_min))
-            else:
-                num_clips = 1
-        else:
-            basis = raw_total if raw_total > 0 else sent_audio_dur
-            ideal_clips = max(1, round(basis / _CLIP_TARGET))
-            max_clips_by_min_dur = max(1, int(basis // _MIN_VISUAL_DUR))
-            num_clips = max(1, min(ideal_clips, max_clips_by_min_dur))
-
-        floor = num_clips * _MIN_VISUAL_DUR
-        # Two cases where applying _MIN_VISUAL_DUR would push cum_end past the
-        # next sentence's Whisper timestamp, causing every subsequent clip to
-        # start late (context drift — visuals lag behind the VO):
-        #
-        #  1. Narrated graphics: duration is fixed by Whisper; any floor inflation
-        #     would desync the graphic from the narration it plays under.
-        #  2. Short sentences (sent_audio_dur < _MIN_VISUAL_DUR): the floor would
-        #     inflate the clip well beyond the sentence's audio slot.  Multiple
-        #     consecutive short sentences compound the drift (e.g. "Same money."
-        #     + "None of the heartbreak." can accumulate 3–4 s of visual lag).
-        #     Use the exact available slot instead; 0.5 s minimum ensures a
-        #     renderable clip without causing meaningful drift.
-        is_narrated_graphic = bool(sent.get("graphic_type") and sent.get("text"))
-        if is_narrated_graphic:
-            total = max(raw_total, 1.0)    # 1s Revideo stability floor only
-        elif sent_audio_dur < _MIN_VISUAL_DUR:
-            total = max(raw_total, 0.5)    # exact slot, minimal clip floor
-        else:
-            total = max(floor, raw_total)
-        durations = [total / num_clips] * num_clips
-        cum_end = start_k + total
-
-        clip_plans.append({
-            "sent": sent,
-            "is_image": is_image,
-            "durations": durations,
-            "sent_audio_dur": sent_audio_dur,
-        })
-
-    # Extend the last clip's slot by outro_tail so the combined video naturally
-    # reaches audio_duration + outro_tail without the outro step having to loop
-    # the last clip from the beginning (which caused visible repetition).
-    _OUTRO_TAIL = 2.0
-    if clip_plans:
-        clip_plans[-1]["durations"][-1] += _OUTRO_TAIL
+    # (See plan_clip_slots() in _planning.py for the full slot math.)
+    clip_plans = plan_clip_slots(timings, audio_duration)
 
     # Crossfade trim-buffer padding is only consumed when combine_videos will
     # actually run ffmpeg xfade (see video.XFADE_CLIP_LIMIT) — otherwise it
@@ -331,7 +252,10 @@ def start(job_path: str) -> Optional[dict]:
     _planned_image_count = 0
     _planned_video_count = 0
 
-    max_fetch_workers = int(config.app.get("clip_fetch_workers", 4))
+    # Fetch is network/API bound (search + download + VLM round-trips), not
+    # CPU bound — 6 workers measurably shortens the fetch phase vs 4 without
+    # hitting provider rate limits.
+    max_fetch_workers = int(config.app.get("clip_fetch_workers", 6))
 
     def _fetch_clip_with_budget(budget_seconds: float, **kw):
         """Set deadline at execution time (inside worker thread), not at submission time."""
@@ -381,11 +305,11 @@ def start(job_path: str) -> Optional[dict]:
     # visual_concepts[0] rotate within a named section (product, a feature,
     # the brand, a comparison product, ...), so a sentence's OWN concepts
     # aren't the only Serper-searchable terms for its product -- its section
-    # siblings already have other real, on-product terms. When a
-    # lower_third-bearing sentence's primary fetch fails, these "cousin"
-    # terms are tried before the fully generic _job_gapfill_terms, so a
-    # rescue fetch is far less likely to land on a visually unrelated
-    # generic image directly underneath a specific product-name label.
+    # siblings already have other real, on-product terms. When any named-
+    # section sentence's primary fetch fails, these "cousin" terms are tried
+    # before the fully generic _job_gapfill_terms, so a rescue fetch is far
+    # less likely to land on a visually unrelated generic image under
+    # product narration (or, worst case, a specific product-name label).
     _entity_concepts_map: dict = {}
     for _s in job.get("sentences", []):
         _ename = (_s.get("entity_name") or "").strip()
@@ -399,10 +323,11 @@ def start(job_path: str) -> Optional[dict]:
             _bucket.append(_c0)
 
     # Last few successfully-fetched real (non-placeholder) clips, most recent
-    # last. Used both to anchor a single placeholder (most recent) and, when
-    # several placeholders land back to back, to cycle through distinct
-    # anchors so a run of consecutive failures doesn't visibly loop the exact
-    # same footage for every one of them (see the placeholder branch below).
+    # last. A single placeholder anchors on the OLDEST of these (the newest
+    # is its immediate timeline neighbor — anchoring there produced a
+    # side-by-side duplicate pair in a real job); runs of placeholders cycle
+    # through the pool so consecutive failures don't loop the same footage
+    # (see the placeholder branch below).
     _recent_real_clips: "_deque[str]" = _deque(maxlen=3)
     # clip_path -> source image_path, populated only for image-sourced (Ken
     # Burns) clips. Lets the placeholder branch re-render the same still at a
@@ -629,24 +554,23 @@ def start(job_path: str) -> Optional[dict]:
             # every extra attempt meaningfully cuts how often we fall through
             # to the placeholder loop below.
             #
-            # When this sentence carries a lower_third (meta["lt_gfx_clip"]),
-            # a generic gap-fill image is especially jarring -- a specific
-            # product-name label rendered over unrelated stock footage. Other
-            # sentences in the same named section already found real,
-            # Serper-searchable terms for this exact entity (that's the whole
-            # point of the visual_concepts[0] rotation rule), so try those
-            # "cousin" terms first, before falling back to the fully generic
-            # _job_gapfill_terms pool.
+            # For ANY sentence inside a named section (entity_name set), a
+            # generic gap-fill image is jarring -- product narration (worst
+            # of all, a lower_third product label) over unrelated stock
+            # footage. Other sentences in the same named section already
+            # found real, Serper-searchable terms for this exact entity
+            # (that's the whole point of the visual_concepts[0] rotation
+            # rule), so try those "cousin" terms first, before falling back
+            # to the fully generic _job_gapfill_terms pool.
             if not fetched:
                 _rescue_pool: List[str] = []
-                if meta.get("lt_gfx_clip"):
-                    _ename = (meta["sent"].get("entity_name") or "").strip()
-                    if _ename:
-                        _own_concepts = set(_get_visual_concepts(meta["sent"]))
-                        _rescue_pool = [
-                            c for c in _entity_concepts_map.get(_ename, [])
-                            if c not in _own_concepts
-                        ]
+                _ename = (meta["sent"].get("entity_name") or "").strip()
+                if _ename:
+                    _own_concepts = set(_get_visual_concepts(meta["sent"]))
+                    _rescue_pool = [
+                        c for c in _entity_concepts_map.get(_ename, [])
+                        if c not in _own_concepts
+                    ]
                 _rescue_attempts_total = min(
                     rescue_max_attempts, len(_rescue_pool) + len(_job_gapfill_terms)
                 )
@@ -781,14 +705,17 @@ def start(job_path: str) -> Optional[dict]:
                 ph_ok = False
                 # Anchor on a REAL (non-placeholder) clip, never a placeholder --
                 # looping a loop would compound the repeated-footage artifact.
-                # When several placeholders land back to back (this branch fires
-                # again before any real clip succeeds), _placeholder_run_len
-                # walks through _recent_real_clips (most recent first) instead of
-                # always anchor 0, so consecutive placeholders don't all show the
-                # exact same looped footage. If only one real clip exists yet,
-                # there's nothing distinct to cycle to -- mirror the 2nd+ one in
-                # a run so it's at least not a frame-for-frame repeat.
-                _anchor_pool = list(reversed(_recent_real_clips)) or (
+                # OLDEST first: the most recent real clip is the placeholder's
+                # immediate timeline neighbor, and anchoring on it produced a
+                # frame-for-frame duplicate pair in a real job (same image,
+                # same animation, side by side). Walking oldest→newest puts
+                # the reused imagery as far as possible from its original
+                # appearance; _placeholder_run_len advances through the pool
+                # when several placeholders land back to back. If only one
+                # real clip exists yet, there's nothing distinct to cycle to
+                # -- mirror the 2nd+ one in a run so it's at least not a
+                # frame-for-frame repeat.
+                _anchor_pool = list(_recent_real_clips) or (
                     [ordered_clips[-1]] if ordered_clips else []
                 )
                 _prev = (
@@ -809,9 +736,30 @@ def start(job_path: str) -> Optional[dict]:
                 # stock video (no source image to re-animate) or regen fails.
                 _prev_image_src = _recent_real_image_sources.get(_prev) if _prev else None
                 if _prev_image_src:
+                    # Mirror the source before re-rendering: the animation
+                    # picker can legally choose the same animation the anchor
+                    # clip used (its no-repeat state tracks fetch completion
+                    # order, not timeline order), and an un-mirrored regen
+                    # then reads as an exact repeat of the anchor.
+                    _ph_src = _prev_image_src
+                    try:
+                        from PIL import Image as _PILImage
+                        _flip = getattr(
+                            getattr(_PILImage, "Transpose", _PILImage),
+                            "FLIP_LEFT_RIGHT",
+                        )
+                        with _PILImage.open(_prev_image_src) as _im:
+                            _mirrored = _im.transpose(_flip)
+                            _ph_src = os.path.join(
+                                clips_dir, f"clip-{meta['clip_idx']:04d}-ph-src.png"
+                            )
+                            _mirrored.save(_ph_src)
+                    except Exception as _flip_exc:
+                        logger.debug(f"placeholder mirror failed (using original): {_flip_exc}")
+                        _ph_src = _prev_image_src
                     try:
                         _regen_result = video.render_ken_burns_clip(
-                            image_path=_prev_image_src,
+                            image_path=_ph_src,
                             duration=ph_dur,
                             width=ph_w,
                             height=ph_h,
@@ -1076,6 +1024,9 @@ def start(job_path: str) -> Optional[dict]:
         else:
             logger.info(f"gap-fill complete: {obtained_duration:.2f}s obtained")
 
+    # All VLM verdicts are in by now — persist any batched-but-unflushed ones.
+    vlm.flush_cache()
+
     # ------------------------------------------------------------------ #
     # 4. Combine clips                                                     #
     # ------------------------------------------------------------------ #
@@ -1118,14 +1069,20 @@ def start(job_path: str) -> Optional[dict]:
     except Exception:
         combined_duration = 0.0
 
-    outro_tail = 2.0
+    # Must match the tail already added to the last slot by plan_clip_slots().
+    outro_tail = _OUTRO_TAIL
     target_duration = audio_duration + outro_tail
-    _ENC = ["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-r", "30", "-threads", "4"]
+    _ENC = [
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        "-r", "30", "-threads", str(os.cpu_count() or 4),
+    ]
 
     # Trim if the combined video overshoots audio + outro buffer.  Keep the
     # extra outro_tail seconds of real footage so the fade-out plays on live
-    # content rather than a frozen frame.
-    if combined_duration > target_duration + 0.5:
+    # content rather than a frozen frame.  Tolerance is 1.5s: a small trailing
+    # overshoot is invisible (generate_video's fade-out covers it), and
+    # trimming costs a full re-encode of the combined video.
+    if combined_duration > target_duration + 1.5:
         logger.info(
             f"combined ({combined_duration:.2f}s) overshoots target ({target_duration:.2f}s); trimming"
         )

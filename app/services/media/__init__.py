@@ -4,7 +4,7 @@ Importing `from app.services import media as material` gives callers the
 same attribute namespace as the old `material` module.
 """
 
-from app.services.media._common import get_api_key  # noqa: F401
+from app.services.media._common import get_api_key, prune_cache_dirs  # noqa: F401
 from app.services.media.images import (  # noqa: F401
     download_image,
     save_image,

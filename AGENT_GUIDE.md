@@ -32,10 +32,21 @@ Set job-root fields and patch each sentence. **Do not rebuild the array from scr
 
 **`video_topic`** — 2–6 word subject phrase (e.g. `"ultra-processed food industry"`). Appended to every search query automatically.
 
+> **CRITICAL — `video_topic` must restate the VIDEO TITLE's subject, nothing
+> narrower.** It is the anchor for every relevance check and every search
+> query in the whole job: if it names a section theme, a test, or a hook
+> instead of the actual subject, the pipeline rejects nearly all footage and
+> the video degrades to generic stills.
+> - Title "We Tested 10 Tinted Sunscreens on Mature Skin…" →
+>   ✅ `"tinted sunscreen for mature skin"` ❌ `"midday grease test"` (a
+>   segment of the video, not its subject)
+> - Sanity check: someone reading ONLY `video_topic` should correctly guess
+>   the title. A validator warns when the topic shares no words with it.
+
 | `video_type` | When to use |
 |---|---|
 | `"thematic"` | Abstract idea, trend, or category |
-| `"named_entity"` | One specific recurring subject — brand, product, person |
+| `"named_entity"` | One specific recurring subject — brand, product, person — **or a review/ranking/comparison that names 3+ specific products or people** (most "Top N …" and "We Tested …" scripts). When in doubt with named products, choose `named_entity`: it routes product sentences to Google Images, which actually has them. |
 
 **`max_image_ratio`** (required):
 
@@ -47,7 +58,9 @@ Set job-root fields and patch each sentence. **Do not rebuild the array from scr
 
 **`motif_palette`** (thematic only) — 4–8 visually distinct, concrete, searchable anchors covering the theme.
 
-**`gapfill_terms`** — exactly 10 generic, broadly-available stock-footage phrases (2–5 words each) summarizing this video's overall subject/setting. Used only as last-resort filler when a specific sentence's own search finds nothing — must be common/simple enough to reliably return real stock results (avoid named brands, specific products, or narrow named-entity terms), but should stay loosely on-theme for this video rather than being generic filler unrelated to the topic.
+**`gapfill_terms`** — **15–20** generic, broadly-available stock-footage phrases (2–5 words each) summarizing this video's overall subject/setting. Used only as last-resort filler when a specific sentence's own search finds nothing — a long video can burn a dozen of these, and the pool cycles, so 10 is too few. Must be common/simple enough to reliably return real stock results (avoid named brands, specific products, or narrow named-entity terms), but stay loosely on-theme. Mix two kinds:
+- **themed** (~⅔): scenes specific to this video's world — `"woman applying sunscreen"`, `"drugstore beauty aisle"`
+- **neutral** (~⅓): broader scenes that still fit — `"morning routine bathroom"`, `"sunny city sidewalk"` — so late rescues don't keep re-searching the same themed imagery
 
 ---
 
@@ -62,7 +75,7 @@ Set job-root fields and patch each sentence. **Do not rebuild the array from scr
 
 **Rules:**
 - `[0]` must describe what a camera physically shows — no abstract nouns (`"hope"` → `"sunrise over city"`, `"effectiveness"` → `"product on clean surface"`)
-- `[1]`/`[2]` must be genuinely broader than `[0]` — not synonyms or near-duplicates
+- `[1]`/`[2]` must be genuinely broader than `[0]` — not synonyms or near-duplicates. `["skincare products shelf", "skincare routine", "skincare products"]` is one query wearing three hats (a real job shipped this); all three hit the same results and the sentence gets no real fallback. Broaden the *scene*: `["skincare products shelf", "woman at bathroom vanity", "cosmetics store aisle"]`
 - Disambiguate collisions: `"court"` → `"courtroom interior"`, `"bar"` → `"crowded bar interior"`, `"firefly"` → `"firefly insect glowing"`, `"jaguar"` → `"jaguar big cat"`, `"python"` → `"python snake coiled"`
 
 > **HARD LIMITS — verified automatically after you finish. Violations trigger a correction pass.**
@@ -119,6 +132,16 @@ One sentence describing the shot — used by the CLIP relevance filter and VLM. 
 - `"moisturizer application concept"` → returns dental braces, boats, cartoon coloring pages
 - `"shine control on mature skin"` → returns go-karts, playing cards
 - `"the feel of a product by noon"` → returns nothing relevant
+
+**Bad examples (formulaic templates — a real job shipped these):**
+- `"Video of makeup vanity close up on a makeup vanity."` — subject repeated
+  as its own setting; says nothing a search engine can use
+- `"Video of skincare products shelf on a vanity countertop."` — "Video of X
+  on a Y" template; drop the "Video of" scaffolding and describe the shot
+- Any batch of captions that differ only by swapping one noun into the same
+  template. If you notice yourself reusing a sentence shape, rewrite —
+  template captions cause the relevance filter to accept near-identical
+  footage across unrelated sentences.
 
 ---
 
@@ -238,7 +261,7 @@ Use active, kinetic search terms — `"engineer soldering circuit board"` beats 
   "video_type": "thematic",
   "max_image_ratio": 0.6,
   "motif_palette": ["ATM machine cash withdrawal", ...],  // thematic only
-  "gapfill_terms": ["skincare product closeup", "bathroom vanity mirror", ...],  // 10 generic but on-topic filler terms
+  "gapfill_terms": ["skincare product closeup", "bathroom vanity mirror", ...],  // 15–20 on-topic filler terms (~⅔ themed, ~⅓ neutral)
 
   "sentences": [
     {

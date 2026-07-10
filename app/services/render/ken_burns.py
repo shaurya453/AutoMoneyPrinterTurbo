@@ -2,12 +2,13 @@ import os
 import random
 import subprocess
 import tempfile
+import threading
 from typing import List
 
 import numpy as np
 from loguru import logger
 from moviepy import Clip, ColorClip, CompositeVideoClip, vfx
-from PIL import Image, ImageFilter
+from PIL import Image
 
 from app.utils import utils
 
@@ -24,7 +25,14 @@ _BG_BLUR_FRACTION = 0.06  # downscale-then-upscale blur strength
 _PAN_Z = 1.04                    # zoom factor: subtle 4% motion, minimal content crop at peak zoom
 
 _KEN_BURNS_ANIMATIONS = ("pan_lr", "pan_rl", "zoom_in", "zoom_out", "pan_ud", "fade")
+# No-consecutive-repeat tracker shared by all fetch worker threads. The lock
+# makes the read-choose-write atomic; note "last" means last-COMPLETED fetch,
+# not last timeline position — under parallel fetch the no-repeat guarantee is
+# best-effort by completion order, and the pick is inherently
+# thread-schedule-dependent (i.e. not reproducible run-to-run) even with the
+# per-clip seeded rng.
 _last_ken_burns_animation: str | None = None
+_anim_pick_lock = threading.Lock()
 _3D_ANIM_DUR = 1.8  # seconds — tilt-to-flat transition; remaining duration holds flat
 
 # Soft animation bias per mood effect — entries within the allowed pool are
@@ -131,14 +139,15 @@ def _pick_animation(
     global _last_ken_burns_animation
     pool_source = list(allowed) if allowed else list(_KEN_BURNS_ANIMATIONS)
     weights = _EFFECT_ANIM_WEIGHTS.get(effect, {})
-    weighted: list[str] = []
-    for a in pool_source:
-        if a != _last_ken_burns_animation:
-            weighted.extend([a] * weights.get(a, 1))
-    if not weighted:
-        weighted = pool_source  # single-entry pool: allow repeat rather than crash
-    choice = rng.choice(weighted)
-    _last_ken_burns_animation = choice
+    with _anim_pick_lock:
+        weighted: list[str] = []
+        for a in pool_source:
+            if a != _last_ken_burns_animation:
+                weighted.extend([a] * weights.get(a, 1))
+        if not weighted:
+            weighted = pool_source  # single-entry pool: allow repeat rather than crash
+        choice = rng.choice(weighted)
+        _last_ken_burns_animation = choice
     return choice
 
 
@@ -525,7 +534,6 @@ def _render_ken_burns_ffmpeg(
     Pan animations at 2× PIL scale give sub-pixel smooth motion via 2:1 lanczos
     downscale. zoom_in uses 8× zoompan for the same reason.
     """
-    import tempfile
     from PIL import Image as _PILImage
 
     ffmpeg_bin = utils.get_ffmpeg_binary()
@@ -622,10 +630,19 @@ def _render_ken_burns_ffmpeg(
                 _cover_crop_image(img, width, height).save(tmp_pre)
                 vf = f"scale={width}:{height}:flags=lanczos"
 
+            # zoompan generates all output frames from ONE input frame
+            # (d=total_frames), so feed the still once — with a looped input
+            # the giant 8× upscale re-runs for every output frame for nothing.
+            # The pan paths animate via crop x/y expressions evaluated per
+            # input frame, so they still need the looped input.
+            if animation in ("zoom_in", "fade"):
+                input_flags = ["-f", "image2", "-i", tmp_pre]
+            else:
+                input_flags = ["-f", "image2", "-loop", "1", "-t", str(duration), "-i", tmp_pre]
             cmd = [
                 ffmpeg_bin, "-y",
                 "-sws_flags", "lanczos",
-                "-f", "image2", "-loop", "1", "-t", str(duration), "-i", tmp_pre,
+                *input_flags,
                 "-vf", vf,
                 "-t", str(duration), "-r", str(fps),
                 "-c:v", codec, "-preset", "fast", "-an",
@@ -701,10 +718,14 @@ def _render_ken_burns_ffmpeg(
             # Scale the portrait photo from fit_w×fit_h up to fit_w×_PAN_Z over the
             # clip duration. overlay re-centers it each frame as it grows.
             # Background (tmp_bg) is a static image and never moves.
+            # eval=frame is required for the 'n' frame variable — without it
+            # FFmpeg rejects the expression ("not valid in init eval_mode")
+            # and every fade render falls back to the slow MoviePy path.
             filter_complex = (
                 f"[0:v]scale="
                 f"w='trunc({fit_w}*(1+{grow:.4f}*n/{d_minus_1})/2)*2':"
-                f"h='trunc({fit_h}*(1+{grow:.4f}*n/{d_minus_1})/2)*2'"
+                f"h='trunc({fit_h}*(1+{grow:.4f}*n/{d_minus_1})/2)*2':"
+                f"eval=frame"
                 f"[fg];"
                 f"[1:v][fg]overlay=x='(W-overlay_w)/2':y='(H-overlay_h)/2',"
                 f"fade=t=in:st=0:d={fade_d:.3f},"
@@ -786,11 +807,18 @@ def _render_ken_burns_ffmpeg(
             tmp_pre = fh.name
         canvas_img.save(tmp_pre)
 
+        # Same single-frame-input optimisation as the cover branch: the
+        # zoompan foregrounds (zoom_in / zoom_out) generate every output frame
+        # from one input frame, so don't loop the still through the 8× upscale.
+        if animation in ("zoom_in", "zoom_out"):
+            fg_input_flags = ["-f", "image2", "-i", tmp_pre]
+        else:
+            fg_input_flags = ["-f", "image2", "-loop", "1", "-t", str(duration), "-i", tmp_pre]
         filter_complex = f"{filter_fg};[1:v][fg]overlay=x={fg_x}:y={fg_y}"
         cmd = [
             ffmpeg_bin, "-y",
             "-sws_flags", "lanczos",
-            "-f", "image2", "-loop", "1", "-t", str(duration), "-i", tmp_pre,
+            *fg_input_flags,
             "-f", "image2", "-loop", "1", "-t", str(duration), "-i", tmp_bg,
             "-filter_complex", filter_complex,
             "-t", str(duration), "-r", str(fps),
@@ -828,7 +856,7 @@ def render_ken_burns_clip(
     Returns output_path on success, '' on failure.
 
     Portrait images (h ≥ w): FIT-scaled to 95% of frame, centered on a
-    blurred background, no animation — unchanged from before.
+    blurred background; animation picked from fade/zoom_in/zoom_out.
 
     Landscape images (w > h): cover-crop fills the full frame; animation is
     chosen randomly from a pool derived from the image's aspect-ratio overflow:

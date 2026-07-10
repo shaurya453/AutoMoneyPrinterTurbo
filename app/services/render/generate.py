@@ -3,6 +3,10 @@ import json
 import math
 import os
 import random
+import shutil
+import subprocess
+import tempfile
+import wave
 from typing import Optional
 
 import numpy as np
@@ -28,8 +32,11 @@ from ._common import (
     _BGM_EXTENSIONS,
     _BGM_FADEOUT_SECONDS,
     _OUTRO_FADEOUT_SECONDS,
+    _fast_preset_args,
     _get_configured_video_codec,
+    _get_effective_video_codec,
     _open_video_clip_quietly,
+    _probe_duration,
     _srt_time_to_seconds,
     _write_videofile_with_codec_fallback,
     audio_bitrate,
@@ -113,6 +120,11 @@ def _make_ducked_bgm(
             if fl > 0:
                 envelope[s:s + fl] = np.linspace(bgm_volume, duck_vol, fl)
                 envelope[e - fl:e] = np.linspace(duck_vol, bgm_volume, fl)
+
+    # End-of-video fade-out, matching the AudioFadeOut the non-ducked BGM path
+    # applies — without this the music cuts hard on the final frame.
+    fade_out_n = min(n, max(1, int(_BGM_FADEOUT_SECONDS * _SR)))
+    envelope[n - fade_out_n:] *= np.linspace(1.0, 0.0, fade_out_n)
 
     bgm_raw = AudioFileClip(bgm_file).with_effects([afx.AudioLoop(duration=audio_duration)])
 
@@ -353,6 +365,247 @@ def _build_word_highlight_clips(
     return highlights
 
 
+_FFMPEG_FINAL_RENDER_TIMEOUT = 30 * 60  # seconds
+
+
+def _render_bgm_wav(
+    bgm_file: str,
+    duration: float,
+    subtitle_path: str,
+    bgm_volume: float,
+    duck_ratio: float,
+    out_path: str,
+) -> bool:
+    """Pre-render looped + ducked + faded BGM to a 16-bit WAV.
+
+    Same envelope math as _make_ducked_bgm(), but applied offline to raw PCM
+    so the final render is a single ffmpeg pass instead of MoviePy pulling
+    audio frames through a Python callback. Returns True on success.
+    """
+    from app.utils.subtitle import file_to_subtitles
+
+    _SR = 44100
+    decode = subprocess.run(
+        [
+            utils.get_ffmpeg_binary(), "-y", "-loglevel", "error",
+            "-stream_loop", "-1", "-i", bgm_file,
+            "-t", f"{duration:.3f}",
+            "-ar", str(_SR), "-ac", "2",
+            "-f", "s16le", "pipe:1",
+        ],
+        capture_output=True, timeout=300,
+    )
+    if decode.returncode != 0 or not decode.stdout:
+        logger.warning(f"BGM decode failed: {decode.stderr[-200:] if decode.stderr else 'empty output'}")
+        return False
+
+    samples = np.frombuffer(decode.stdout, dtype=np.int16).reshape(-1, 2).astype(np.float64)
+    # mp3 frame granularity / encoder delay make the looped decode land a few
+    # hundredths off the requested duration in either direction — trim or
+    # silence-pad to the exact sample count so the BGM always matches the
+    # video (the pad falls inside the fade-out anyway).
+    n_target = int(duration * _SR)
+    samples = samples[:n_target]
+    if len(samples) < n_target:
+        samples = np.vstack(
+            [samples, np.zeros((n_target - len(samples), 2), dtype=np.float64)]
+        )
+    n = len(samples)
+
+    envelope = np.full(n, bgm_volume, dtype=np.float64)
+    if subtitle_path and os.path.exists(subtitle_path) and duck_ratio < 1.0:
+        duck_vol = bgm_volume * duck_ratio
+        fade_n = max(1, int(0.25 * _SR))
+        for _, time_str, _ in file_to_subtitles(subtitle_path):
+            parts = time_str.split(" --> ")
+            if len(parts) != 2:
+                continue
+            s = max(0, int(_srt_time_to_seconds(parts[0].strip()) * _SR))
+            e = min(n, int(_srt_time_to_seconds(parts[1].strip()) * _SR))
+            if e <= s:
+                continue
+            envelope[s:e] = duck_vol
+            half = (e - s) // 2
+            fl = min(fade_n, half)
+            if fl > 0:
+                envelope[s:s + fl] = np.linspace(bgm_volume, duck_vol, fl)
+                envelope[e - fl:e] = np.linspace(duck_vol, bgm_volume, fl)
+
+    fade_out_n = min(n, max(1, int(_BGM_FADEOUT_SECONDS * _SR)))
+    envelope[n - fade_out_n:] *= np.linspace(1.0, 0.0, fade_out_n)
+
+    mixed = np.clip(samples * envelope[:, np.newaxis], -32768, 32767).astype(np.int16)
+    with wave.open(out_path, "wb") as wf:
+        wf.setnchannels(2)
+        wf.setsampwidth(2)
+        wf.setframerate(_SR)
+        wf.writeframes(mixed.tobytes())
+    return True
+
+
+def _ass_color(hex_color: str, alpha: int = 0) -> str:
+    """'#RRGGBB' → ASS '&HAABBGGRR' (ASS is BGR with inverted alpha)."""
+    r, g, b = _hex_to_rgb(hex_color or "#FFFFFF")
+    return f"&H{alpha:02X}{b:02X}{g:02X}{r:02X}"
+
+
+def _ffmpeg_render_eligible(params: VideoParams, subtitle_path: str) -> bool:
+    """The ffmpeg-native final render covers the common configurations; the
+    remaining decorations still need the MoviePy compositor."""
+    if not config.app.get("ffmpeg_final_render", True):
+        return False
+    if not (subtitle_path and os.path.exists(subtitle_path)):
+        return True  # no subtitles at all — trivially supported
+    if params.subtitle_enabled and params.subtitle_highlight:
+        return False  # per-word highlight boxes
+    if getattr(params, "rounded_subtitle_background", False):
+        return False  # Pillow-drawn rounded boxes
+    if params.subtitle_position == "custom":
+        return False  # percentage positioning not mapped to ASS margins
+    return True
+
+
+def _generate_video_ffmpeg(
+    video_path: str,
+    audio_path: str,
+    subtitle_path: str,
+    output_file: str,
+    params: VideoParams,
+    rng: random.Random = random,
+) -> None:
+    """Single-pass ffmpeg final render: subtitle burn-in (libass), fade-out,
+    voice + pre-rendered ducked BGM mix. Replaces the MoviePy frame loop,
+    which spent ~11 minutes on a 13-minute video even with subtitles off.
+    Raises on any failure — generate_video() falls back to MoviePy.
+    """
+    aspect = VideoAspect(params.video_aspect)
+    video_width, video_height = aspect.to_resolution()
+    video_duration = _probe_duration(video_path)
+    if not video_duration:
+        raise RuntimeError(f"could not probe video duration: {video_path}")
+
+    output_dir = os.path.dirname(output_file)
+    tmp_files = []
+    try:
+        # ---- video filters ------------------------------------------------ #
+        vf_parts = []
+        burn_subs = bool(
+            subtitle_path and os.path.exists(subtitle_path) and params.subtitle_enabled
+        )
+        if burn_subs:
+            font_path = os.path.join(
+                utils.font_dir(), params.font_name or "Inter_18pt-SemiBold.ttf"
+            )
+            try:
+                font_family = ImageFont.truetype(font_path, 20).getname()[0]
+            except Exception:
+                font_family = "sans-serif"
+
+            # libass converts SRT with PlayResY=288 — scale pixel sizes to it.
+            ass_scale = 288.0 / video_height
+            font_size = max(1, round(int(params.font_size) * ass_scale * 1.3))
+            outline = max(0, round(float(params.stroke_width) * ass_scale * 1.3))
+            margin_v = round(video_height * 0.05 * ass_scale)
+            alignment = {"bottom": 2, "top": 8}.get(params.subtitle_position, 5)
+
+            style_parts = [
+                f"FontName={font_family}",
+                f"FontSize={font_size}",
+                f"PrimaryColour={_ass_color(params.text_fore_color)}",
+                f"OutlineColour={_ass_color(params.stroke_color)}",
+                f"Outline={outline}",
+                "BorderStyle=1",
+                f"Alignment={alignment}",
+                f"MarginV={margin_v}",
+            ]
+            bg_color = (
+                ("#000000" if params.text_background_color else None)
+                if isinstance(params.text_background_color, bool)
+                else params.text_background_color
+            )
+            if bg_color:
+                # BorderStyle=3: libass draws an opaque box in BackColour.
+                style_parts[5] = "BorderStyle=3"
+                style_parts.append(f"BackColour={_ass_color(bg_color, alpha=0x50)}")
+
+            # The subtitles filter chokes on quotes/commas in filenames and
+            # task dirs contain both — hand it a copy at a safe temp path.
+            fd, safe_srt = tempfile.mkstemp(suffix=".srt", prefix="ampt-subs-")
+            os.close(fd)
+            shutil.copyfile(subtitle_path, safe_srt)
+            tmp_files.append(safe_srt)
+
+            fonts_dir = utils.font_dir()
+            vf_parts.append(
+                f"subtitles={safe_srt}:fontsdir={fonts_dir}"
+                f":force_style='{','.join(style_parts)}'"
+            )
+
+        fade_start = max(0.0, video_duration - _OUTRO_FADEOUT_SECONDS)
+        vf_parts.append(f"fade=t=out:st={fade_start:.3f}:d={_OUTRO_FADEOUT_SECONDS}")
+
+        # ---- audio -------------------------------------------------------- #
+        bgm_file = get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file, rng=rng)
+        bgm_wav = ""
+        if bgm_file:
+            duck_ratio = float(config.app.get("bgm_duck_ratio", 0.15))
+            candidate = os.path.join(output_dir, "temp-bgm-ducked.wav")
+            if _render_bgm_wav(
+                bgm_file=bgm_file,
+                duration=video_duration,
+                subtitle_path=subtitle_path if burn_subs else "",
+                bgm_volume=params.bgm_volume,
+                duck_ratio=duck_ratio,
+                out_path=candidate,
+            ):
+                bgm_wav = candidate
+                tmp_files.append(candidate)
+                logger.info(f"BGM pre-rendered with duck envelope: {duck_ratio:.0%} during narration")
+            else:
+                logger.warning("BGM pre-render failed — continuing without BGM")
+
+        voice_vol = float(params.voice_volume or 1.0)
+        if bgm_wav:
+            audio_graph = (
+                f"[1:a]volume={voice_vol}[va];"
+                f"[va][2:a]amix=inputs=2:duration=longest:normalize=0[a]"
+            )
+        else:
+            audio_graph = f"[1:a]volume={voice_vol}[a]"
+
+        filter_complex = f"[0:v]{','.join(vf_parts)}[v];{audio_graph}"
+
+        codec = _get_effective_video_codec()
+        cmd = [
+            utils.get_ffmpeg_binary(), "-y",
+            "-i", video_path,
+            "-i", audio_path,
+            *(["-i", bgm_wav] if bgm_wav else []),
+            "-filter_complex", filter_complex,
+            "-map", "[v]", "-map", "[a]",
+            "-c:v", codec, *_fast_preset_args(codec),
+            "-pix_fmt", "yuv420p", "-r", str(fps),
+            "-c:a", audio_codec, "-b:a", audio_bitrate,
+            "-t", f"{video_duration:.3f}",
+            "-threads", str(params.n_threads or os.cpu_count() or 4),
+            output_file,
+        ]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=_FFMPEG_FINAL_RENDER_TIMEOUT
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg final render failed: {(result.stderr or '')[-400:]}")
+        if not os.path.exists(output_file) or os.path.getsize(output_file) == 0:
+            raise RuntimeError("ffmpeg final render produced no output")
+        logger.success("final render completed via ffmpeg-native path")
+    finally:
+        for f in tmp_files:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+
+
 def generate_video(
     video_path: str,
     audio_path: str,
@@ -369,6 +622,22 @@ def generate_video(
     logger.info(f"  ② audio: {audio_path}")
     logger.info(f"  ③ subtitle: {subtitle_path}")
     logger.info(f"  ④ output: {output_file}")
+
+    # Fast path: single-pass ffmpeg render (set ffmpeg_final_render=false in
+    # config.toml to force the MoviePy compositor). Unsupported subtitle
+    # decorations and any ffmpeg failure fall through to MoviePy below.
+    if _ffmpeg_render_eligible(params, subtitle_path):
+        try:
+            return _generate_video_ffmpeg(
+                video_path=video_path,
+                audio_path=audio_path,
+                subtitle_path=subtitle_path,
+                output_file=output_file,
+                params=params,
+                rng=rng,
+            )
+        except Exception as exc:
+            logger.warning(f"ffmpeg final render failed — falling back to MoviePy: {exc}")
 
     output_dir = os.path.dirname(output_file)
 
@@ -388,16 +657,18 @@ def generate_video(
         return params.text_background_color
 
     def create_text_clip(subtitle_item):
-        params.font_size = int(params.font_size)
-        params.stroke_width = int(params.stroke_width)
+        # Locals only — mutating params here would silently change the shared
+        # VideoParams for every later subtitle (and 1.5 → 1 on stroke_width).
+        font_size = int(params.font_size)
+        stroke_width = int(params.stroke_width)
         phrase = subtitle_item[1]
         max_width = video_width * 0.9
         wrapped_txt, txt_height = wrap_text(
-            phrase, max_width=max_width, font=font_path, fontsize=params.font_size
+            phrase, max_width=max_width, font=font_path, fontsize=font_size
         )
-        interline = int(params.font_size * 0.25)
+        interline = int(font_size * 0.25)
         line_count = wrapped_txt.count("\n") + 1
-        vertical_padding = int(params.font_size * 0.35)
+        vertical_padding = int(font_size * 0.35)
         clip_h = int(txt_height + vertical_padding + interline * max(0, line_count - 1))
         bg_color = resolve_subtitle_background_color()
         rounded_bg_enabled = bool(
@@ -406,7 +677,7 @@ def generate_video(
 
         if rounded_bg_enabled:
             try:
-                font = ImageFont.truetype(font_path, params.font_size)
+                font = ImageFont.truetype(font_path, font_size)
                 text_w = max(
                     int(font.getbbox(line)[2] - font.getbbox(line)[0])
                     for line in wrapped_txt.split("\n")
@@ -417,17 +688,17 @@ def generate_video(
                 )
                 text_w = int(max_width)
 
-            pad_x = int(params.font_size * 0.6)
+            pad_x = int(font_size * 0.6)
             box_w = max(1, min(int(max_width), text_w + 2 * pad_x))
-            radius = max(8, int(params.font_size * 0.4))
+            radius = max(8, int(font_size * 0.4))
             text_clip = TextClip(
                 text=wrapped_txt,
                 font=font_path,
-                font_size=params.font_size,
+                font_size=font_size,
                 color=params.text_fore_color,
                 bg_color=None,
                 stroke_color=params.stroke_color,
-                stroke_width=params.stroke_width,
+                stroke_width=stroke_width,
                 interline=interline,
                 size=(box_w, clip_h),
                 text_align="center",
@@ -448,11 +719,11 @@ def generate_video(
             _clip = TextClip(
                 text=wrapped_txt,
                 font=font_path,
-                font_size=params.font_size,
+                font_size=font_size,
                 color=params.text_fore_color,
                 bg_color=bg_color,
                 stroke_color=params.stroke_color,
-                stroke_width=params.stroke_width,
+                stroke_width=stroke_width,
                 interline=interline,
                 size=size,
                 text_align="center",

@@ -22,6 +22,7 @@ from app.config import config
 
 _client = None
 _client_load_attempted = False
+_client_load_lock = threading.Lock()
 
 # Circuit breaker: after this many consecutive 429/quota errors, stop calling
 # the API for the rest of the process (fail-open silently).
@@ -29,11 +30,20 @@ _CIRCUIT_BREAKER_THRESHOLD = 3
 _consecutive_rate_errors = 0
 _circuit_open = False
 
-# On-disk verdict cache: md5(image_bytes) → score float.
-# Prevents re-screening the same image content across re-runs of the same job.
+# On-disk verdict cache: "v2:" + md5(image_md5|narration|caption|topic) → score.
+# Prevents re-screening the same image in the same prompt context across
+# re-runs of the same job. Context is part of the key on purpose — a verdict
+# is only reusable when the narration/caption/topic it was scored against
+# match too.
 _vlm_cache: dict = {}
 _vlm_cache_loaded = False
 _vlm_cache_lock = threading.Lock()
+# Unflushed verdicts. The full JSON is only rewritten every
+# _VLM_CACHE_FLUSH_EVERY new entries; the pipeline calls flush_cache() at the
+# end of the run to persist the remainder (atexit is useless here — cli.py
+# exits via os._exit()). A crash mid-run loses at most the last few verdicts.
+_vlm_cache_dirty = 0
+_VLM_CACHE_FLUSH_EVERY = 5
 
 # Per-run usage accumulators and circuit-breaker state; all guarded by one lock
 # so concurrent workers can't corrupt the counts or bypass the threshold.
@@ -76,38 +86,56 @@ def _load_vlm_cache() -> None:
 
 
 def _save_vlm_cache() -> None:
+    """Write the cache to disk. Caller must hold _vlm_cache_lock."""
+    global _vlm_cache_dirty
     try:
         path = _get_cache_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as fh:
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as fh:
             json.dump(_vlm_cache, fh)
+        os.replace(tmp_path, path)
+        _vlm_cache_dirty = 0
     except Exception as exc:
         logger.debug(f"VLM cache save failed: {exc}")
 
 
+def flush_cache() -> None:
+    """Persist any unflushed verdicts. Called at the end of a pipeline run."""
+    with _vlm_cache_lock:
+        if _vlm_cache_dirty > 0:
+            _save_vlm_cache()
+
+
 def _get_client():
+    """Thread-safe lazy init (same load-inside-lock pattern as nsfw/relevance)."""
     global _client, _client_load_attempted
-    if _client is not None or _client_load_attempted:
+    if _client_load_attempted:  # fast path, no lock once init finished
         return _client
-    _client_load_attempted = True
+    with _client_load_lock:
+        if _client_load_attempted:
+            return _client
 
-    if not config.app.get("vlm_verify_enabled", False):
-        return None
+        try:
+            if not config.app.get("vlm_verify_enabled", False):
+                return None
 
-    api_key = str(config.app.get("vlm_api_key", "")).strip()
-    if not api_key:
-        logger.warning("vlm_verify_enabled=true but vlm_api_key is empty — VLM disabled")
-        return None
+            api_key = str(config.app.get("vlm_api_key", "")).strip()
+            if not api_key:
+                logger.warning("vlm_verify_enabled=true but vlm_api_key is empty — VLM disabled")
+                return None
 
-    try:
-        from openai import OpenAI
+            try:
+                from openai import OpenAI
 
-        _client = OpenAI(api_key=api_key)
-        logger.info("VLM: OpenAI client initialized")
-    except Exception as exc:
-        logger.warning(f"VLM unavailable, continuing without it: {exc}")
-        _client = None
-    return _client
+                _client = OpenAI(api_key=api_key)
+                logger.info("VLM: OpenAI client initialized")
+            except Exception as exc:
+                logger.warning(f"VLM unavailable, continuing without it: {exc}")
+                _client = None
+            return _client
+        finally:
+            _client_load_attempted = True
 
 
 def is_enabled() -> bool:
@@ -146,9 +174,13 @@ def verify_image(
 ) -> Optional[float]:
     """Score image_bytes against the narration context. Returns 0.0–1.0 or None (fail-open).
 
-    Use passes(verify_image(...)) to gate acceptance — passes() compares the
-    score against vlm_threshold (default 0.35).  None means the VLM call
-    failed; passes(None) returns True (fail-open), so failures never block.
+    Two different thresholds gate this score depending on the caller:
+      - video candidates: passes(verify_image(...)) → `vlm_threshold` (default 0.55)
+      - image candidates: images.py compares against `vlm_image_threshold`
+        (default 0.30) directly — images tolerate a looser cut because the
+        comparative VLM pool pass re-ranks the survivors anyway.
+    None means the VLM call failed; passes(None) returns True (fail-open),
+    so failures never block.
 
     For video clips, pass the midpoint frame bytes (from nsfw.sample_frame_bytes).
     """
@@ -156,13 +188,19 @@ def verify_image(
     if client is None or not image_bytes:
         return None
 
-    # Cache lookup: same image bytes → same verdict, regardless of URL or run.
+    # Cache lookup. The verdict depends on the PROMPT CONTEXT, not just the
+    # pixels — the same stock image can be a perfect match for one narration
+    # and irrelevant to another — so the key covers image bytes + narration +
+    # visual_caption + video_topic. The "v2:" prefix versions the format;
+    # legacy pixel-only keys (plain md5 hex) simply never match again.
     img_md5 = hashlib.md5(image_bytes).hexdigest()
+    _ctx = f"{img_md5}|{narration}|{visual_caption}|{video_topic}"
+    cache_key = "v2:" + hashlib.md5(_ctx.encode("utf-8")).hexdigest()
     with _vlm_cache_lock:
         _load_vlm_cache()
-        if img_md5 in _vlm_cache:
-            cached = _vlm_cache[img_md5]
-            logger.debug(f"VLM cache hit: {img_md5[:8]} score={cached:.2f}")
+        if cache_key in _vlm_cache:
+            cached = _vlm_cache[cache_key]
+            logger.debug(f"VLM cache hit: {cache_key[:11]} score={cached:.2f}")
             return cached
 
     model = str(config.app.get("vlm_model", "gpt-4.1-nano"))
@@ -191,7 +229,7 @@ def verify_image(
         'Return JSON only: {"accepted": true/false, "score": 0.0-1.0, "reason": "short string"}'
     )
 
-    global _consecutive_rate_errors, _circuit_open
+    global _consecutive_rate_errors, _circuit_open, _vlm_cache_dirty
     try:
         # Normalize to JPEG — OpenAI only accepts png/jpeg/gif/webp and some
         # CDNs serve AVIF or other formats that will cause a 400.
@@ -223,8 +261,10 @@ def verify_image(
         if config.app.get("relevance_debug_log", False):
             logger.debug(f"VLM: score={score:.2f} reason={reason!r}")
         with _vlm_cache_lock:
-            _vlm_cache[img_md5] = score
-            _save_vlm_cache()
+            _vlm_cache[cache_key] = score
+            _vlm_cache_dirty += 1
+            if _vlm_cache_dirty >= _VLM_CACHE_FLUSH_EVERY:
+                _save_vlm_cache()
         global _total_calls, _total_input_tokens, _total_output_tokens
         with _vlm_stats_lock:
             _consecutive_rate_errors = 0

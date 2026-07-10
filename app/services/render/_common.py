@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import random
 import subprocess
@@ -309,6 +310,43 @@ def _probe_duration(path: str) -> float | None:
             capture_output=True, text=True, timeout=15,
         )
         return float(pr.stdout.strip())
+    except Exception:
+        return None
+
+
+def probe_concat_compliance(path: str, width: int, height: int) -> float | None:
+    """Return the clip's duration if it is already at concat target spec
+    (h264 / yuv420p / exact target resolution / ~`fps` frame rate), else None.
+
+    Used by combine_videos() to downgrade the per-clip normalization
+    re-encode to a stream-copy remux for clips the pipeline itself already
+    produced at target spec. Any probe failure returns None — the caller
+    falls back to the re-encode path, which handles arbitrary inputs.
+    """
+    try:
+        pr = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries",
+             "stream=codec_name,pix_fmt,width,height,avg_frame_rate",
+             "-show_entries", "format=duration",
+             "-of", "json", path],
+            capture_output=True, text=True, timeout=15,
+        )
+        if pr.returncode != 0:
+            return None
+        info = json.loads(pr.stdout)
+        stream = info["streams"][0]
+        if stream.get("codec_name") != "h264":
+            return None
+        if stream.get("pix_fmt") != "yuv420p":
+            return None
+        if int(stream.get("width", 0)) != width or int(stream.get("height", 0)) != height:
+            return None
+        num, _, den = str(stream.get("avg_frame_rate", "0/1")).partition("/")
+        rate = float(num) / float(den or 1)
+        if abs(rate - fps) > 0.05:
+            return None
+        return float(info["format"]["duration"])
     except Exception:
         return None
 

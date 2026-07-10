@@ -1,0 +1,81 @@
+{
+  "task_id": "00000000-0000-0000-0000-00000000b452",
+  "video_title": "smoke-graphics",
+  "video_script": "Wireless headphones changed how people listen on the move.\nThe Sony WH-1000XM5 leads the pack with adaptive noise cancelling.\nIts thirty hour battery keeps music playing through long trips.\nThree things matter most when choosing a pair.\nComfort, sound quality, and battery life decide the winner.\nWhichever pair you pick, better listening is worth it.",
+  "sentences": [
+    {
+      "text": "Wireless headphones changed how people listen on the move.",
+      "visual_concepts": ["person wearing headphones commuting", "wireless earbuds lifestyle", "listening music train window"],
+      "content_track": "broll",
+      "media_type": "video",
+      "visual_caption": "commuter listening with wireless headphones",
+      "visual_effect": "tech"
+    },
+    {
+      "text": "The Sony WH-1000XM5 leads the pack with adaptive noise cancelling.",
+      "visual_concepts": ["Sony WH-1000XM5 headphones product", "WH-1000XM5 earcup closeup", "premium headphones desk"],
+      "content_track": "named",
+      "entity_name": "Sony WH-1000XM5",
+      "media_type": "image",
+      "visual_caption": "Sony WH-1000XM5 headphones product shot",
+      "graphic_type": "lower_third",
+      "variables": { "label": "Sony WH-1000XM5" }
+    },
+    {
+      "text": "Its thirty hour battery keeps music playing through long trips.",
+      "visual_concepts": ["WH-1000XM5 charging cable", "headphones battery indicator", "long flight passenger headphones"],
+      "content_track": "named",
+      "entity_name": "Sony WH-1000XM5",
+      "media_type": "video",
+      "visual_caption": "traveler using headphones on a long trip"
+    },
+    {
+      "text": "Three things matter most when choosing a pair.",
+      "visual_concepts": ["comparing headphones store shelf", "person choosing electronics", "headphones display retail"],
+      "content_track": "broll",
+      "media_type": "video",
+      "visual_caption": "shopper comparing headphone options",
+      "graphic_type": "list",
+      "variables": { "title": "What Matters", "items": ["Comfort", "Sound quality", "Battery life"] }
+    },
+    {
+      "text": "Comfort, sound quality, and battery life decide the winner.",
+      "visual_concepts": ["headphones cushion closeup", "audio waveform studio", "battery icon charging"],
+      "content_track": "broll",
+      "media_type": "video",
+      "visual_caption": "closeup of plush headphone ear cushions",
+      "visual_effect": "revelation"
+    },
+    {
+      "text": "Whichever pair you pick, better listening is worth it.",
+      "visual_concepts": ["person smiling music eyes closed", "sunset walk headphones", "relaxed listening sofa"],
+      "content_track": "broll",
+      "media_type": "image",
+      "visual_caption": "person enjoying music at sunset"
+    }
+  ],
+  "voice_name": "en-US-AriaNeural",
+  "voice_rate": 1.0,
+  "video_aspect": "16:9",
+  "subtitle_enabled": true,
+  "subtitle_highlight": false,
+  "font_name": "Inter_18pt-SemiBold.ttf",
+  "text_fore_color": "#FFFFFF",
+  "font_size": 30,
+  "stroke_color": "#000000",
+  "stroke_width": 1.5,
+  "subtitle_position": "bottom",
+  "bgm_search_term": "",
+  "bgm_file": "random",
+  "bgm_volume": 0.15,
+  "video_source": "pexels",
+  "video_topic": "Sony WH-1000XM5 wireless headphones",
+  "video_type": "named_entity",
+  "gapfill_terms": [
+    "wireless headphones lifestyle",
+    "person listening music",
+    "audio technology closeup",
+    "commuter with headphones",
+    "music studio equipment"
+  ]
+}

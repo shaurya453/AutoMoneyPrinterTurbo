@@ -17,6 +17,7 @@ app/services/relevance.py).
 """
 
 import io
+import threading
 from typing import List, Optional
 
 from loguru import logger
@@ -36,27 +37,42 @@ _REJECT_LABELS = {
 
 _detector = None
 _detector_load_attempted = False
+_detector_load_lock = threading.Lock()
 
 
 def _get_detector():
+    """Thread-safe lazy load of the NudeNet detector.
+
+    The entire load happens INSIDE the lock: this is a safety gate, so
+    concurrent fetch workers must block until the model is ready rather
+    than observe a half-initialized state and fail open (passes(None)
+    treats "gate unavailable" as allow).
+    """
     global _detector, _detector_load_attempted
-    if _detector is not None or _detector_load_attempted:
+    if _detector_load_attempted:  # fast path, no lock once load finished
         return _detector
-    _detector_load_attempted = True
+    with _detector_load_lock:
+        if _detector_load_attempted:
+            return _detector
 
-    if not config.app.get("nsfw_gate_enabled", True):
-        logger.info("NSFW gate disabled (nsfw_gate_enabled=false)")
-        return None
+        try:
+            if not config.app.get("nsfw_gate_enabled", True):
+                logger.info("NSFW gate disabled (nsfw_gate_enabled=false)")
+                return None
+            try:
+                from nudenet import NudeDetector
 
-    try:
-        from nudenet import NudeDetector
-
-        _detector = NudeDetector()
-        logger.info("NSFW gate: NudeNet model loaded")
-    except Exception as exc:
-        logger.warning(f"NSFW gate unavailable, continuing without it: {exc}")
-        _detector = None
-    return _detector
+                _detector = NudeDetector()
+                logger.info("NSFW gate: NudeNet model loaded")
+            except Exception as exc:
+                logger.warning(f"NSFW gate unavailable, continuing without it: {exc}")
+                _detector = None
+            return _detector
+        finally:
+            # Only mark attempted once _detector holds the final result, so
+            # lock-free fast-path readers can never see attempted=True with a
+            # still-loading detector.
+            _detector_load_attempted = True
 
 
 def is_available() -> bool:

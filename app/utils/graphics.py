@@ -21,41 +21,37 @@ _RENDER_JS = os.path.join(_WORKER_DIR, "render.js")
 
 _RENDER_TIMEOUT = 180  # seconds
 
-# Gradient backgrounds served from revideo-worker/public/ — must match BG_VIDEOS in render.js.
-_BG_VIDEOS: list[str] = [
-    '/blue_gradient_bg.mp4',
-    '/orange_gradient_bg.mp4',
-    '/green_gradient_bg.mp4',
-    '/monochrome_gradient_bg.mp4',
-]
+# Variant metadata is single-sourced from revideo-worker/variants.json —
+# the same file render.js maps variant indexes to project files with, so the
+# two sides can't drift. Derived here:
+#   _BG_VIDEOS     — gradient backgrounds served from revideo-worker/public/
+#   _POOL_SIZES    — variants per type (rotation pool size)
+#   _BG_VIDEO_TYPES — types whose scenes take an injected bgVideo
+#   STYLE_MAP      — named style → variant index, per type (lets the agent
+#                    request a specific aesthetic without knowing indexes)
+_MANIFEST_PATH = os.path.join(_WORKER_DIR, "variants.json")
+_BG_VIDEOS: list[str] = []
+_BG_VIDEO_TYPES: set = set()
+_POOL_SIZES: dict = {}
+STYLE_MAP: dict = {}
+try:
+    with open(_MANIFEST_PATH, "r", encoding="utf-8") as _fh:
+        _manifest = json.load(_fh)
+    _BG_VIDEOS = list(_manifest["bg_videos"])
+    for _type, _cfg in _manifest["types"].items():
+        _POOL_SIZES[_type] = len(_cfg["variants"])
+        if _cfg.get("uses_bg_video"):
+            _BG_VIDEO_TYPES.add(_type)
+        STYLE_MAP[_type] = {
+            _style: _idx
+            for _idx, _variant in enumerate(_cfg["variants"])
+            for _style in _variant.get("styles", [])
+        }
+except Exception as _exc:  # missing/corrupt manifest — degrade, don't crash import
+    logger.error(f"failed to load {_MANIFEST_PATH} ({_exc}) — graphic variants limited to defaults")
 
 # Per-job last-used background (module-level, persists for one job run).
 _last_bg_video: str = ""
-
-# Pool sizes per type — must match VARIANT_POOL array lengths in render.js.
-_POOL_SIZES: dict = {
-    "lower_third": 1,
-    "infographic": 4,
-    "list":        4,
-}
-
-# Named style → variant index mapping, per type.
-# Lets the agent request a specific aesthetic without knowing variant numbers.
-STYLE_MAP: dict = {
-    "lower_third": {},   # single variant — no style options
-    "infographic": {
-        "bars":       0,  # vertical bar chart
-        "horizontal": 1,  # horizontal bar chart
-        "lollipop":   2,  # lollipop (stem + dot) chart
-        "callouts":   3,  # large bold numbers counting up — best for 2–3 stats
-    },
-    "list": {
-        "bullets":  0,   # coloured square bullets, slides from left
-        "numbered": 1,   # cyan number prefix, drops from above
-        "cascade":  2,   # coloured bar sweep behind each row
-        "grid":     3,   # bordered card grid with accent number badges
-    },
-}
 
 # Per-type last-used variant index (module-level, persists for one job run).
 # Used by the no-consecutive-repeat rotation logic.
@@ -85,7 +81,7 @@ def _pick_variant(
             f"unknown style '{style}' for type '{graphic_type}' — using rotation"
         )
 
-    pool_size = _POOL_SIZES.get(graphic_type, 3)
+    pool_size = _POOL_SIZES.get(graphic_type, 1)
     last = _last_variant.get(graphic_type)
     choices = [i for i in range(pool_size) if i != last]
     if not choices:
@@ -137,8 +133,8 @@ def render_graphic_clip(
     variant = _pick_variant(graphic_type, style, rng=rng)
     merged_vars = dict(variables or {})
 
-    # Inject background for infographic/list scenes, enforcing no-consecutive-repeat.
-    if graphic_type in ("infographic", "list"):
+    # Inject background for scenes that take one, enforcing no-consecutive-repeat.
+    if graphic_type in _BG_VIDEO_TYPES and _BG_VIDEOS:
         choices = [v for v in _BG_VIDEOS if v != _last_bg_video] or _BG_VIDEOS
         chosen_bg = rng.choice(choices)
         _last_bg_video = chosen_bg

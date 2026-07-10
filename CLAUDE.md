@@ -45,7 +45,7 @@ Re-running with the same title creates `<title> (2)`, `<title> (3)`, etc. automa
 | `scripts/validate_job.py` | Validates a job.json before Phase 2 (called by portal-worker) |
 | `app/services/pipeline/` | Main orchestrator package — TTS → Whisper → clip fetch → combine → subtitles → final |
 | `app/services/pipeline/_whisper.py` | Whisper sentence-timestamp alignment helpers |
-| `app/services/pipeline/_planning.py` | Clip planning: query building, duration estimation, ffmpeg trim |
+| `app/services/pipeline/_planning.py` | Clip planning: Pass-1 slot math (`plan_clip_slots`), query building, ffmpeg trim, shared planning constants |
 | `app/services/pipeline/_fetch.py` | Clip fetching: search → NSFW gate → relevance → Ken Burns |
 | `app/services/pipeline/_orchestrate.py` | `start()` function: orchestrates all pipeline stages |
 | `app/services/pipeline/_quality.py` | `write_quality_report()` — aggregates per-clip fetch/rescue/placeholder/gap outcomes into `<title>.quality.json` |
@@ -81,6 +81,7 @@ Lives at `revideo-worker/` (inside the repository root).
 | File | Role |
 |---|---|
 | `render.js` | CLI: reads JSON from stdin, routes to project file by `type`+`variant`, calls `renderVideo()`, prints MP4 path to stdout |
+| `variants.json` | **Single source of truth** for variant metadata — `render.js` derives `VARIANT_POOL`/`BG_VIDEOS` from it, `graphics.py` derives `_POOL_SIZES`/`STYLE_MAP`/`_BG_VIDEOS`. Adding a variant = scene+project file + one entry here (no Python change) |
 | `src/projects/lower-third.ts` | Revideo project for `lower_third` (single variant) |
 | `src/projects/infographic{,-b,-c,-d}.ts` | Revideo projects for infographic variants A–D |
 | `src/projects/list{,-b,-c,-d}.ts` | Revideo projects for list variants A–D |
@@ -96,11 +97,11 @@ Lives at `revideo-worker/` (inside the repository root).
 ### Stage flow (inside `pipeline.start()`)
 
 1. **TTS** — `tts.tts()` → `audio.mp3`; also used to produce edge-tts word-level timings for subtitles
-2. **Whisper alignment** — `_get_sentence_timestamps()` (faster-whisper) aligns each narration sentence to an `(start, end)` span. **Graphic sentences (`content_track: "graphic"`) are filtered out before Whisper** and re-inserted with `(0.0, 0.0)` placeholder timestamps
-3. **Pass 1 — clip planning** — compute footage duration for each sentence from Whisper timestamps. Graphic sentences override to their `duration` field
+2. **Whisper alignment** — `_get_sentence_timestamps()` (faster-whisper) aligns each narration sentence to an `(start, end)` span via SequenceMatcher token alignment. A sentence whose tokens can't be matched (e.g. empty `text`) falls back to `(last_end, last_end + 2.0)` — which wrecks the Pass-1 plan for everything after it, which is why `validate_job.py` hard-errors on empty `text`
+3. **Pass 1 — clip planning** — compute each sentence's footage slot from absolute Whisper timestamps (slot runs until the next sentence's narration begins). A narrated-graphic sentence (`graphic_type` set + non-empty `text`) keeps its Whisper-derived slot; list/infographic slots are floored at 5 s for readability
 4. **Pass 2 — clip fetch / render** — for each sentence:
-   - `"graphic"` → `graphics.render_graphic_clip()` (subprocess to `revideo-worker/render.js`)
-   - `"named"` or `"broll"` → `_fetch_clip()` (search → NSFW gate → relevance → Ken Burns for images)
+   - `graphic_type` set (always narrated; `content_track` stays `"broll"`/`"named"`) → `graphics.render_graphic_clip()` (subprocess to `revideo-worker/render.js`). `lower_third` renders are composited over fetched footage; `list`/`infographic` renders replace the footage slot entirely
+   - otherwise → `_fetch_clip()` (search → NSFW gate → relevance → Ken Burns for images)
 5. **Clip-fetch resilience** — rescue fetch → placeholder → position-aware gap-fill → tail gap-fill (see below)
 6. **Outro extension** — last clip looped to reach `audio_duration + 2 s`
 7. **`combine_videos()`** — sequential concat with xfade crossfade → `temp/combined.mp4`
@@ -139,16 +140,16 @@ sync when a fetch fails, narrowest/most-relevant first:
 
 ### Ken Burns (still images)
 
-**Portrait images** (h ≥ w): FIT-scaled to 95% of frame, centered on a blurred+darkened background (same image, downscale-upscale blur at 6%, 50% brightness). No animation — static display.
+**Portrait images** (h ≥ w): FIT-scaled to 95% of frame, centered on a blurred+darkened background (same image, downscale-upscale blur at 6%, 50% brightness; plain white background + drop shadow for transparent PNGs). Animation is picked from `["fade", "zoom_in", "zoom_out"]`.
 
-**Landscape images** (w > h): COVER-CROP fills the full frame — no blurred background visible. Animation is chosen randomly from a pool derived from the image's aspect-ratio overflow:
-- `zoom_in` — always in pool (4% extra zoom via 8× zoompan on the cover-cropped base)
+**Landscape images** (w > h): COVER-CROP fills the full frame — no blurred background visible. Animation is chosen from a pool derived from the image's aspect-ratio overflow:
+- `zoom_in`, `fade`, `screen_3d_lr`, `screen_3d_ud` — always in pool. The `screen_3d_*` presets are 3D screen-mockup animations (tilted perspective easing to flat, rendered per-frame via PIL/MoviePy in `_render_3d_effect()`, blurred-image backdrop + soft shadow)
 - `pan_lr` / `pan_rl` — added when the image is wider than the frame proportionally (`h_excess > 2% of frame_w`)
 - `pan_ud` — added when the image is taller than the frame proportionally after cover-scale (`v_excess > 2% of frame_h`)
 
-`_pick_animation(allowed)` enforces no-consecutive-repeat across clips. `_PAN_Z = 1.04`. Ease-out quadratic timing on all pan/zoom travel.
+`_pick_animation(allowed, effect)` enforces no-consecutive-repeat across clips and soft-weights the pick by the sentence's `visual_effect` mood (`_EFFECT_ANIM_WEIGHTS`). `_PAN_Z = 1.04`. Ease-out quadratic timing on all pan/zoom travel.
 
-Primary path: `video._render_ken_burns_ffmpeg()`. Cover mode uses `-vf` (single input, no overlay). Pan animations at 2× PIL scale + 2:1 lanczos FFmpeg downscale for sub-pixel smooth motion. MoviePy fallback: `video.apply_ken_burns()`.
+Primary path: `ken_burns._render_ken_burns_ffmpeg()`. Cover mode uses `-vf` (single input, no overlay). Pan animations at 2× PIL scale + 2:1 lanczos FFmpeg downscale for sub-pixel smooth motion. MoviePy fallback: `apply_ken_burns()`.
 
 ### Revideo integration
 
@@ -166,7 +167,7 @@ Python calls `node revideo-worker/render.js` via `subprocess.run()` with a JSON 
 }
 ```
 
-`render.js` maps `type`+`variant` → Revideo project file via `VARIANT_POOL`. `graphics.py` picks the variant, enforcing no-consecutive-repeat rotation unless a named `style` overrides it. Adding a new type = new `src/scenes/foo.tsx` + new `src/projects/foo.ts` + new entry in `VARIANT_POOL` + matching entry in `graphics.py`'s `STYLE_MAP` and `_POOL_SIZES`.
+`render.js` maps `type`+`variant` → Revideo project file via `VARIANT_POOL`, which (like `graphics.py`'s `_POOL_SIZES`/`STYLE_MAP`/`_BG_VIDEOS`) is derived from `revideo-worker/variants.json` at load time. `graphics.py` picks the variant, enforcing no-consecutive-repeat rotation unless a named `style` overrides it. Adding a new type or variant = new `src/scenes/foo.tsx` + new `src/projects/foo.ts` + one entry in `variants.json` — no Python or render.js change.
 
 The rendered H.264 MP4 slots into `temp/clips/` identically to any stock clip — `combine_videos()` sees no difference.
 
@@ -190,7 +191,7 @@ Top-level fields an agent must set: `video_topic`, `video_type`, `motif_palette`
 
 Named-entity sentences (`content_track: "named"`) also carry `entity_name` — the full, non-rotating canonical name of the product/person (brand + product + SPF/size/shade/model), constant across every sentence in that named section even as `visual_concepts[0]` rotates. Portal's graphics-audit pass (`worker.mjs`) uses it to group a section's sentences and generate its `lower_third` label deterministically — see portal's `CLAUDE.md`.
 
-For graphic sentences, the agent sets `content_track: "graphic"`, `graphic_type`, `duration`, `variables`, and leaves `text: ""`. Graphic sentences must **not** appear in `video_script`.
+**Graphics are always narrated ("Pattern 2").** `content_track: "graphic"` is **no longer supported** — `validate_job.py` hard-errors on it, as it does on any broll/named sentence with empty `text`. A graphic is a normal narrated `"broll"`/`"named"` sentence with `graphic_type` (`lower_third` | `infographic` | `list`) and `variables` added — and those fields are set by **portal's graphics-audit pass**, never by the enrichment agent (AGENT_GUIDE.md explicitly forbids the agent from setting `graphic_type`, `variables`, or `visual_effect`).
 
 Full spec: `AGENT_GUIDE.md`.
 
@@ -207,26 +208,25 @@ Full spec: `AGENT_GUIDE.md`.
 | `unsplash_api_keys` | Image fallback |
 | `serper_api_keys` | Google Images for `content_track: "named"` |
 | `[whisper]` | `model_size`, `device`, `compute_type` |
-| `[app].max_image_ratio` | Soft cap on image clip fraction (default 0.25) |
+| `[app].max_image_ratio` | Soft cap on image clip fraction (code fallback 1.0 = uncapped; portal always writes the user's choice into `job.max_image_ratio`, which wins) |
 
 ---
 
 ## Testing
 
-No automated test suite. Manual test jobs live in `storage/tasks/`:
-
-| Job | Tests |
-|---|---|
-| `test-zoom-fadeout/` | Ken Burns on image sentences (sentences 1, 2, 4 have `media_type: "image"`) |
-| `test-graphic/` | Revideo lower_third integration — first sentence has `graphic_type: "lower_third"` |
-
-Quick test workflow:
-
 ```bash
-# Delete previous output so cli.py produces fresh files
-rm -rf storage/tasks/test-graphic/temp storage/tasks/test-graphic/final.mp4 storage/tasks/test-graphic/audio.mp3
-venv/bin/python cli.py --job storage/tasks/test-graphic/job.json
+make test               # unit tests (pytest, ~1s, no network): slot planning,
+                        # query ladder, validate_job.py gate, scorer lazy-load races,
+                        # media fetch circuit breakers (host blocks / provider cooldowns)
+make validate-fixtures  # run validate_job.py over the committed fixture jobs
+make smoke              # end-to-end pipeline on tests/fixtures/smoke-basic.job.json
+                        # (needs network: TTS + stock APIs; SKIP_WHISPER=1 REVIDEO_ENABLED=0)
+make smoke-graphics     # same on the named-track + narrated-graphics fixture (Revideo on)
 ```
+
+Unit tests live in `tests/`; committed fixture jobs in `tests/fixtures/` (safe from portal's clean-slate, which only wipes `storage/tasks/`). The smoke targets copy a fixture into `storage/tasks/<name>/` and run `cli.py` on it. Fixture jobs have scaffold-quality `visual_concepts` (fine for pipeline plumbing tests, not for footage-quality checks) and are short enough to trip a few benign validator warnings (hook-zone rules assume 40+ sentence jobs).
+
+For an ad-hoc job from arbitrary text, `scripts/sentence_prep.py --script <txt> --out storage/tasks/<t>/job.json --title <t>` still works as before.
 
 Test Revideo standalone (no pipeline):
 
@@ -259,7 +259,7 @@ first, or call it directly as `~/.npm-global/bin/pm2 <command>`.
 - **Python 3.11+**, venv at `venv/`
 - **FFmpeg** on system PATH (or set `ffmpeg_path` in `config.toml`)
 - **Node.js 22+** — already present (portal-worker uses it); no new install needed
-- **Revideo** — installed in `/home/deploy/revideo-worker/node_modules/`; Puppeteer's Chromium cached at `~/.cache/puppeteer/`
+- **Revideo** — installed in `revideo-worker/node_modules/` (inside this repo); Puppeteer's Chromium cached at `~/.cache/puppeteer/`
 - **Kokoro ONNX TTS** — optional, lives at `/home/deploy/kokoro-onnx/`, separate venv at `kokoro-venv/`
 - **CLIP model** — lazy-loaded on first relevance check; cached in `~/.cache/`
 - **NudeNet ONNX** — downloaded on first NSFW check; cached in `~/.cache/`
@@ -269,7 +269,7 @@ first, or call it directly as `~/.npm-global/bin/pm2 <command>`.
 ## Common Gotchas
 
 - `VideoAspect.to_resolution()` returns `(width, height)` — not `.width`/`.height` attributes
-- Graphic sentences must be absent from `video_script` (TTS only narrates that field)
+- Every sentence must have non-empty `text` — an unmatched sentence gets a degenerate Whisper span at the end of the audio, which collapses every later sentence's planned slot (`validate_job.py` hard-errors on this, and on the legacy `content_track: "graphic"`)
 - `zoompan` z values must be ≥ 1.0 — values < 1 produce negative x-offset → garbage output
 - `combine_videos()` expects all clips to be H.264 MP4 at target resolution and 30 fps
 - Revideo `renderVideo()` Puppeteer args go inside `settings.puppeteer.args`, not at top level

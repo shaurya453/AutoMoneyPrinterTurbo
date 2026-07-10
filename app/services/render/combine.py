@@ -32,6 +32,7 @@ from ._common import (
     close_clip,
     delete_files,
     fps,
+    probe_concat_compliance,
 )
 from .ken_burns import (
     _resize_clip_to_aspect,
@@ -101,16 +102,21 @@ def concat_video_clips_with_crossfade(
         inputs += ["-i", f]
 
     # Build a chained xfade filter: [0:v][1:v]xfade=...:offset=O1[v1];[v1][2:v]xfade=...:offset=O2[v2];...
+    # Each input goes through settb=AVTB first — xfade hard-errors when its two
+    # inputs carry different timebases (e.g. a stream-copied source clip at
+    # 1/90000 next to a freshly encoded one at 1/15360).
     n = len(clip_files)
     filter_parts = []
+    for i in range(n):
+        filter_parts.append(f"[{i}:v]settb=AVTB[t{i}]")
     offset = 0.0
-    prev_label = "[0:v]"
+    prev_label = "[t0]"
     for i in range(1, n):
         offset += clip_durations[i - 1] - cf
         offset = max(0.0, offset)
         label_out = f"[v{i}]" if i < n - 1 else "[vout]"
         filter_parts.append(
-            f"{prev_label}[{i}:v]xfade=transition=fade"
+            f"{prev_label}[t{i}]xfade=transition=fade"
             f":duration={cf:.4f}:offset={offset:.4f}{label_out}"
         )
         prev_label = label_out
@@ -120,6 +126,7 @@ def concat_video_clips_with_crossfade(
         *inputs,
         "-filter_complex", ";".join(filter_parts),
         "-map", "[vout]",
+        "-an",
         "-c:v", codec,
         *_fast_preset_args(codec),
         "-threads", str(threads or os.cpu_count() or 4),
@@ -163,6 +170,7 @@ def concat_video_clips_with_ffmpeg(
             "0",
             "-i",
             concat_list_file,
+            "-an",
             "-c:v",
             codec,
             *_fast_preset_args(codec),
@@ -251,6 +259,7 @@ def combine_videos(
     processed_clips = []
     subclipped_items = []
     video_duration = 0
+    n_stream_copied = 0
     for video_path in video_paths:
         clip = _open_video_clip_quietly(video_path)
         clip_duration = clip.duration
@@ -332,43 +341,83 @@ def combine_videos(
 
         try:
             if transition_func is None:
-                # FFmpeg-direct path: bypasses MoviePy's ffmpeg-pipe reader which
-                # can produce a black first frame during decoder initialization.
                 clip_file = f"{output_dir}/temp-clip-{i+1}.mp4"
-                codec = _get_configured_video_codec()
-                if clip_w != video_width or clip_h != video_height:
-                    _scale = max(video_width / clip_w, video_height / clip_h)
-                    _sw = int(round(clip_w * _scale / 2)) * 2
-                    _sh = int(round(clip_h * _scale / 2)) * 2
-                    _cx = (_sw - video_width) // 2
-                    _cy = (_sh - video_height) // 2
-                    vf = (f"scale={_sw}:{_sh}:flags=lanczos,"
-                          f"crop={video_width}:{video_height}:{_cx}:{_cy},"
-                          f"fps={fps}")
-                else:
-                    vf = f"fps={fps}"
-                ff_cmd = [
-                    utils.get_ffmpeg_binary(), "-y",
-                    "-ss", str(src_start), "-i", subclipped_item.file_path,
-                    "-t", f"{raw_dur:.6f}",
-                    "-vf", vf,
-                    "-c:v", codec, *_fast_preset_args(codec),
-                    "-pix_fmt", "yuv420p",
-                    "-threads", str(threads or os.cpu_count() or 4),
-                    "-an", clip_file,
-                ]
-                result = subprocess.run(ff_cmd, capture_output=True, text=True, timeout=300)
-                if result.returncode != 0:
-                    logger.error(
-                        f"FFmpeg direct clip failed (skipping clip): "
-                        f"{result.stderr[-300:]}"
-                    )
-                    if os.path.exists(clip_file):
-                        os.remove(clip_file)
-                    clip_file = None
-                    continue
 
-                clip_duration_saved = raw_dur
+                # Stream-copy fast path: when the whole source file is used
+                # untrimmed (src_start=0, snap didn't shorten it beyond frame
+                # noise) and it is already at target spec, remux it instead of
+                # re-encoding a visually identical temp clip — milliseconds vs
+                # seconds, and no extra generation loss (the concat re-encodes
+                # once anyway). The remux still strips audio and pins the mp4
+                # track timescale so the temp clips stay layout-uniform for
+                # xfade/list-file concat (mixed timebases break xfade; mixed
+                # audio layouts break the concat demuxer).
+                copied = False
+                if src_start == 0 and raw_dur >= (src_end - src_start) - 0.02:
+                    probed_dur = probe_concat_compliance(
+                        subclipped_item.file_path, video_width, video_height
+                    )
+                    if probed_dur and probed_dur >= 0.1:
+                        cp_cmd = [
+                            utils.get_ffmpeg_binary(), "-y",
+                            "-i", subclipped_item.file_path,
+                            "-c:v", "copy", "-an",
+                            # 512 * fps — matches the mp4 muxer's default
+                            # timescale for the encoded sibling clips.
+                            "-video_track_timescale", str(512 * fps),
+                            clip_file,
+                        ]
+                        cp_res = subprocess.run(
+                            cp_cmd, capture_output=True, text=True, timeout=120
+                        )
+                        if cp_res.returncode == 0 and os.path.exists(clip_file):
+                            copied = True
+                            clip_duration_saved = probed_dur
+                            n_stream_copied += 1
+                        else:
+                            logger.warning(
+                                "stream-copy remux failed, falling back to "
+                                f"re-encode: {(cp_res.stderr or '')[-200:]}"
+                            )
+
+                if not copied:
+                    # FFmpeg-direct path: bypasses MoviePy's ffmpeg-pipe reader which
+                    # can produce a black first frame during decoder initialization.
+                    codec = _get_configured_video_codec()
+                    if clip_w != video_width or clip_h != video_height:
+                        _scale = max(video_width / clip_w, video_height / clip_h)
+                        _sw = int(round(clip_w * _scale / 2)) * 2
+                        _sh = int(round(clip_h * _scale / 2)) * 2
+                        _cx = (_sw - video_width) // 2
+                        _cy = (_sh - video_height) // 2
+                        vf = (f"scale={_sw}:{_sh}:flags=lanczos,"
+                              f"crop={video_width}:{video_height}:{_cx}:{_cy},"
+                              f"fps={fps}")
+                    else:
+                        vf = f"fps={fps}"
+                    ff_cmd = [
+                        utils.get_ffmpeg_binary(), "-y",
+                        "-ss", str(src_start), "-i", subclipped_item.file_path,
+                        "-t", f"{raw_dur:.6f}",
+                        "-vf", vf,
+                        "-c:v", codec, *_fast_preset_args(codec),
+                        "-pix_fmt", "yuv420p",
+                        "-threads", str(threads or os.cpu_count() or 4),
+                        "-an", clip_file,
+                    ]
+                    result = subprocess.run(ff_cmd, capture_output=True, text=True, timeout=300)
+                    if result.returncode != 0:
+                        logger.error(
+                            f"FFmpeg direct clip failed (skipping clip): "
+                            f"{result.stderr[-300:]}"
+                        )
+                        if os.path.exists(clip_file):
+                            os.remove(clip_file)
+                        clip_file = None
+                        continue
+
+                    clip_duration_saved = raw_dur
+
                 if clip_duration_saved < 0.1:
                     logger.warning(
                         f"skipping degenerate clip ({clip_duration_saved:.3f}s): "
@@ -454,7 +503,10 @@ def combine_videos(
         return combined_video_path
 
     clip_files = [clip.file_path for clip in processed_clips]
-    logger.info(f"concatenating {len(clip_files)} clips with ffmpeg")
+    logger.info(
+        f"concatenating {len(clip_files)} clips with ffmpeg "
+        f"({n_stream_copied} stream-copied without re-encode)"
+    )
     if transition_value == VideoTransitionMode.crossfade.value:
         clip_durations_list = [clip.duration for clip in processed_clips]
         concat_video_clips_with_crossfade(

@@ -56,6 +56,10 @@ def minimax_tts(
     group_id = str(config.app.get("minimax_group_id", ""))
     model    = str(config.app.get("minimax_model", "speech-02-hd"))
     speed    = 1.0  # hardcoded — not controlled by AI/voice_rate
+    if voice_rate and abs(float(voice_rate) - 1.0) > 1e-9:
+        logger.warning(
+            f"minimax_tts ignores voice_rate ({voice_rate}) — speed is hardcoded to 1.0"
+        )
 
     if not api_key or not group_id:
         logger.error("minimax_tts: minimax_api_key or minimax_group_id not set in config")

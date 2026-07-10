@@ -57,14 +57,18 @@ def _get_sentence_timestamps(
     try:
         all_words = future.result(timeout=timeout_seconds)
     except concurrent.futures.TimeoutError:
-        executor.shutdown(wait=False)
         raise TimeoutError(f"whisper transcription exceeded {timeout_seconds:g}s")
-    executor.shutdown(wait=False)
+    finally:
+        executor.shutdown(wait=False)
 
     logger.info(f"whisper found {len(all_words)} words across {len(sentences)} sentences")
 
     if not all_words:
-        return _uniform_timestamps(sentences, 0.0), []
+        # Fail loudly: returning uniform timings over 0.0s here would give the
+        # caller all-zero spans and a degenerate clip plan. The caller
+        # (_orchestrate.start) catches this and falls back to
+        # _uniform_timestamps with the REAL audio duration.
+        raise RuntimeError("whisper transcription produced zero words")
 
     # Build expected token sequence: (normalized_token, sentence_idx)
     expected_tokens: List[tuple] = []
@@ -105,14 +109,28 @@ def _get_sentence_timestamps(
         else:
             sentence_spans[s_idx][1] = w_end
 
-    last_end = all_words[-1][2]
+    # Sentences whose tokens never matched (e.g. heavy transcription mangling)
+    # are placed as zero-duration spans at the current timeline cursor — i.e.
+    # exactly where they belong between their neighbours. The old fallback
+    # parked them at the END of the audio, which made the planner's monotonic
+    # cursor jump to the audio end and collapse every later sentence's slot.
     results: List[Tuple[dict, float, float]] = []
+    cursor = 0.0
+    unmatched = 0
     for s_idx, sent in enumerate(sentences):
         if s_idx in sentence_spans:
             start, end = sentence_spans[s_idx]
+            end = max(end, start)
             results.append((sent, start, end))
+            cursor = end
         else:
-            results.append((sent, last_end, last_end + 2.0))
+            unmatched += 1
+            results.append((sent, cursor, cursor))
+    if unmatched:
+        logger.warning(
+            f"whisper alignment: {unmatched} sentence(s) had no matching tokens — "
+            "placed as zero-duration spans at their timeline position"
+        )
 
     return results, all_words
 

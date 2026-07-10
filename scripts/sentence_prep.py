@@ -220,7 +220,6 @@ def main():
         "voice_name": args.voice,
         "voice_rate": args.rate,
         "video_aspect": args.aspect,
-        "video_clip_duration": 5,
         "subtitle_enabled": True,
         "subtitle_highlight": False,
         "font_name": "Inter_18pt-SemiBold.ttf",
