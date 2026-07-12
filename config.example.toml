@@ -49,7 +49,19 @@ serper_api_keys = []
 # Provider order for content_track="named" sentences. "serper" (Google
 # Images) is first -- most likely to have a real photo of a specific named
 # product/person/place/event that stock-photo libraries don't carry.
-named_track_image_source_order = ["serper", "duckduckgo", "pexels", "pixabay", "unsplash", "wikimedia"]
+# wikimedia/openverse rank ahead of stock libraries here: stock rarely carries
+# named entities or evidence imagery (diagrams, schematics), open archives often do.
+named_track_image_source_order = ["serper", "duckduckgo", "wikimedia", "openverse", "pexels", "pixabay", "unsplash"]
+
+# ---------------------------------------------------------------------------
+# Openverse (openly licensed images: Flickr Commons, Wikimedia, museums) —
+# best free source for diagrams/schematics/evidence imagery. Anonymous access
+# is Cloudflare-blocked from server IPs, so register a free API client at
+# https://api.openverse.org/v1/#tag/auth and paste the credentials here.
+# Without them the provider silently sits on cooldown (no errors, no results).
+# ---------------------------------------------------------------------------
+openverse_client_id = ""
+openverse_client_secret = ""
 
 # ---------------------------------------------------------------------------
 # Footage/image mix and relevance filtering
@@ -78,6 +90,24 @@ relevance_filter_enabled = true
 # replaces it. STARTING POINT ONLY -- calibrate using RELEVANCE_LOG_ONLY=1
 # (see AGENT_GUIDE.md) before relying on this for a real run.
 relevance_margin = 0.02
+
+# Floor for the below-margin "best available" image fallback (the last resort
+# when NO candidate clears relevance_margin). Applies only to broll sentences
+# at low/medium criticality — named-track and high/critical sentences never
+# below-margin-accept; they return empty so the rescue ladder (entity cousins
+# → gapfill terms → placeholder) fills the slot with something on-topic
+# instead of a known-weak match.
+image_fallback_min_score = 0.20
+
+# Web-image screening extensions (merged into the built-in lists in
+# app/services/media/images.py). Blocked domains are hard-skipped (social
+# crawler proxies, video-thumb CDNs); penalized domains (retail rehosts like
+# Amazon/Pinterest) only sort last; junk keywords drop results whose title
+# marks non-photographic content (cartoon/clipart/vector/...) unless the
+# search query itself asks for it.
+image_blocked_domains_extra = []
+image_penalized_domains_extra = []
+image_junk_keywords_extra = []
 
 # Number of evenly-spaced frames sampled from each video candidate for
 # relevance scoring, and how those per-frame scores are combined.
@@ -178,6 +208,14 @@ vlm_model = "gpt-4.1-nano"
 # Reject a candidate if the model returns a relevance score below this threshold
 # (0.0–1.0). 0.55 means "must be a reasonable match" without being too strict.
 vlm_threshold = 0.55
+
+# Looser VLM gate for stock-VIDEO candidates on generic broll sentences (no
+# must_show, low/medium criticality). The scoring prompt caps generic footage
+# at <=0.4 whenever the visual intent names anything specific, which under a
+# brand-heavy topic blocks ALL stock video at vlm_threshold — while images
+# pass the separate 0.30 image gate (vlm_image_threshold). 0.35 restores
+# symmetry; named/must_show/high-criticality sentences keep vlm_threshold.
+vlm_threshold_broll = 0.35
 
 # Comparative pooling: instead of claiming the first image candidate that
 # individually passes NSFW + the vlm_threshold check above, gather several

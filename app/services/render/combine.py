@@ -61,6 +61,22 @@ _SHUFFLE_TRANSITIONS = [
 ]
 
 
+def _cumulative_snap(planned_cum: float, emitted_cum: float, planned_dur: float) -> float:
+    """Frame-grid duration target for the next clip.
+
+    Snaps the clip's planned cumulative END (relative to the footage actually
+    emitted so far) to the frame grid, rather than snapping the clip's own
+    duration in isolation. Per-clip snapping leaves an independent ±half-frame
+    error on every clip that only ever trims — measured −0.73s over a 226-clip
+    job, a monotonically growing early-drift of the visuals against the VO.
+    Cumulative snapping keeps |planned − emitted| under one frame at every
+    position, and a source file that comes up short self-corrects: its
+    shortfall inflates the next clip's target.
+    """
+    n_frames = max(1, round((planned_cum + planned_dur - emitted_cum) * fps))
+    return n_frames / fps
+
+
 def concat_video_clips_with_crossfade(
     clip_files: List[str],
     clip_durations: List[float],
@@ -258,7 +274,8 @@ def combine_videos(
 
     processed_clips = []
     subclipped_items = []
-    video_duration = 0
+    video_duration = 0  # sum of emitted clip durations (cumulative-snap baseline)
+    planned_cum = 0.0  # sum of planned durations consumed so far
     n_stream_copied = 0
     for video_path in video_paths:
         clip = _open_video_clip_quietly(video_path)
@@ -329,12 +346,14 @@ def combine_videos(
         if transition_func == "shuffle":
             transition_func = rng.choice(_SHUFFLE_TRANSITIONS)
 
-        # Compute snap duration (frame-aligned planned duration) for both paths.
+        # Compute snap duration (cumulative frame-aligned target) for both paths.
+        # planned_cum advances even when a clip is later skipped, so the
+        # deficit is visible to every subsequent snap target.
         raw_dur = src_end - src_start
         if planned_clip_durations and i < len(planned_clip_durations):
             _planned = planned_clip_durations[i]
-            _n_frames = max(1, round(_planned * fps))
-            _snap_dur = _n_frames / fps
+            _snap_dur = _cumulative_snap(planned_cum, video_duration, _planned)
+            planned_cum += _planned
             if raw_dur > _snap_dur + 0.001:
                 raw_dur = _snap_dur
         raw_dur = max(0.1, raw_dur)

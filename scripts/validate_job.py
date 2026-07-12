@@ -16,7 +16,11 @@ Hard errors (exit 1):
 Warnings (exit 0, logged by worker):
   - video_topic missing
   - video_topic shares no words with video_title (likely a section theme)
+  - named_entity video_topic shares no words with any entity_name (phantom
+    anchor, e.g. a retailer name used as the topic)
   - video_type not thematic/named_entity
+  - Duplicate concept within one sentence's visual_concepts
+  - One value repeated across too many sentences' visual_concepts[1] or [2]
   - video_type='thematic' with 3+ distinct entity_names (should be named_entity)
   - lower_third used on a sentence that is not content_track='named'
   - graphic sentence missing variables dict (would render blank)
@@ -50,6 +54,26 @@ _VALID_VISUAL_EFFECTS = frozenset({
     "threat", "cold", "warmth", "mystery", "sepia",
     "tech", "hacker_tech", "dream", "noir", "nature", "revelation",
 })
+
+_STOPWORDS = {
+    "a", "an", "and", "as", "at", "but", "by", "for", "from",
+    "how", "in", "is", "it", "of", "on", "or", "our", "so",
+    "than", "that", "the", "this", "to", "we", "what", "when",
+    "why", "with", "you", "your", "not", "one", "only",
+}
+
+
+def _tokens(s: str) -> set:
+    """Meaningful lowercase words of a phrase (stopwords stripped)."""
+    return {
+        w.strip(".,!?:;\"'()[]-–—").lower()
+        for w in (s or "").split()
+    } - _STOPWORDS - {""}
+
+
+def _stems(tokens: set) -> set:
+    """Tokens plus naive singular forms, so 'handbags' matches 'handbag'."""
+    return tokens | {t.rstrip("s") for t in tokens}
 
 
 def main():
@@ -96,25 +120,12 @@ def main():
         # the entire video.
         title = (data.get("video_title") or "").strip()
         if title:
-            _STOP = {
-                "a", "an", "and", "as", "at", "but", "by", "for", "from",
-                "how", "in", "is", "it", "of", "on", "or", "our", "so",
-                "than", "that", "the", "this", "to", "we", "what", "when",
-                "why", "with", "you", "your", "not", "one", "only",
-            }
-
-            def _tokens(s):
-                return {
-                    w.strip(".,!?:;\"'()[]-–—").lower()
-                    for w in s.split()
-                } - _STOP - {""}
-
             topic_tokens = _tokens(video_topic)
             title_tokens = _tokens(title)
             # Also match on simple singular/plural stems so
             # "sunscreens" (title) matches "sunscreen" (topic).
-            title_stems = title_tokens | {t.rstrip("s") for t in title_tokens}
-            topic_stems = topic_tokens | {t.rstrip("s") for t in topic_tokens}
+            title_stems = _stems(title_tokens)
+            topic_stems = _stems(topic_tokens)
             if topic_tokens and title_tokens and not (topic_stems & title_stems):
                 warnings.append(
                     f"video_topic {video_topic!r} shares no words with the title "
@@ -138,6 +149,7 @@ def main():
 
     seen_captions: dict = {}      # caption → first sentence index
     concept0_counts: dict = {}    # concept[0] → count
+    concept_slot_counts: dict = {1: {}, 2: {}}  # slot → value → count (broad-slot collapse)
     enrichable: list = []         # (sentence_index, concept0) for non-graphic sentences
     non_lt_graphic_indices: list = []  # sentence indices with infographic/list graphic_type
     named_entities: set = set()   # distinct entity_name values on named sentences
@@ -194,6 +206,16 @@ def main():
             c0 = vc[0]
             enrichable.append((i, c0))
             concept0_counts[c0] = concept0_counts.get(c0, 0) + 1
+            for slot in (1, 2):
+                if len(vc) > slot and isinstance(vc[slot], str) and vc[slot].strip():
+                    val = vc[slot].strip()
+                    concept_slot_counts[slot][val] = concept_slot_counts[slot].get(val, 0) + 1
+            _vc_strs = [c for c in vc if isinstance(c, str)]
+            if len(_vc_strs) != len(set(_vc_strs)):
+                warnings.append(
+                    f"sentence {i}: duplicate concept within visual_concepts {vc!r} — "
+                    "a repeated concept wastes a search-ladder rung; make each slot distinct"
+                )
 
         caption = (sent.get("visual_caption") or "").strip()
         if not caption and track in ("broll", "named"):
@@ -209,6 +231,29 @@ def main():
         effect = (sent.get("visual_effect") or "").strip()
         if effect and effect not in _VALID_VISUAL_EFFECTS:
             warnings.append(f"sentence {i}: unknown visual_effect={effect!r}")
+
+        crit = str(sent.get("visual_criticality") or "").strip().lower()
+        if crit and crit not in ("low", "medium", "high", "critical"):
+            warnings.append(
+                f"sentence {i}: unknown visual_criticality={crit!r} "
+                "(expected low|medium|high|critical) — treated as 'medium'"
+            )
+
+        if sent.get("standalone_subject"):
+            # Referent-swap sentences drop the video_topic anchor from search
+            # and scoring — without the named track + must_show they lose all
+            # subject grounding (AGENT_GUIDE: standalone_subject).
+            if track != "named":
+                warnings.append(
+                    f"sentence {i}: standalone_subject=true but content_track is "
+                    f"'{track}' — referent-swap sentences should use the named track "
+                    "so the entity itself is Serper-searchable"
+                )
+            if not (sent.get("must_show") or []):
+                warnings.append(
+                    f"sentence {i}: standalone_subject=true but must_show is empty — "
+                    "name the standalone entity so the VLM can verify it appears"
+                )
 
         if track == "named":
             entity = (sent.get("entity_name") or "").strip()
@@ -281,6 +326,43 @@ def main():
             "entities are present — reviews/rankings naming 3+ products should "
             "use video_type='named_entity' (routes product sentences to Google "
             "Images and anchors ladders correctly)"
+        )
+
+    # ── Phantom topic anchor ─────────────────────────────────────────────────
+    # In a named_entity job, video_topic is appended to every search rung and
+    # to every CLIP/VLM prompt. A topic that shares no words with ANY of the
+    # job's entity_names is usually not a searchable product subject at all —
+    # the classic case is a retailer roundup ("Marshall handbags" for a video
+    # about Kate Spade / Fossil / Brahmin bags sold at Marshalls), where the
+    # retailer-as-topic poisons search results and rejects good candidates.
+    if data.get("video_type") == "named_entity" and video_topic and named_entities:
+        topic_stems = _stems(_tokens(video_topic))
+        entity_stems = set()
+        for _e in named_entities:
+            entity_stems |= _stems(_tokens(_e))
+        if topic_stems and entity_stems and not (topic_stems & entity_stems):
+            warnings.append(
+                f"video_topic {video_topic!r} shares no words with any entity_name "
+                f"({len(named_entities)} distinct) — the topic anchors every search "
+                "and relevance prompt, so it must be the product category the "
+                "entities belong to (e.g. 'designer leather handbags'), never a "
+                "retailer/store name; put the retailer only in gapfill_terms or "
+                "broll scene concepts"
+            )
+
+    # ── Criticality inflation ────────────────────────────────────────────────
+    # The effort dial is zero-sum: high/critical raise per-clip search budgets,
+    # candidate counts, and VLM comparisons. Marking everything up just makes
+    # the whole fetch phase slow without improving any single clip.
+    _elevated = sum(
+        1 for sent in sentences
+        if str(sent.get("visual_criticality") or "").strip().lower() in ("high", "critical")
+    )
+    if sentences and _elevated / len(sentences) > 0.30:
+        warnings.append(
+            f"{_elevated}/{len(sentences)} sentences are visual_criticality high/critical "
+            "(>30%) — reserve elevated criticality for the few sentences where a wrong "
+            "visual is actually noticeable (AGENT_GUIDE: visual_criticality)"
         )
 
     # ── Effect aggregate checks ──────────────────────────────────────────────
@@ -365,6 +447,25 @@ def main():
                 f"concept variety low: {unique_c0} unique concept[0] values for {n} enriched "
                 f"sentences (AGENT_GUIDE minimum: {required})"
             )
+
+    # Rule: slots 1–2 collapse — the broad fallback slots may legitimately
+    # repeat more than concept[0], but one value shared across a large chunk
+    # of the video means every fallback search returns the same images (mass
+    # dedup rejections, starved rescue variety).
+    if n:
+        slot_cap = max(6, math.ceil(n / 6))
+        for slot in (1, 2):
+            collapsed = [
+                (v, cnt) for v, cnt in concept_slot_counts[slot].items() if cnt > slot_cap
+            ]
+            if collapsed:
+                detail = ", ".join(f"{v!r}×{cnt}" for v, cnt in sorted(
+                    collapsed, key=lambda p: -p[1])[:4])
+                warnings.append(
+                    f"visual_concepts[{slot}] collapse (max {slot_cap} repeats "
+                    f"for {n} sentences): {detail} — vary the broad fallback "
+                    "concepts too, or fallback searches all return the same images"
+                )
 
     if warnings:
         print(f"VALIDATION_WARNINGS: {'; '.join(warnings)}", flush=True)

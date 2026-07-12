@@ -1,5 +1,7 @@
 """Whisper sentence-timestamp alignment helpers."""
 import concurrent.futures
+import json
+import os
 import re
 from difflib import SequenceMatcher
 from typing import List, Optional, Tuple
@@ -144,3 +146,50 @@ def _uniform_timestamps(
         (s, i * per_sent, (i + 1) * per_sent)
         for i, s in enumerate(sentences)
     ]
+
+
+def _save_timings(path: str, timings: List[Tuple[dict, float, float]]) -> bool:
+    """Persist per-sentence [t_start, t_end] whisper spans as JSON.
+
+    Lets SKIP_WHISPER=1 re-runs of the same task reuse real alignment instead
+    of falling back to uniform text-length timestamps (measured 3–50s off on a
+    real job — any A/V-sync evaluation on such a re-run is meaningless).
+    Non-fatal: returns False on any write error.
+    """
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump([[t_start, t_end] for _, t_start, t_end in timings], f)
+        return True
+    except Exception as exc:
+        logger.warning(f"could not persist whisper timings to {path}: {exc}")
+        return False
+
+
+def _load_timings(
+    path: str, sentences: list
+) -> Optional[List[Tuple[dict, float, float]]]:
+    """Load spans persisted by _save_timings and re-attach the sentence dicts.
+
+    Returns None (caller falls back to uniform) when the file is missing,
+    malformed, or its span count doesn't match the current sentence list —
+    a count mismatch means the job.json was re-enriched/split since the
+    timings were captured, so they no longer line up.
+    """
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            spans = json.load(f)
+        if len(spans) != len(sentences):
+            logger.warning(
+                f"persisted timings at {path} cover {len(spans)} sentences, "
+                f"job has {len(sentences)} — ignoring them"
+            )
+            return None
+        return [
+            (sent, float(start), float(end))
+            for sent, (start, end) in zip(sentences, spans)
+        ]
+    except Exception as exc:
+        logger.warning(f"could not load persisted whisper timings from {path}: {exc}")
+        return None

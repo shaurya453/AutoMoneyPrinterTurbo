@@ -207,6 +207,7 @@ Full spec: `AGENT_GUIDE.md`.
 | `pixabay_api_keys` | Stock video + photos + BGM |
 | `unsplash_api_keys` | Image fallback |
 | `serper_api_keys` | Google Images for `content_track: "named"` |
+| `openverse_client_id` / `_secret` | Openverse (CC-licensed diagrams/evidence imagery); provider stays on cooldown without them (Cloudflare blocks anonymous server IPs) |
 | `[whisper]` | `model_size`, `device`, `compute_type` |
 | `[app].max_image_ratio` | Soft cap on image clip fraction (code fallback 1.0 = uncapped; portal always writes the user's choice into `job.max_image_ratio`, which wins) |
 

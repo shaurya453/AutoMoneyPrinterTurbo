@@ -39,6 +39,69 @@ _EFFECT_OVERLAYS: dict[str, dict] = {
 
 _OVERLAY_FADE_DUR = 0.5   # seconds — fade-in at start, fade-out at end
 
+
+def _build_overlay_filter(
+    blend_mode: str,
+    opacity: float,
+    width: int,
+    height: int,
+    accent: float,
+    fade: float,
+    clip_dur: float,
+) -> str:
+    """Build the filter_complex for blending a motion overlay onto a clip.
+
+    Keep everything in gbrp (planar RGB) so the blend operates in RGB colour
+    space, matching what Filmora and other NLEs do. Blending in YUV applies
+    the screen/multiply formula to offset chroma channels and introduces a
+    colour cast (typically purple/teal).
+
+    The overlay's fades and identity pad must use the blend's IDENTITY color:
+    screen(clip, black) = clip but multiply(clip, black) = black — fading a
+    multiply overlay (sepia grain) to black dragged the whole frame to black
+    at both overlay edges, after which the white pad snapped it back.
+    """
+    identity = "white" if blend_mode == "multiply" else "black"
+    fade_out_start = max(0.0, accent - fade)
+
+    chains: list[str] = []
+
+    # Scale, trim to accent duration, and fade in/out (to the identity color).
+    chains.append(
+        f"[0:v]scale={width}:{height},format=gbrp,"
+        f"trim=0:{accent:.6f},setpts=PTS-STARTPTS,"
+        f"fade=t=in:st=0:d={fade:.3f}:color={identity},"
+        f"fade=t=out:st={fade_out_start:.6f}:d={fade:.3f}:color={identity}"
+        f"[_ov_trimmed]"
+    )
+
+    # Pad the remainder of the clip with the identity color so the blend is a
+    # mathematical identity after the accent window ends.
+    if clip_dur > accent:
+        pad_dur = clip_dur - accent
+        chains.append(
+            f"color=c={identity}:s={width}x{height}:r=30:d={pad_dur:.6f},"
+            f"format=gbrp[_ov_pad]"
+        )
+        chains.append(
+            f"[_ov_trimmed][_ov_pad]concat=n=2:v=1:a=0,setpts=PTS-STARTPTS[_ov_final]"
+        )
+        ov_label = "_ov_final"
+    else:
+        ov_label = "_ov_trimmed"
+
+    # Blend and convert back to yuv420p for the encoder.
+    # Scale the clip to match the overlay — Pexels sometimes delivers non-standard
+    # resolutions (e.g. 2048×1080) that would cause the blend to fail with -22.
+    chains.append(f"[1:v]scale={width}:{height},format=gbrp[_clip]")
+    chains.append(
+        f"[_clip][{ov_label}]"
+        f"blend=all_mode={blend_mode}:all_opacity={opacity},"
+        f"format=yuv420p"
+        f"[out]"
+    )
+    return ";".join(chains)
+
 # Duration constants for lower_third compositing.
 _LT_ANIM_IN  = 0.40   # seconds — fade-in
 _LT_ANIM_OUT = 0.35   # seconds — fade-out
@@ -91,53 +154,10 @@ def apply_visual_effect(
     accent = min(ov_dur, clip_dur)
     # Clamp fade so it never exceeds 25% of the overlay window.
     fade   = min(_OVERLAY_FADE_DUR, accent / 4)
-    fade_out_start = max(0.0, accent - fade)
 
-    # ── Build filter_complex ────────────────────────────────────────────────
-    # Keep everything in gbrp (planar RGB) so the blend operates in RGB colour
-    # space, matching what Filmora and other NLEs do. Blending in YUV applies
-    # the screen/multiply formula to offset chroma channels and introduces a
-    # colour cast (typically purple/teal).
-    chains: list[str] = []
-
-    # Scale, trim to accent duration, and fade in/out.
-    chains.append(
-        f"[0:v]scale={width}:{height},format=gbrp,"
-        f"trim=0:{accent:.6f},setpts=PTS-STARTPTS,"
-        f"fade=t=in:st=0:d={fade:.3f},"
-        f"fade=t=out:st={fade_out_start:.6f}:d={fade:.3f}"
-        f"[_ov_trimmed]"
+    filter_complex = _build_overlay_filter(
+        blend_mode, opacity, width, height, accent, fade, clip_dur
     )
-
-    # Pad the remainder of the clip with a neutral color so the blend is a
-    # mathematical identity after the accent window ends.
-    if clip_dur > accent:
-        pad_dur   = clip_dur - accent
-        # screen(clip, black)=clip; multiply(clip, white)=clip
-        pad_color = "white" if blend_mode == "multiply" else "black"
-        chains.append(
-            f"color=c={pad_color}:s={width}x{height}:r=30:d={pad_dur:.6f},"
-            f"format=gbrp[_ov_pad]"
-        )
-        chains.append(
-            f"[_ov_trimmed][_ov_pad]concat=n=2:v=1:a=0,setpts=PTS-STARTPTS[_ov_final]"
-        )
-        ov_label = "_ov_final"
-    else:
-        ov_label = "_ov_trimmed"
-
-    # Blend and convert back to yuv420p for the encoder.
-    # Scale the clip to match the overlay — Pexels sometimes delivers non-standard
-    # resolutions (e.g. 2048×1080) that would cause the blend to fail with -22.
-    chains.append(f"[1:v]scale={width}:{height},format=gbrp[_clip]")
-    chains.append(
-        f"[_clip][{ov_label}]"
-        f"blend=all_mode={blend_mode}:all_opacity={opacity},"
-        f"format=yuv420p"
-        f"[out]"
-    )
-
-    filter_complex = ";".join(chains)
 
     codec = _get_configured_video_codec()
     cmd = [

@@ -23,12 +23,21 @@ from app.services import media as material
 from app.services import render as video
 from app.services import tts as voice
 from app.services.scoring import relevance, vlm
-from app.services.pipeline._whisper import _get_sentence_timestamps, _uniform_timestamps
+from app.services.pipeline._whisper import (
+    _get_sentence_timestamps,
+    _load_timings,
+    _save_timings,
+    _uniform_timestamps,
+)
 from app.services.pipeline._planning import (
     _trim_clip, _get_visual_concepts, _build_query_ladder, _TRIM_BUFFER,
     plan_clip_slots, _CLIP_TARGET, _MIN_ANIM_DUR, _OUTRO_TAIL,
 )
-from app.services.pipeline._fetch import _fetch_clip, _ThreadSafeURLSet
+from app.services.pipeline._fetch import (
+    _fetch_clip,
+    _ThreadSafeURLSet,
+    criticality_budget_multiplier,
+)
 from app.services.pipeline._quality import write_quality_report
 from app.utils import subtitle, utils
 
@@ -78,6 +87,51 @@ def _timings_to_srt(timings: list, subtitle_path: str) -> None:
     if content:
         with open(subtitle_path, "w", encoding="utf-8") as f:
             f.write(content + "\n")
+
+
+# A clip tail whose mean luma is below this is treated as (near-)black —
+# a baked Ken Burns fade-out or a black placeholder.
+_DARK_TAIL_LUMA = 40.0
+
+
+def _tail_mean_luma(clip_path: str, tail_seconds: float = 0.1) -> Optional[float]:
+    """Mean Y (luma, 0–255) over the last `tail_seconds` of a clip.
+
+    The window is deliberately short (~3 frames): a baked fade-out only
+    reaches its darkest at the very end, and averaging over the whole fade
+    ramp would sit above any usable threshold.
+
+    Returns None when probing fails (caller should fail open to existing
+    behavior). One ffmpeg pass over a fraction of a second of video.
+    """
+    try:
+        probe = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=nk=1:nw=1", clip_path,
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        dur = float(probe.stdout.strip())
+        start = max(0.0, dur - tail_seconds)
+        r = subprocess.run(
+            [
+                utils.get_ffmpeg_binary(), "-v", "error",
+                "-ss", f"{start:.3f}", "-i", clip_path,
+                "-vf", "signalstats,metadata=print:key=lavfi.signalstats.YAVG:file=-",
+                "-f", "null", "-",
+            ],
+            capture_output=True, text=True, timeout=60,
+        )
+        vals = [
+            float(line.rsplit("=", 1)[1])
+            for line in r.stdout.splitlines()
+            if "YAVG" in line
+        ]
+        return sum(vals) / len(vals) if vals else None
+    except Exception:
+        return None
 
 
 def start(job_path: str) -> Optional[dict]:
@@ -177,12 +231,21 @@ def start(job_path: str) -> Optional[dict]:
     logger.info("aligning sentences with faster-whisper")
 
     word_timings: List[Tuple[str, float, float]] = []
+    timings_path = os.path.join(work_dir, "timings.json")
     if os.environ.get("SKIP_WHISPER") == "1":
-        logger.info("SKIP_WHISPER=1 → using uniform distribution for timings")
-        timings = _uniform_timestamps(sentences, audio_duration)
+        # Prefer timings persisted by a previous full run of this task —
+        # uniform text-length distribution is off by whole seconds against
+        # real speech, which desyncs every visual on a re-render.
+        timings = _load_timings(timings_path, sentences)
+        if timings:
+            logger.info("SKIP_WHISPER=1 → reusing persisted whisper timings (timings.json)")
+        else:
+            logger.info("SKIP_WHISPER=1 → using uniform distribution for timings")
+            timings = _uniform_timestamps(sentences, audio_duration)
     else:
         try:
             timings, word_timings = _get_sentence_timestamps(audio_file, sentences)
+            _save_timings(timings_path, timings)
         except Exception as exc:
             logger.warning(
                 f"whisper failed ({exc}), falling back to uniform distribution "
@@ -479,7 +542,9 @@ def start(job_path: str) -> Optional[dict]:
 
                 future = executor.submit(
                     _fetch_clip_with_budget,
-                    budget_seconds=clip_budget_seconds,
+                    # visual_criticality scales the per-clip search deadline:
+                    # low ×0.6, medium ×1.0, high ×1.25, critical ×1.5
+                    budget_seconds=clip_budget_seconds * criticality_budget_multiplier(sent),
                     sentence=sent,
                     sent_duration=clip_duration,
                     trim_buffer=trim_buffer,
@@ -537,6 +602,10 @@ def start(job_path: str) -> Optional[dict]:
             except Exception as exc:
                 logger.warning(f"clip {meta['clip_idx']}: fetch raised — {exc}")
                 fetched = None
+            # Stamp only after the fetch resolved: _fetch_*'s _record writes the
+            # whole report entry, so stamping earlier would race and be lost.
+            quality_report.setdefault(meta["clip_idx"], {})["sentence_idx"] = idx
+            quality_report[meta["clip_idx"]]["planned_duration"] = meta["clip_duration"]
 
             clip_duration = meta["clip_duration"]
 
@@ -622,6 +691,8 @@ def start(job_path: str) -> Optional[dict]:
                         )
                         quality_report.setdefault(meta["clip_idx"], {})["rescued"] = True
                         quality_report[meta["clip_idx"]]["rescue_attempts"] = _attempt + 1
+                        quality_report[meta["clip_idx"]]["sentence_idx"] = idx  # rescue _record rewrote the entry
+                        quality_report[meta["clip_idx"]]["planned_duration"] = meta["clip_duration"]
                         break
 
             # Consecutive-effect guard (deferred from Phase A where order was unknown).
@@ -1116,34 +1187,57 @@ def start(job_path: str) -> Optional[dict]:
         # Gap to fill: play the tail of the last clip in REVERSE so the outro
         # flows seamlessly from the last frame backwards — no visible loop seam,
         # and any Ken Burns animation continues moving through the fade-out.
+        # Exception: when the last clip already ENDS on (near-)black (a baked
+        # Ken Burns fade-out, or a black placeholder), reversing its tail
+        # plays that fade BACKWARDS — the image visibly re-brightens right
+        # before the final fade-out. Hold black instead: fade-to-black →
+        # black hold → final fade-out reads as one clean ending.
         outro_path = os.path.join(temp_dir, "outro.mp4")
         last_clip = ordered_clips[-1]
         try:
-            # Probe the last clip's duration so we only seek within valid range.
-            probe = subprocess.run(
-                [
-                    "ffprobe", "-v", "error",
-                    "-show_entries", "format=duration",
-                    "-of", "default=noprint_wrappers=1:nokey=1",
-                    last_clip,
-                ],
-                capture_output=True, text=True, timeout=30,
-            )
-            last_clip_dur = float(probe.stdout.strip() or "5.0")
-            # Seek to where we need to start reading backwards; clamp so we
-            # never seek past the clip's own start.
-            seek_back = min(needed_extra, last_clip_dur - 0.05)
-            seek_pos = max(0.0, last_clip_dur - seek_back)
-            subprocess.run(
-                [
-                    "ffmpeg", "-y", "-loglevel", "error",
-                    "-ss", f"{seek_pos:.3f}", "-i", last_clip,
-                    "-vf", "reverse",
-                    "-t", f"{needed_extra:.3f}",
-                    *_ENC, "-an", outro_path,
-                ],
-                check=True, capture_output=True, timeout=120,
-            )
+            _tail_luma = _tail_mean_luma(last_clip)
+            if _tail_luma is not None and _tail_luma < _DARK_TAIL_LUMA:
+                _ow, _oh = video_aspect.to_resolution()
+                subprocess.run(
+                    [
+                        "ffmpeg", "-y", "-loglevel", "error",
+                        "-f", "lavfi",
+                        "-i", f"color=c=black:s={_ow}x{_oh}:r=30",
+                        "-t", f"{needed_extra:.3f}",
+                        *_ENC, "-an", outro_path,
+                    ],
+                    check=True, capture_output=True, timeout=120,
+                )
+                logger.info(
+                    f"outro: last clip tail is dark (YAVG {_tail_luma:.0f}) — "
+                    f"holding black for {needed_extra:.2f}s instead of reversing"
+                )
+            else:
+                # Probe the last clip's duration so we only seek within valid range.
+                probe = subprocess.run(
+                    [
+                        "ffprobe", "-v", "error",
+                        "-show_entries", "format=duration",
+                        "-of", "default=noprint_wrappers=1:nokey=1",
+                        last_clip,
+                    ],
+                    capture_output=True, text=True, timeout=30,
+                )
+                last_clip_dur = float(probe.stdout.strip() or "5.0")
+                # Seek to where we need to start reading backwards; clamp so we
+                # never seek past the clip's own start.
+                seek_back = min(needed_extra, last_clip_dur - 0.05)
+                seek_pos = max(0.0, last_clip_dur - seek_back)
+                subprocess.run(
+                    [
+                        "ffmpeg", "-y", "-loglevel", "error",
+                        "-ss", f"{seek_pos:.3f}", "-i", last_clip,
+                        "-vf", "reverse",
+                        "-t", f"{needed_extra:.3f}",
+                        *_ENC, "-an", outro_path,
+                    ],
+                    check=True, capture_output=True, timeout=120,
+                )
             concat_list = os.path.join(temp_dir, "ext_concat.txt")
             with open(concat_list, "w") as _cf:
                 _cf.write(f"file '{os.path.abspath(combined_path)}'\n")
@@ -1157,11 +1251,11 @@ def start(job_path: str) -> Optional[dict]:
                 check=True, capture_output=True, timeout=300,
             )
             logger.info(
-                f"outro: reversed last-clip tail {needed_extra:.2f}s → "
+                f"outro: extended by {needed_extra:.2f}s → "
                 f"extended={combined_duration + needed_extra:.2f}s (audio={audio_duration}s)"
             )
         except Exception as exc:
-            logger.warning(f"outro reverse failed ({exc}), using combined as-is")
+            logger.warning(f"outro extension failed ({exc}), using combined as-is")
             extended_path = combined_path
 
     # ------------------------------------------------------------------ #

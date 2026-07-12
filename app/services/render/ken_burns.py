@@ -161,6 +161,19 @@ def _blur_and_darken(frame: np.ndarray, brightness: float = _BG_BRIGHTNESS, blur
     return np.clip(arr, 0, 255).astype(np.uint8)
 
 
+def _flatten_alpha_on_white(rgba: Image.Image) -> Image.Image:
+    """Flatten an RGBA image onto a plain white background; return RGB.
+
+    Transparent pixels in web-sourced PNGs (diagrams, logos) commonly store
+    arbitrary — often black — RGB underneath the zero alpha. A naive
+    `.convert("RGB")` bakes in that hidden color instead of treating it as
+    background, which silently renders the whole cover-crop frame black.
+    """
+    bg = Image.new("RGB", rgba.size, (255, 255, 255))
+    bg.paste(rgba, mask=rgba.getchannel("A"))
+    return bg
+
+
 def _add_drop_shadow(
     rgba: Image.Image,
     shadow_blur: int = 14,
@@ -248,7 +261,8 @@ def _render_3d_effect(
     try:
         # 1. Load and cover-crop the base image to exactly WxH
         with _PILImage.open(image_path) as f:
-            img_raw = f.convert("RGB")
+            _has_alpha = f.mode in ("RGBA", "LA") or (f.mode == "P" and "transparency" in f.info)
+            img_raw = _flatten_alpha_on_white(f.convert("RGBA")) if _has_alpha else f.convert("RGB")
 
         img = _cover_crop_image(img_raw, W, H)
 
@@ -384,7 +398,7 @@ def apply_ken_burns(
         _rgba_src = f.convert("RGBA") if _has_alpha else None
         if _rgba_src:
             _rgba_src.load()
-        img = f.convert("RGB")
+        img = _flatten_alpha_on_white(_rgba_src) if _has_alpha else f.convert("RGB")
         img.load()
         src_w, src_h = img.size
 
@@ -544,7 +558,7 @@ def _render_ken_burns_ffmpeg(
         _rgba_src = f.convert("RGBA") if _has_alpha else None
         if _rgba_src:
             _rgba_src.load()
-        img = f.convert("RGB")
+        img = _flatten_alpha_on_white(_rgba_src) if _has_alpha else f.convert("RGB")
         img.load()
         src_w, src_h = img.size
 
@@ -705,38 +719,39 @@ def _render_ken_burns_ffmpeg(
                 return ""
             return output_path if os.path.exists(output_path) else ""
 
-        # Fade path — portrait rectangle grows on screen; background stays static.
+        # Fade path — photo on its blurred background, composed once, then the
+        # same sub-pixel zoompan recipe as the cover-mode fade (8× upscale,
+        # 4% ease-out zoom, fade in/out). The old implementation grew the
+        # overlay with a per-frame integer `scale` (trunc to even), which
+        # stepped width and height by 2px on independent schedules — a blocky
+        # axis-alternating stretch. The blurred backdrop now zooms the same 4%
+        # as the photo; on a blurred, darkened layer that is imperceptible.
         if animation == "fade":
+            composed = _bg_pil.copy()
+            composed.paste(_fg_at_fit, (fg_x, fg_y))
+            _uz = 8
+            up_w, up_h = width * _uz, height * _uz
             total_frames = max(int(round(duration * fps)), 1)
             d_minus_1 = max(total_frames - 1, 1)
-            grow = _PAN_Z - 1.0  # 0.04 — same 4% used by landscape pan/zoom
+            z_expr = f"1.0+{_PAN_Z - 1.0:.4f}*(1-pow(1-on/{d_minus_1},2))"
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
                 tmp_pre = fh.name
-            _fg_at_fit.save(tmp_pre)
+            composed.save(tmp_pre)
             fade_d = min(0.4, duration * 0.15)
             fade_out_st = max(0.0, duration - fade_d)
-            # Scale the portrait photo from fit_w×fit_h up to fit_w×_PAN_Z over the
-            # clip duration. overlay re-centers it each frame as it grows.
-            # Background (tmp_bg) is a static image and never moves.
-            # eval=frame is required for the 'n' frame variable — without it
-            # FFmpeg rejects the expression ("not valid in init eval_mode")
-            # and every fade render falls back to the slow MoviePy path.
-            filter_complex = (
-                f"[0:v]scale="
-                f"w='trunc({fit_w}*(1+{grow:.4f}*n/{d_minus_1})/2)*2':"
-                f"h='trunc({fit_h}*(1+{grow:.4f}*n/{d_minus_1})/2)*2':"
-                f"eval=frame"
-                f"[fg];"
-                f"[1:v][fg]overlay=x='(W-overlay_w)/2':y='(H-overlay_h)/2',"
+            vf = (
+                f"scale={up_w}:{up_h}:flags=lanczos,"
+                f"zoompan=z='{z_expr}':x='iw/2-iw/(2*zoom)':y='ih/2-ih/(2*zoom)':"
+                f"d={total_frames}:s={width}x{height}:fps={fps},"
                 f"fade=t=in:st=0:d={fade_d:.3f},"
                 f"fade=t=out:st={fade_out_st:.3f}:d={fade_d:.3f}"
             )
             cmd = [
                 ffmpeg_bin, "-y",
                 "-sws_flags", "lanczos",
-                "-f", "image2", "-loop", "1", "-t", str(duration), "-i", tmp_pre,
-                "-f", "image2", "-loop", "1", "-t", str(duration), "-i", tmp_bg,
-                "-filter_complex", filter_complex,
+                # zoompan generates all frames from ONE input frame (d=total_frames).
+                "-f", "image2", "-i", tmp_pre,
+                "-vf", vf,
                 "-t", str(duration), "-r", str(fps),
                 "-c:v", codec, "-preset", "fast", "-an",
                 "-threads", str(threads), output_path,

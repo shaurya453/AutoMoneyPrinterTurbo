@@ -42,6 +42,15 @@ Set job-root fields and patch each sentence. **Do not rebuild the array from scr
 >   segment of the video, not its subject)
 > - Sanity check: someone reading ONLY `video_topic` should correctly guess
 >   the title. A validator warns when the topic shares no words with it.
+> - **Retailer/store roundups** ("N ___ Finds at Marshalls/Costco/TJ Maxx"):
+>   the topic must be the **product category**, never the retailer —
+>   ✅ `"designer leather handbags"` ❌ `"Marshall handbags"`. A retailer is
+>   not a photographable product subject; a store name appended to every
+>   query and relevance prompt returns junk (amps, unrelated brands) and
+>   rejects real product footage. The retailer name may appear only in
+>   `gapfill_terms` or broll scene concepts (`"Marshalls store aisle"`).
+>   A validator warns when a named_entity topic shares no words with any
+>   `entity_name` in the job.
 
 | `video_type` | When to use |
 |---|---|
@@ -82,6 +91,12 @@ Set job-root fields and patch each sentence. **Do not rebuild the array from scr
 > - Same `[0]` on **≤2 consecutive sentences** — three in a row is always wrong
 > - Same `[0]` **≤4 times across the entire video** — this is a *global* cap, not per-product
 > - Unique `[0]` count **≥ max(15, ceil(N/4))** — for 100 sentences you need ≥25 distinct values
+> - **`[1]`/`[2]` must vary too** — one broad value on more than `max(6, ceil(N/6))`
+>   sentences means every fallback search returns the same images (a real job
+>   shipped `"leather tote bag"` as `[1]` on 36 of 62 sentences; the dedup gate
+>   then rejected hundreds of candidates and rescue fetches had nothing fresh)
+> - **Never repeat a concept twice within one sentence's list** — a duplicate
+>   wastes a whole search-ladder rung
 >
 > Numbered variants count as ONE: `"shelf angle 5"` ≡ `"shelf angle 6"` — forbidden.
 > Self-audit your `[0]` column before writing job.json.
@@ -163,6 +178,7 @@ One sentence describing the shot — used by the CLIP relevance filter and VLM. 
 Staying `"named"` for a whole product section is right for sentences describing something a camera could actually point at. It is wrong for sentences describing a sensation, opinion, or experience — no search engine returns a photo of "how something feels." Before rotating `visual_concepts[0]` to a new facet of the entity (per the rotation rule above), ask: **would a real photograph of this exact entity plausibly show what this sentence describes?**
 
 - **Yes — a physical, structural, or visually distinct feature** (a compartment, a control, a design detail, a screen, a documented visual trait) → stay `"named"`, point `visual_concepts[0]` at that feature.
+- **No, but the claim names a googleable entity of its own** (an ingredient or chemical, a component or material, a technology, a certification or standard, a referenced person/place/study) → stay `"named"` and **swap the referent**: point `visual_concepts[0]` at *that entity itself*, not the product. `"It contains niacinamide"` cannot be photographed on the bottle — but `"niacinamide"` has its own accurate imagery (molecular structure diagrams, ingredient close-ups). Set `standalone_subject: true`, `media_type: "image"`, put the entity in `must_show`, and write a `visual_caption` describing the evidence image (e.g. `"molecular structure diagram of niacinamide"`). Keep `entity_name` as the product — the section's lower-third continuity is unaffected. This is what turns filler broll into accurate media: the ingredient diagram beats a fourth shot of someone applying cream.
 - **No — a sensory, experiential, temporal, or subjective claim** (how it feels, sounds, tastes, or performs; how fast/easy/relieving it is) → drop to `"broll"` for that sentence only, with a generic visual_concept describing the general action or category — not the branded object. Return to `"named"` on the very next sentence if it's back to something photographable; this is a per-sentence exception, not a section-wide switch.
 
 This applies to any subject, not just consumer products:
@@ -170,7 +186,9 @@ This applies to any subject, not just consumer products:
 | Domain | Sentence | Photographable? | `content_track` | `visual_concepts[0]` |
 |---|---|---|---|---|
 | Skincare | "The pump dispenser sits on a matte white bottle." | Yes — packaging design | `"named"` | `"[product] pump bottle"` |
+| Skincare | "The formula pairs SPF 40 with niacinamide." | Referent swap — the ingredient is its own entity | `"named"` + `standalone_subject` | `"niacinamide"` |
 | Skincare | "It absorbs fast and never leaves a white cast." | No — a sensation | `"broll"` | `"woman applying sunscreen face"` |
+| Car | "The pack uses LFP cell chemistry." | Referent swap — the technology is its own entity | `"named"` + `standalone_subject` | `"LFP battery cell"` |
 | Car | "Pop the hood and the frunk is completely empty." | Yes — a specific compartment | `"named"` | `"[car model] frunk open"` |
 | Car | "It's eerily quiet at highway speed." | No — an auditory impression | `"broll"` | `"car interior highway driving"` |
 | Headphones | "The ear cups fold flat into the case." | Yes — a design mechanism | `"named"` | `"[headphone model] folded case"` |
@@ -209,6 +227,31 @@ This applies to any subject, not just consumer products:
 For named products, be specific in `[0]`: `"Kellogg's Corn Pops original yellow box"` not `"Kellogg's Corn Pops"`.
 
 **`entity_name`** — set on every `content_track: "named"` sentence within a named-entity section. The full canonical name of the entity, including brand + product + key differentiator (SPF, size, shade, model number) — e.g. `"Saie Slip Tint SPF 35"`. Unlike `visual_concepts[0]`, this does **not** rotate — every sentence in the same named section carries the identical `entity_name` string, even as `visual_concepts[0]` moves between the product, a feature, the brand, or a comparison product per the rotation rule above. Empty/omitted on `"broll"` sentences. This is what the downstream graphics pass uses to group a section's sentences and generate its lower-third label verbatim — an incomplete or rotated `entity_name` (e.g. dropping "SPF 35") produces an incomplete on-screen label, so always use the full name a viewer would recognise, not a shortened variant.
+
+---
+
+### `standalone_subject`
+
+Optional boolean, default `false`. Set `true` only on referent-swap sentences (see the photographability test): the sentence's visual subject is a *different* googleable entity than the video's overall topic — an ingredient, chemical, component, material, technology, or standard.
+
+The pipeline normally appends `video_topic` to every search query and relevance/VLM anchor to keep footage on-topic. For a referent-swap sentence that anchor backfires — a niacinamide structure diagram scores terribly against "tinted sunscreen for mature skin" and gets rejected. `standalone_subject: true` drops the topic anchor for this sentence's primary search only (rescue fallbacks stay topic-anchored), letting the entity's own imagery through.
+
+Rules: use with `content_track: "named"`, put the entity in `must_show`, and make `visual_caption` describe the standalone evidence image. Use sparingly — most sentences benefit from the topic anchor; this is for the handful of sentences per video whose accurate visual lives outside the topic's image space.
+
+---
+
+### `visual_criticality`
+
+Optional, default `"medium"` (omit for most sentences). How *exact* the on-screen subject must be — not how narratively important the sentence is. The pipeline spends its search effort accordingly: search-time budget, candidate count, and AI-comparison of finalists all scale with this dial.
+
+| Level | Meaning | Use for |
+|---|---|---|
+| `"low"` | any on-topic footage works | connective filler, transitions, generic atmosphere |
+| `"medium"` | should match the topic (default) | most sentences — omit the field |
+| `"high"` | a specific visible thing must appear, but not an exact named entity | a mechanism close-up, a UI screen, a specific action or setting |
+| `"critical"` | an exact named entity must be shown accurately | the hero product reveal, a specific person, a referent-swap entity (`standalone_subject`) |
+
+Budget is zero-sum across the video: marking everything `high`/`critical` just slows the whole fetch phase without improving anything (the validator warns above 30%). Mark the handful of sentences where a wrong visual would actually be noticed, and mark true filler `low` so its budget flows to the sentences that matter.
 
 ---
 
@@ -269,6 +312,8 @@ Use active, kinetic search terms — `"engineer soldering circuit board"` beats 
       "visual_concepts": ["concrete scene description", "broader fallback"],
       "content_track": "broll",         // "broll" | "named"
       "entity_name": "",                // full canonical name, constant across a named section — see above
+      "standalone_subject": false,      // true only for referent-swap sentences (ingredient/component/technology) — see above
+      "visual_criticality": "medium",   // "low" | "medium" | "high" | "critical" — omit unless it matters, see above
       "visual_caption": "one sentence describing the shot",
       "media_type": "video",            // "video" | "image"
       "assigned_motif": "...",          // thematic only

@@ -143,11 +143,15 @@ def is_enabled() -> bool:
     return _get_client() is not None and not _circuit_open
 
 
-def passes(result: Optional[float]) -> bool:
-    """None → fail-open (accept). Float → accept if score >= vlm_threshold."""
+def passes(result: Optional[float], threshold: Optional[float] = None) -> bool:
+    """None result → fail-open (accept). Float → accept if score >= threshold.
+
+    threshold: explicit gate override (e.g. the looser broll-video gate in
+    _fetch.py). None keeps the configured `vlm_threshold` default."""
     if result is None:
         return True
-    threshold = float(config.app.get("vlm_threshold", 0.55))
+    if threshold is None:
+        threshold = float(config.app.get("vlm_threshold", 0.55))
     return result >= threshold
 
 

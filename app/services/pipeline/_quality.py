@@ -53,6 +53,8 @@ def write_quality_report(
     vlm_compare_used_count = sum(1 for e in entries if e.get("vlm_compare_used"))
     rescued_count = sum(1 for e in entries if e.get("rescued"))
     placeholder_used_count = sum(1 for e in entries if e.get("placeholder_used"))
+    below_margin_accept_count = sum(1 for e in entries if e.get("below_margin"))
+    below_margin_blocked_count = sum(1 for e in entries if e.get("below_margin_blocked"))
 
     # Catastrophic gaps: slots where the real fetch AND every placeholder
     # attempt failed -- a true hole in the timeline (see _orchestrate.py's
@@ -79,6 +81,8 @@ def write_quality_report(
         "vlm_compare_used_count": vlm_compare_used_count,
         "rescued_count": rescued_count,
         "placeholder_used_count": placeholder_used_count,
+        "below_margin_accept_count": below_margin_accept_count,
+        "below_margin_blocked_count": below_margin_blocked_count,
         "catastrophic_gap_count": catastrophic_gap_count,
         "catastrophic_gap_unrecovered_count": catastrophic_gap_unrecovered_count,
         "catastrophic_gap_seconds": catastrophic_gap_seconds,
@@ -98,6 +102,20 @@ def write_quality_report(
         logger.info(f"quality report written: {quality_path}")
     except Exception as exc:
         logger.warning(f"failed to write quality report: {exc}")
+
+    # Per-clip decision ledger: the raw entries quality.json aggregates away.
+    # Answers "which exact image/term/score ended up at clip N" without
+    # grepping the run log (sentence_idx ties a clip back to its narration).
+    decisions_path = os.path.join(work_dir, f"{title}.decisions.json")
+    try:
+        with open(decisions_path, "w", encoding="utf-8") as fh:
+            json.dump(
+                {"clips": {str(k): quality_report[k] for k in sorted(quality_report)}},
+                fh, indent=2,
+            )
+        logger.info(f"decisions ledger written: {decisions_path}")
+    except Exception as exc:
+        logger.warning(f"failed to write decisions ledger: {exc}")
 
     aggregate["_path"] = quality_path
     return aggregate

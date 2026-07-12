@@ -19,6 +19,7 @@ from app.services.pipeline._planning import (
     _trim_clip,
     _get_visual_concepts,
     _build_query_ladder,
+    build_query_plan,
 )
 from app.utils import utils
 
@@ -55,6 +56,49 @@ class _ThreadSafeURLSet:
                 return False
             self._set.update(items)
             return True
+
+
+# ---------------------------------------------------------------------------
+# Visual criticality — per-sentence effort dial (see AGENT_GUIDE.md)
+# ---------------------------------------------------------------------------
+
+_CRITICALITY_LEVELS = ("low", "medium", "high", "critical")
+
+# How much harder each level tries, wired into existing budget knobs:
+#   - per-clip search-deadline multiplier (applied in _orchestrate)
+#   - extra stock-video download attempts (applied below)
+#   - extra image candidates per term + VLM comparative pooling (images.py)
+_CRITICALITY_BUDGET_MULT = {"low": 0.6, "medium": 1.0, "high": 1.25, "critical": 1.5}
+_CRITICALITY_VIDEO_ATTEMPTS = {"low": -1, "medium": 0, "high": 2, "critical": 4}
+
+
+def get_criticality(sentence: dict) -> str:
+    """Normalized visual_criticality for a sentence; absent/unknown → medium."""
+    level = str(sentence.get("visual_criticality") or "").strip().lower()
+    return level if level in _CRITICALITY_LEVELS else "medium"
+
+
+def criticality_budget_multiplier(sentence: dict) -> float:
+    return _CRITICALITY_BUDGET_MULT[get_criticality(sentence)]
+
+
+def _video_vlm_threshold(sentence: dict) -> float:
+    """VLM gate for stock-video candidates, by sentence intent.
+
+    The VLM scoring guide caps generic footage at <=0.4 whenever the visual
+    intent sounds specific — correct for images, where Serper can actually
+    find the named thing, but under a specific-sounding topic it blocks ALL
+    stock video at the default 0.55 gate while images sail through at the
+    0.30 image gate (one job shipped 0/375 videos and 137/137 stills). For
+    generic broll — no must_show, low/medium criticality — generic footage
+    IS the intended match, so gate it at vlm_threshold_broll instead."""
+    if (
+        sentence.get("content_track", "broll") == "broll"
+        and not (sentence.get("must_show") or [])
+        and get_criticality(sentence) in ("low", "medium")
+    ):
+        return float(config.app.get("vlm_threshold_broll", 0.35))
+    return float(config.app.get("vlm_threshold", 0.55))
 
 
 def _fetch_video_clip(
@@ -98,9 +142,10 @@ def _fetch_video_clip(
     _rejections: List[str] = []
     _content_track = sentence.get("content_track", "broll")
 
-    def _record(accepted: bool, provider: str = "", used_dedup_fallback: bool = False) -> None:
+    def _record(accepted: bool, provider: str = "", used_dedup_fallback: bool = False,
+                chosen_term: str = "", url: str = "", vlm_score: Optional[float] = None) -> None:
         if report is not None:
-            report[clip_idx] = {
+            entry = {
                 "provider": provider,
                 "content_track": _content_track,
                 "media_type": "video",
@@ -108,6 +153,13 @@ def _fetch_video_clip(
                 "used_dedup_fallback": used_dedup_fallback,
                 "accepted": accepted,
             }
+            if chosen_term:
+                entry["chosen_term"] = chosen_term
+            if url:
+                entry["url"] = url
+            if vlm_score is not None:
+                entry["vlm_score"] = round(vlm_score, 3)
+            report[clip_idx] = entry
     search_terms = query_ladder if query_ladder is not None else _get_visual_concepts(sentence)
     if not search_terms:
         return None
@@ -129,6 +181,7 @@ def _fetch_video_clip(
         max_attempts = int(config.app.get("max_video_download_attempts_named", base_max_attempts + 3))
     else:
         max_attempts = base_max_attempts
+    max_attempts = max(1, max_attempts + _CRITICALITY_VIDEO_ATTEMPTS[get_criticality(sentence)])
     nsfw_frame_samples = int(config.app.get("nsfw_frame_samples", 4))
     relevance_frame_samples = int(config.app.get("relevance_video_frame_samples", 4))
     relevance_pool = config.app.get("relevance_video_pool", "mean")
@@ -253,16 +306,18 @@ def _fetch_video_clip(
                 _rejections.append("nsfw")
                 continue
 
+            _vlm_score: Optional[float] = None
             if vlm.is_enabled() and frames:
                 mid_frame = frames[len(frames) // 2]
-                if not vlm.passes(vlm.verify_image(
+                _vlm_score = vlm.verify_image(
                     mid_frame,
                     sentence.get("text", ""),
                     sentence.get("visual_caption", ""),
                     video_topic,
                     must_show,
                     avoid,
-                )):
+                )
+                if not vlm.passes(_vlm_score, threshold=_video_vlm_threshold(sentence)):
                     logger.info(f"clip {clip_idx}: rejected by VLM: {candidate.url}")
                     try:
                         os.remove(out_path)
@@ -345,7 +400,8 @@ def _fetch_video_clip(
                         except Exception:
                             pass
 
-            _record(accepted=True, provider=getattr(candidate, "provider", ""))
+            _record(accepted=True, provider=getattr(candidate, "provider", ""),
+                    chosen_term=term, url=candidate.url, vlm_score=_vlm_score)
             return out_path
 
         if not progressed:
@@ -397,6 +453,7 @@ def _fetch_image_clip(
     deadline: Optional[float] = None,
     rng: random.Random = random,
     report: Optional[dict] = None,
+    term_routing: Optional[dict] = None,
 ) -> Optional[str]:
     """Download an image and render a Ken Burns clip. None if no image found.
 
@@ -440,7 +497,9 @@ def _fetch_image_clip(
         serper_term=serper_term,
         deadline=deadline,
         content_track=_content_track,
+        criticality=get_criticality(sentence),
         report=_download_report,
+        term_routing=term_routing,
     )
     if report is not None:
         report[clip_idx] = {
@@ -456,9 +515,11 @@ def _fetch_image_clip(
             # replay the baked-in animation from frame 0 on the loop).
             "image_path": image_path or "",
         }
-        if "vlm_compare_used" in _download_report:
-            report[clip_idx]["vlm_compare_used"] = _download_report["vlm_compare_used"]
-            report[clip_idx]["vlm_compare_pool_size"] = _download_report["vlm_compare_pool_size"]
+        for _k in ("vlm_compare_used", "vlm_compare_pool_size", "chosen_term", "url",
+                   "clip_score", "vlm_score", "below_margin", "below_margin_score",
+                   "below_margin_blocked"):
+            if _k in _download_report:
+                report[clip_idx][_k] = _download_report[_k]
     if not image_path:
         return None
 
@@ -537,10 +598,39 @@ def _fetch_clip(
     Returns (clip_path, used_image) or None if nothing was found at all.
     """
     visual_concepts = _get_visual_concepts(sentence)
-    query_ladder = _build_query_ladder(video_topic, visual_concepts, video_type)
+
+    # Referent-swap sentences (standalone_subject: true, see AGENT_GUIDE) are
+    # about a different googleable entity than the video's overall subject —
+    # an ingredient, chemical, component, standard. Appending video_topic to
+    # their queries and scoring anchors drags every candidate back toward the
+    # video's product category and rejects the exact diagram/evidence image
+    # the sentence asked for (a niacinamide structure diagram scores terribly
+    # against "... tinted sunscreen for mature skin"). The primary attempt
+    # therefore runs un-anchored; the topic-wide fallback_terms rescue below
+    # keeps the full topic anchor — if the specific subject can't be found,
+    # on-topic generic footage is the right rescue.
+    standalone_subject = bool(sentence.get("standalone_subject"))
+    anchor_topic = "" if standalone_subject else video_topic
+    if standalone_subject:
+        logger.debug(f"clip {clip_idx}: standalone_subject — dropping video_topic anchor")
+
+    query_plan = build_query_plan(
+        anchor_topic, visual_concepts, video_type,
+        entity_name=(sentence.get("entity_name") or ""),
+    )
+    query_ladder = [t for t, _ in query_plan]
     if not query_ladder:
         logger.warning(f"clip {clip_idx}: no visual concepts or video_topic provided")
         return None
+    # Route entity-bearing rungs to web-image search only (see
+    # build_query_plan): stock libraries never carry branded products, so a
+    # "web" rung on Pexels can only ever return the wrong product.
+    term_routing = {t: p for t, p in query_plan if p != "any"}
+    # And keep those rungs out of the stock-VIDEO ladder entirely — each one
+    # would burn a download attempt on a query stock video can't satisfy. If
+    # everything is web-tagged, keep the last (broadest) rung so video
+    # fallback still functions.
+    video_ladder = [t for t, p in query_plan if p != "web"] or query_ladder[-1:]
 
     # Always anchor the relevance prompt to video_topic, even when
     # visual_caption is present -- a caption like "a person looking
@@ -549,21 +639,21 @@ def _fetch_clip(
     # reveal) for a grocery-industry documentary.
     visual_caption = sentence.get("visual_caption", "")
     caption_prompt = relevance.build_prompt(
-        visual_caption or (visual_concepts[0] if visual_concepts else video_topic),
-        video_topic,
+        visual_caption or (visual_concepts[0] if visual_concepts else anchor_topic),
+        anchor_topic,
     )
 
     content_track = sentence.get("content_track", "broll")
     named_source_order = config.app.get(
         "named_track_image_source_order",
-        ["serper", "duckduckgo", "pexels", "pixabay", "unsplash", "wikimedia"],
+        ["serper", "duckduckgo", "wikimedia", "openverse", "pexels", "pixabay", "unsplash"],
     )
 
-    args_video = (sentence, sent_duration, trim_buffer, source, video_aspect, clip_idx, clips_dir, used_urls, caption_prompt, query_ladder)
+    args_video = (sentence, sent_duration, trim_buffer, source, video_aspect, clip_idx, clips_dir, used_urls, caption_prompt, video_ladder)
     args_image = (sentence, sent_duration, trim_buffer, video_aspect, clip_idx, clips_dir, used_urls, caption_prompt, query_ladder)
     dedup_kw = {"recent_embeddings": recent_embeddings, "dedup_threshold": dedup_threshold, "deadline": deadline, "report": report}
-    topic_kw = {"video_topic": video_topic}
-    image_kw = {"effect": visual_effect, "rng": rng}
+    topic_kw = {"video_topic": anchor_topic}  # blank for standalone_subject — see above
+    image_kw = {"effect": visual_effect, "rng": rng, "term_routing": term_routing}
 
     if content_track == "named":
         # Named/specific subjects are always served as images via Serper,
@@ -625,18 +715,23 @@ def _fetch_clip(
         own = set(visual_concepts)
         extra_concepts = [c for c in fallback_terms if c not in own]
         if extra_concepts:
+            # The rescue pool is topic-wide generic concepts, so it always
+            # keeps the full topic anchor — including for standalone_subject
+            # sentences whose specific referent couldn't be found.
             fb_ladder = _build_query_ladder(video_topic, extra_concepts, video_type)
             fb_sentence = dict(sentence)
             fb_sentence["visual_concepts"] = extra_concepts
+            fb_sentence.pop("standalone_subject", None)
             fb_caption_prompt = relevance.build_prompt(extra_concepts[0], video_topic)
+            fb_topic_kw = {"video_topic": video_topic}
             args_video_fb = (fb_sentence, sent_duration, trim_buffer, source, video_aspect, clip_idx, clips_dir, used_urls, fb_caption_prompt, fb_ladder)
             args_image_fb = (fb_sentence, sent_duration, trim_buffer, video_aspect, clip_idx, clips_dir, used_urls, fb_caption_prompt, fb_ladder)
-            video_fb = _fetch_video_clip(*args_video_fb, **dedup_kw, **topic_kw)
+            video_fb = _fetch_video_clip(*args_video_fb, **dedup_kw, **fb_topic_kw)
             if video_fb:
                 logger.info(f"clip {clip_idx}: used topic-wide fallback concepts {extra_concepts[:3]}")
                 return video_fb, False
             fb_named_order = named_source_order if video_type == "named_entity" else None
-            image_fb = _fetch_image_clip(*args_image_fb, source_order=fb_named_order, **dedup_kw, **topic_kw, **image_kw)
+            image_fb = _fetch_image_clip(*args_image_fb, source_order=fb_named_order, **dedup_kw, **fb_topic_kw, **image_kw)
             if image_fb:
                 logger.info(f"clip {clip_idx}: used topic-wide fallback concepts {extra_concepts[:3]}")
                 return image_fb, True
