@@ -12,6 +12,7 @@ from app.services.tts._utils import (
     estimate_no_voice_duration,
     generate_silent_audio,
     get_audio_duration,
+    normalize_narration_loudness,
 )
 from app.services.tts.edge import azure_tts_v1, _azure_tts_chunked
 from app.services.tts.kokoro import kokoro_tts
@@ -86,6 +87,7 @@ def tts(
 
 __all__ = [
     "tts", "parse_voice_name", "is_no_voice", "get_audio_duration",
+    "normalize_narration_loudness",
     "NO_VOICE_NAME", "kokoro_tts", "supertonic_tts", "minimax_tts",
     "azure_tts_v1",
 ]

@@ -735,7 +735,12 @@ _IMAGE_PROVIDERS = {
     "serper": search_images_serper,
 }
 
-_DEFAULT_IMAGE_SOURCE_ORDER = ["duckduckgo", "pexels", "pixabay", "unsplash", "wikimedia", "openverse"]
+# "openverse" deliberately excluded: Cloudflare blocks this server's IP on
+# every api.openverse.org endpoint even with valid registered credentials
+# (confirmed 2026-07-13) -- see the openverse_client_id/_secret comment in
+# config.toml. The provider function/mapping below is kept dormant in case a
+# [proxy] is ever added to route around the block.
+_DEFAULT_IMAGE_SOURCE_ORDER = ["duckduckgo", "pexels", "pixabay", "unsplash", "wikimedia"]
 
 # Provider pools for per-term routing (see download_image's term_routing).
 # Wikimedia/Openverse sit in both: they index real-world entities like a web
@@ -773,7 +778,8 @@ def download_image(
 
     source_order: provider names to try in order.  Defaults to
         _DEFAULT_IMAGE_SOURCE_ORDER (duckduckgo, pexels, pixabay, unsplash,
-        wikimedia).
+        wikimedia).  ("openverse" exists as a provider but is dormant --
+        Cloudflare-blocked from this server; see _DEFAULT_IMAGE_SOURCE_ORDER.)
 
     content_track: "named" sentences (a specific product/person/place) get a
         larger per-term candidate slice (image_candidates_per_term_named,

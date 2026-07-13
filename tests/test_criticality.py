@@ -69,6 +69,9 @@ def test_openverse_short_circuits_on_cooldown():
             _common._provider_cooldowns.clear()
 
 
-def test_openverse_registered_in_provider_orders():
+def test_openverse_registered_but_dormant():
+    # Provider function still exists (in case a proxy lifts the Cloudflare
+    # block later) but is deliberately excluded from the active default
+    # order -- see the _DEFAULT_IMAGE_SOURCE_ORDER comment in images.py.
     assert "openverse" in images._IMAGE_PROVIDERS
-    assert "openverse" in images._DEFAULT_IMAGE_SOURCE_ORDER
+    assert "openverse" not in images._DEFAULT_IMAGE_SOURCE_ORDER

@@ -268,3 +268,152 @@ def test_within_sentence_duplicate_concept_warns(tmp_path):
     res = _run(tmp_path, job)
     assert res.returncode == 0
     assert "duplicate concept within visual_concepts" in res.stdout
+
+
+# ── Avatar checks ──────────────────────────────────────────────────────────
+
+def _avatar_job(tmp_path):
+    """Valid job with a real avatar image on disk and sentences 0–1 marked."""
+    job = _valid_job()
+    img = tmp_path / "avatar.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n")  # existence is all the gate checks
+    job["avatar_image"] = str(img)
+    for s in job["sentences"]:
+        s["avatar"] = True
+        s.pop("visual_effect", None)
+    return job
+
+
+def test_avatar_without_image_is_hard_error(tmp_path):
+    job = _valid_job()
+    job["sentences"][0]["avatar"] = True
+    res = _run(tmp_path, job)
+    assert res.returncode == 1
+    assert "avatar_image is missing" in res.stdout
+
+
+def test_avatar_happy_path_passes(tmp_path):
+    res = _run(tmp_path, _avatar_job(tmp_path))
+    assert res.returncode == 0, res.stdout
+    assert "avatar" not in res.stdout.lower() or "VALIDATION_OK" in res.stdout
+
+
+def test_avatar_image_missing_on_disk_warns(tmp_path):
+    job = _avatar_job(tmp_path)
+    job["avatar_image"] = str(tmp_path / "nope.png")
+    res = _run(tmp_path, job)
+    assert res.returncode == 0
+    assert "does not exist on disk" in res.stdout
+
+
+def test_avatar_unmarked_sentence_zero_warns(tmp_path):
+    job = _avatar_job(tmp_path)
+    del job["sentences"][0]["avatar"]
+    res = _run(tmp_path, job)
+    assert res.returncode == 0
+    assert "sentence 0 lacks avatar=true" in res.stdout
+
+
+def test_avatar_graphic_conflict_warns(tmp_path):
+    job = _avatar_job(tmp_path)
+    job["sentences"][1]["graphic_type"] = "lower_third"
+    job["sentences"][1]["variables"] = {"label": "X"}
+    res = _run(tmp_path, job)
+    assert res.returncode == 0
+    assert "mutually exclusive" in res.stdout
+
+
+def test_avatar_effect_conflict_warns(tmp_path):
+    job = _avatar_job(tmp_path)
+    job["sentences"][1]["visual_effect"] = "warmth"
+    res = _run(tmp_path, job)
+    assert res.returncode == 0
+    assert "visual_effect on an avatar sentence" in res.stdout
+
+
+def test_avatar_three_blocks_warn(tmp_path):
+    job = _avatar_job(tmp_path)
+    extra = [dict(job["sentences"][1], visual_caption=f"c{i}") for i in range(4)]
+    for i, s in enumerate(extra):
+        s.pop("avatar", None)
+        s["text"] = f"Extra sentence number {i}."
+    # blocks: [0,1] then [3] then [5]
+    extra[1]["avatar"] = True
+    extra[3]["avatar"] = True
+    job["sentences"].extend(extra)
+    res = _run(tmp_path, job)
+    assert res.returncode == 0
+    assert "avatar blocks found" in res.stdout
+
+
+def test_avatar_long_intro_does_not_warn(tmp_path):
+    # No length cap — a long intro sentence should pass cleanly, not warn.
+    job = _avatar_job(tmp_path)
+    job["sentences"][0]["text"] = " ".join(["word"] * 50)  # 20s at 2.5wps
+    res = _run(tmp_path, job)
+    assert res.returncode == 0
+    assert "hard-caps" not in res.stdout
+
+
+def test_leaked_plug_marker_in_sentence_is_hard_error(tmp_path):
+    job = _valid_job()
+    job["sentences"][0]["text"] = "<<PLUG>>First sentence.<</PLUG>>"
+    res = _run(tmp_path, job)
+    assert res.returncode == 1
+    assert "VALIDATION_ERROR" in res.stdout
+    assert "marker text found" in res.stdout
+
+
+def test_leaked_plug_marker_in_video_script_is_hard_error(tmp_path):
+    job = _valid_job()
+    job["video_script"] = "<<PLUG>>First sentence.<</PLUG>> Second sentence."
+    res = _run(tmp_path, job)
+    assert res.returncode == 1
+    assert "VALIDATION_ERROR" in res.stdout
+    assert "marker text found" in res.stdout
+
+
+def test_info_callout_wrong_label_count_warns(tmp_path):
+    job = _valid_job()
+    job["sentences"][0]["content_track"] = "named"
+    job["sentences"][0]["entity_name"] = "Widget Pro"
+    job["sentences"][0].pop("visual_effect", None)
+    job["sentences"][0]["graphic_type"] = "info_callout"
+    job["sentences"][0]["variables"] = {"labels": ["Only two", "labels here"]}
+    res = _run(tmp_path, job)
+    assert res.returncode == 0
+    assert "variables.labels must be a list of exactly 3" in res.stdout
+
+
+def test_info_callout_on_broll_warns(tmp_path):
+    job = _valid_job()
+    job["sentences"][0].pop("visual_effect", None)
+    job["sentences"][0]["graphic_type"] = "info_callout"
+    job["sentences"][0]["variables"] = {"labels": ["A", "B", "C"]}
+    res = _run(tmp_path, job)
+    assert res.returncode == 0
+    assert "info_callout used on a sentence that is not content_track='named'" in res.stdout
+
+
+def test_info_callout_cap_and_spacing_independent_of_other_pool(tmp_path):
+    job = _valid_job()
+    filler = job["sentences"][1]  # broll, no visual_effect
+    sentences = [
+        dict(filler, text=f"Filler sentence {i}.", visual_caption=f"filler caption {i}")
+        for i in range(5)  # keep the named/info_callout run out of the hook zone (0-4)
+    ]
+    for i in range(10):
+        s = dict(filler)
+        s["text"] = f"Sentence number {i} about the product."
+        s["visual_caption"] = f"product caption {i}"
+        s["content_track"] = "named"
+        s["entity_name"] = f"Widget {i}"
+        s["graphic_type"] = "info_callout"
+        s["variables"] = {"labels": ["A", "B", "C"]}
+        sentences.append(s)
+    job["sentences"] = sentences
+    res = _run(tmp_path, job)
+    assert res.returncode == 0
+    assert "too many info_callout graphics" in res.stdout
+    assert "info_callout graphics too close" in res.stdout
+    assert "too many infographic/list graphics" not in res.stdout

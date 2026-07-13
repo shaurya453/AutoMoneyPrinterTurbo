@@ -83,9 +83,11 @@ Lives at `revideo-worker/` (inside the repository root).
 | `render.js` | CLI: reads JSON from stdin, routes to project file by `type`+`variant`, calls `renderVideo()`, prints MP4 path to stdout |
 | `variants.json` | **Single source of truth** for variant metadata — `render.js` derives `VARIANT_POOL`/`BG_VIDEOS` from it, `graphics.py` derives `_POOL_SIZES`/`STYLE_MAP`/`_BG_VIDEOS`. Adding a variant = scene+project file + one entry here (no Python change) |
 | `src/projects/lower-third.ts` | Revideo project for `lower_third` (single variant) |
+| `src/projects/info-callout.ts` | Revideo project for `info_callout` (single variant) |
 | `src/projects/infographic{,-b,-c,-d}.ts` | Revideo projects for infographic variants A–D |
 | `src/projects/list{,-b,-c,-d}.ts` | Revideo projects for list variants A–D |
 | `src/scenes/lower-third.tsx` | Lower third — left-anchored label with semi-transparent backdrop, fade in/out |
+| `src/scenes/info-callout.tsx` | Info callout — 3 fixed-position text boxes with animated leader lines to dots near centre, staggered reveal scaled to clip duration |
 | `src/scenes/infographic{,-b,-c,-d}.tsx` | Scene files: A vert bars · B horiz bars · C lollipop · D callouts |
 | `src/scenes/list{,-b,-c,-d}.tsx` | Scene files: A bullets · B numbered · C cascade · D card grid |
 | `package.json` | `@revideo/{core,2d,renderer,vite-plugin,ui}` v0.10.4 |
@@ -97,15 +99,16 @@ Lives at `revideo-worker/` (inside the repository root).
 ### Stage flow (inside `pipeline.start()`)
 
 1. **TTS** — `tts.tts()` → `audio.mp3`; also used to produce edge-tts word-level timings for subtitles
-2. **Whisper alignment** — `_get_sentence_timestamps()` (faster-whisper) aligns each narration sentence to an `(start, end)` span via SequenceMatcher token alignment. A sentence whose tokens can't be matched (e.g. empty `text`) falls back to `(last_end, last_end + 2.0)` — which wrecks the Pass-1 plan for everything after it, which is why `validate_job.py` hard-errors on empty `text`
-3. **Pass 1 — clip planning** — compute each sentence's footage slot from absolute Whisper timestamps (slot runs until the next sentence's narration begins). A narrated-graphic sentence (`graphic_type` set + non-empty `text`) keeps its Whisper-derived slot; list/infographic slots are floored at 5 s for readability
-4. **Pass 2 — clip fetch / render** — for each sentence:
-   - `graphic_type` set (always narrated; `content_track` stays `"broll"`/`"named"`) → `graphics.render_graphic_clip()` (subprocess to `revideo-worker/render.js`). `lower_third` renders are composited over fetched footage; `list`/`infographic` renders replace the footage slot entirely
+2. **Loudness normalization** — `tts.normalize_narration_loudness()` (two-pass EBU R128 `loudnorm`, target -16 LUFS / -1.5 dBTP) runs in place on `audio.mp3` before alignment. TTS providers vary wildly in output level (some near-silent, some clipping), and both extremes hurt Whisper's word-level alignment accuracy. Non-fatal — a failed pass just leaves the original audio
+3. **Whisper alignment** — `_get_sentence_timestamps()` (faster-whisper) aligns each narration sentence to an `(start, end)` span via SequenceMatcher token alignment. A sentence whose tokens can't be matched (e.g. empty `text`) falls back to `(last_end, last_end + 2.0)` — which wrecks the Pass-1 plan for everything after it, which is why `validate_job.py` hard-errors on empty `text`
+4. **Pass 1 — clip planning** — compute each sentence's footage slot from absolute Whisper timestamps (slot runs until the next sentence's narration begins). A narrated-graphic sentence (`graphic_type` set + non-empty `text`) keeps its Whisper-derived slot; list/infographic slots are floored at 5 s for readability
+5. **Pass 2 — clip fetch / render** — for each sentence:
+   - `graphic_type` set (always narrated; `content_track` stays `"broll"`/`"named"`) → `graphics.render_graphic_clip()` (subprocess to `revideo-worker/render.js`). `lower_third`/`info_callout` renders are composited over fetched footage (see `_COMPOSITE_GRAPHIC_TYPES` in `_planning.py`); `list`/`infographic` renders replace the footage slot entirely
    - otherwise → `_fetch_clip()` (search → NSFW gate → relevance → Ken Burns for images)
-5. **Clip-fetch resilience** — rescue fetch → placeholder → position-aware gap-fill → tail gap-fill (see below)
-6. **Outro extension** — last clip looped to reach `audio_duration + 2 s`
-7. **`combine_videos()`** — sequential concat with xfade crossfade → `temp/combined.mp4`
-8. **`generate_video()`** — subtitles (Pillow), fade-out, BGM duck → `final.mp4`
+6. **Clip-fetch resilience** — rescue fetch → placeholder → position-aware gap-fill → tail gap-fill (see below)
+7. **Outro extension** — last clip looped to reach `audio_duration + 2 s`
+8. **`combine_videos()`** — sequential concat with xfade crossfade → `temp/combined.mp4`
+9. **`generate_video()`** — subtitles (Pillow), fade-out, BGM duck → `final.mp4`
 
 ### Clip-fetch resilience (rescue → placeholder → gap-fill)
 
@@ -176,6 +179,7 @@ The rendered H.264 MP4 slots into `temp/clips/` identically to any stock clip �
 | `type` | Variants | Key `variables` |
 |---|---|---|
 | `lower_third` | single | `label` (2–6 words) |
+| `info_callout` | single | `labels[]` (exactly 3 short strings) — named-entity images only, composites over footage like `lower_third` |
 | `infographic` | A: vertical bars · B: horizontal bars · C: lollipop · D: number callouts | `title`, `labels[]`, `values[]`, `unit` |
 | `list` | A: bullets · B: numbered · C: cascade reveal · D: card grid | `items[]`, `title` |
 
@@ -191,7 +195,7 @@ Top-level fields an agent must set: `video_topic`, `video_type`, `motif_palette`
 
 Named-entity sentences (`content_track: "named"`) also carry `entity_name` — the full, non-rotating canonical name of the product/person (brand + product + SPF/size/shade/model), constant across every sentence in that named section even as `visual_concepts[0]` rotates. Portal's graphics-audit pass (`worker.mjs`) uses it to group a section's sentences and generate its `lower_third` label deterministically — see portal's `CLAUDE.md`.
 
-**Graphics are always narrated ("Pattern 2").** `content_track: "graphic"` is **no longer supported** — `validate_job.py` hard-errors on it, as it does on any broll/named sentence with empty `text`. A graphic is a normal narrated `"broll"`/`"named"` sentence with `graphic_type` (`lower_third` | `infographic` | `list`) and `variables` added — and those fields are set by **portal's graphics-audit pass**, never by the enrichment agent (AGENT_GUIDE.md explicitly forbids the agent from setting `graphic_type`, `variables`, or `visual_effect`).
+**Graphics are always narrated ("Pattern 2").** `content_track: "graphic"` is **no longer supported** — `validate_job.py` hard-errors on it, as it does on any broll/named sentence with empty `text`. A graphic is a normal narrated `"broll"`/`"named"` sentence with `graphic_type` (`lower_third` | `infographic` | `list` | `info_callout`) and `variables` added — and those fields are set by **portal's graphics-audit pass**, never by the enrichment agent (AGENT_GUIDE.md explicitly forbids the agent from setting `graphic_type`, `variables`, or `visual_effect`).
 
 Full spec: `AGENT_GUIDE.md`.
 
@@ -207,7 +211,7 @@ Full spec: `AGENT_GUIDE.md`.
 | `pixabay_api_keys` | Stock video + photos + BGM |
 | `unsplash_api_keys` | Image fallback |
 | `serper_api_keys` | Google Images for `content_track: "named"` |
-| `openverse_client_id` / `_secret` | Openverse (CC-licensed diagrams/evidence imagery); provider stays on cooldown without them (Cloudflare blocks anonymous server IPs) |
+| `openverse_client_id` / `_secret` | Openverse (CC-licensed diagrams/evidence imagery) — **currently dormant**: Cloudflare blocks this server's IP on every `api.openverse.org` endpoint (register, token, search), confirmed even with valid registered credentials (2026-07-13). Removed from `named_track_image_source_order`/`_DEFAULT_IMAGE_SOURCE_ORDER`; credentials kept in case a `[proxy]` is added later. `scripts/register_openverse.py` hits their `/v1/auth_tokens/register/` endpoint but must be run from a non-datacenter IP |
 | `[whisper]` | `model_size`, `device`, `compute_type` |
 | `[app].max_image_ratio` | Soft cap on image clip fraction (code fallback 1.0 = uncapped; portal always writes the user's choice into `job.max_image_ratio`, which wins) |
 
@@ -235,6 +239,9 @@ Test Revideo standalone (no pipeline):
 cd /home/deploy/AutoMoneyPrinterTurbo/revideo-worker
 echo '{"type":"lower_third","outPath":"/tmp/test.mp4","duration":5,"width":1920,"height":1080,"fps":30,"variables":{"label":"Sony WH-1000XM5"}}' | node render.js
 ffprobe -v error -show_entries format=duration -of compact /tmp/test.mp4
+
+# info_callout — pass fewer than 3 labels to check the defensive skip path
+echo '{"type":"info_callout","outPath":"/tmp/test2.mp4","duration":5,"width":1920,"height":1080,"fps":30,"variables":{"labels":["30-Hour Battery","Adaptive ANC","USB-C Fast Charge"]}}' | node render.js
 ```
 
 ---
@@ -244,7 +251,7 @@ ffprobe -v error -show_entries format=duration -of compact /tmp/test.mp4
 This pipeline is the backend for `/home/deploy/portal/` (Next.js + SQLite). The `portal-worker` PM2 process drives the job pipeline:
 
 1. **Phase 1** — AI agent (Claude or Codex via CLI) reads `AGENT_GUIDE.md`, writes the script, runs `sentence_prep.py`, enriches `job.json`, prints `JOB_JSON_PATH: /absolute/path`
-2. **Graphics audit** — `runGraphicsAudit()` in portal's `scripts/worker.mjs` deterministically assigns one `lower_third` per named-entity section (grouped by `entity_name`, no LLM involved), then an LLM pass handles optional list/infographic graphics and visual-effect distribution. See portal's `CLAUDE.md` for details.
+2. **Graphics audit** — `runGraphicsAudit()` in portal's `scripts/worker.mjs` deterministically assigns one `lower_third` per named-entity section (grouped by `entity_name`, no LLM involved), then an LLM pass handles optional list/infographic/info_callout graphics and visual-effect distribution (`info_callout` only on named-entity sentences — a judgment call, unlike the deterministic lower_third). See portal's `CLAUDE.md` for details.
 3. **Gate** — worker runs `venv/bin/python scripts/validate_job.py <path>`: `VALIDATION_ERROR` blocks Phase 2; `VALIDATION_WARNINGS` is logged but proceeds
 4. **Phase 2** — worker runs `venv/bin/python cli.py --job <path>`
 

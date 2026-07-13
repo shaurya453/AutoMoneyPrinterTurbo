@@ -19,6 +19,7 @@ from app.models.schema import (
     VideoParams,
     VideoTransitionMode,
 )
+from app.services import avatar
 from app.services import media as material
 from app.services import render as video
 from app.services import tts as voice
@@ -31,7 +32,8 @@ from app.services.pipeline._whisper import (
 )
 from app.services.pipeline._planning import (
     _trim_clip, _get_visual_concepts, _build_query_ladder, _TRIM_BUFFER,
-    plan_clip_slots, _CLIP_TARGET, _MIN_ANIM_DUR, _OUTRO_TAIL,
+    plan_clip_slots, plan_avatar_blocks, _CLIP_TARGET, _MIN_ANIM_DUR, _OUTRO_TAIL,
+    _COMPOSITE_GRAPHIC_TYPES,
 )
 from app.services.pipeline._fetch import (
     _fetch_clip,
@@ -139,6 +141,16 @@ def start(job_path: str) -> Optional[dict]:
     Run the full sentence-level documentary pipeline from a job JSON file.
     Returns a result dict with output paths on success, None on failure.
     """
+    # Published avatar assets (audio slices + image copy) are world-readable
+    # while the job runs — remove them on EVERY exit path, including raises.
+    _avatar_state: dict = {"dir": None}
+    try:
+        return _start_impl(job_path, _avatar_state)
+    finally:
+        avatar.cleanup_assets(_avatar_state["dir"])
+
+
+def _start_impl(job_path: str, _avatar_state: dict) -> Optional[dict]:
     with open(job_path, "r", encoding="utf-8") as fh:
         job = json.load(fh)
 
@@ -226,6 +238,17 @@ def start(job_path: str) -> Optional[dict]:
     logger.info(f"audio duration: {audio_duration}s")
 
     # ------------------------------------------------------------------ #
+    # 1b. Normalize narration loudness                                    #
+    # ------------------------------------------------------------------ #
+    # TTS providers vary wildly in output level (some near-silent, some
+    # clipping) — normalize before whisper alignment, since both extremes
+    # hurt its word-level accuracy. Runs on every job (reused or freshly
+    # generated audio) since it's cheap and safe to redo. Non-fatal: a
+    # failed pass just leaves the original audio.mp3 in place.
+    if not voice.normalize_narration_loudness(audio_file):
+        logger.warning("narration loudness normalization failed — continuing with original audio")
+
+    # ------------------------------------------------------------------ #
     # 2. Sentence timestamps via faster-whisper                           #
     # ------------------------------------------------------------------ #
     logger.info("aligning sentences with faster-whisper")
@@ -273,6 +296,9 @@ def start(job_path: str) -> Optional[dict]:
     # Crossfade trim-buffer padding is only consumed when combine_videos will
     # actually run ffmpeg xfade (see video.XFADE_CLIP_LIMIT) — otherwise it
     # would just inflate the final video's duration beyond the narration.
+    # Avatar blocks (below) collapse member slots into one clip each, so this
+    # slightly overcounts for avatar jobs — only making the xfade-vs-concat
+    # decision more conservative, which is fine.
     total_planned_clips = sum(len(p["durations"]) for p in clip_plans)
     apply_trim_buffer = total_planned_clips <= video.XFADE_CLIP_LIMIT
     trim_buffer = _TRIM_BUFFER if apply_trim_buffer else 0.0
@@ -281,6 +307,57 @@ def start(job_path: str) -> Optional[dict]:
         f"({'with' if apply_trim_buffer else 'without'} crossfade trim buffer; "
         f"xfade limit={video.XFADE_CLIP_LIMIT})"
     )
+
+    # ---- AI avatar blocks: contiguous avatar-marked sentences (portal's
+    # graphics audit sets sent["avatar"]) become ONE externally generated
+    # talking-head clip each, lip-synced to the block's slice of the master
+    # narration (see app/services/avatar.py). Unconfigured/missing pieces
+    # degrade the job to normal footage rather than failing it.
+    avatar_blocks: List[dict] = []
+    _avatar_image_path = str(job.get("avatar_image") or "")
+    _avatar_image_url: Optional[str] = None
+    _avatar_local_dir: Optional[str] = None
+    _avatar_url_prefix: Optional[str] = None
+    _avatar_requested = bool(_avatar_image_path) and any(s.get("avatar") for s in sentences)
+    if _avatar_requested and not avatar.is_enabled():
+        logger.warning(
+            "job requests an avatar but avatar_enabled/runpod_api_key are not "
+            "configured — demoting avatar sentences to normal footage"
+        )
+        for s in sentences:
+            s.pop("avatar", None)
+    elif _avatar_requested and not os.path.isfile(_avatar_image_path):
+        logger.warning(
+            f"avatar_image not found on disk ({_avatar_image_path}) — "
+            "demoting avatar sentences to normal footage"
+        )
+        for s in sentences:
+            s.pop("avatar", None)
+    elif _avatar_requested:
+        avatar_blocks, _ = plan_avatar_blocks(clip_plans)
+        if avatar_blocks and not avatar.dry_run_enabled():
+            _avatar_local_dir, _avatar_url_prefix = avatar.publish_dir(task_id)
+            _avatar_state["dir"] = _avatar_local_dir
+            if _avatar_local_dir:
+                _ext = os.path.splitext(_avatar_image_path)[1] or ".png"
+                _avatar_image_url = avatar.publish_asset(
+                    _avatar_image_path, _avatar_local_dir, _avatar_url_prefix, f"avatar{_ext}"
+                )
+            if not _avatar_image_url:
+                logger.warning("avatar: asset publish failed — demoting to normal footage")
+                avatar_blocks = []
+                for s in sentences:
+                    s.pop("avatar", None)
+        if avatar_blocks:
+            logger.info(
+                "avatar blocks: " + "; ".join(
+                    f"sentences {b['member_idxs'][0]}–{b['member_idxs'][-1]} "
+                    f"({b['planned_duration']:.1f}s from {b['slot_start']:.1f}s)"
+                    for b in avatar_blocks
+                )
+            )
+    _avatar_first = {b["first_idx"]: b for b in avatar_blocks}
+    _avatar_members = {i for b in avatar_blocks for i in b["member_idxs"]}
 
     # Topic-wide pool of visual concepts (deduped, order-preserving), used as
     # a last-resort fallback so a sentence whose own concepts are exhausted
@@ -421,10 +498,54 @@ def start(job_path: str) -> Optional[dict]:
                 f"{len(durations)} clip(s) {'(image)' if is_image else ''} — {preview}"
             )
 
-            # lower_third Revideo clip for this sentence (composited onto footage).
+            # Pending composite-over-footage graphic clip for this sentence
+            # (lower_third or info_callout — see _COMPOSITE_GRAPHIC_TYPES).
             # Stored in every clip's metadata for the sentence so it can fall
             # through to the second clip if the first fetch fails.
-            _lt_for_sentence: Optional[str] = None
+            _pending_overlay_gfx: Optional[str] = None
+
+            # AI avatar block — the block's FIRST sentence submits one
+            # generation covering every member slot; the rest are skipped.
+            # Submitting here (the intro block is first) lets the minutes-long
+            # RunPod call overlap all the ordinary footage fetches.
+            if idx in _avatar_members:
+                if idx not in _avatar_first:
+                    continue  # slot covered by the block's single clip
+                _blk = _avatar_first[idx]
+                _av_w, _av_h = video_aspect.to_resolution()
+                future = executor.submit(
+                    avatar.generate_avatar_clip,
+                    image_path=_avatar_image_path,
+                    audio_file=audio_file,
+                    # Lip-sync to the block's slice of the master narration;
+                    # the trim_buffer tail is frame-cloned in normalization,
+                    # not narrated, so it stays out of the audio slice.
+                    t_start=_blk["slot_start"],
+                    t_end=_blk["slot_start"] + _blk["planned_duration"],
+                    planned_duration=_blk["planned_duration"] + trim_buffer,
+                    clips_dir=clips_dir,
+                    clip_idx=clip_counter,
+                    width=_av_w,
+                    height=_av_h,
+                    image_url=_avatar_image_url,
+                    local_dir=_avatar_local_dir,
+                    url_prefix=_avatar_url_prefix,
+                    report=quality_report,
+                )
+                _task_queue.append((future, {
+                    "type": "avatar",
+                    "clip_idx": clip_counter,
+                    "sent": sent,
+                    "clip_duration": _blk["planned_duration"],
+                    "is_image": False,
+                    "visual_effect": "",
+                    "overlay_gfx_clip": None,
+                    "idx": idx,
+                    "member_idxs": _blk["member_idxs"],
+                }))
+                clip_counter += 1
+                _planned_video_count += 1
+                continue
 
             # Narrated graphic — sentence has real VO text AND graphic_type set.
             # Revideo renders are synchronous subprocesses; keep them sequential.
@@ -442,6 +563,10 @@ def start(job_path: str) -> Optional[dict]:
                     _trim_target = max(whisper_dur, _GRAPHIC_MIN_DUR)
                     render_dur   = max(_trim_target, _MIN_ANIM_DUR)
                 else:
+                    # lower_third, info_callout — composite-over-footage types use
+                    # whisper-driven duration, not a hardcoded floor like the
+                    # footage-replacing types above (they're sized by narration
+                    # length; their own reveal animations self-scale to fit).
                     _trim_target = whisper_dur
                     render_dur   = max(whisper_dur, _MIN_ANIM_DUR)
 
@@ -468,17 +593,25 @@ def start(job_path: str) -> Optional[dict]:
                             f"sentence {idx+1}: anim trim failed — using full {render_dur:.2f}s clip"
                         )
                 if rendered:
-                    if sent.get("graphic_type") == "lower_third":
-                        _lt_label = str(sent.get("variables", {}).get("label", "")).strip().lower()
-                        if _lt_label and _lt_label in _seen_lower_third_labels:
-                            logger.info(
-                                f"sentence {idx+1}: lower_third label '{_lt_label}' already shown — skipping"
-                            )
-                            rendered = None  # discard; fall through to plain footage fetch
+                    gtype = sent.get("graphic_type")
+                    if gtype in _COMPOSITE_GRAPHIC_TYPES:
+                        if gtype == "lower_third":
+                            _lt_label = str(sent.get("variables", {}).get("label", "")).strip().lower()
+                            if _lt_label and _lt_label in _seen_lower_third_labels:
+                                logger.info(
+                                    f"sentence {idx+1}: lower_third label '{_lt_label}' already shown — skipping"
+                                )
+                                rendered = None  # discard; fall through to plain footage fetch
+                            else:
+                                if _lt_label:
+                                    _seen_lower_third_labels.add(_lt_label)
+                                _pending_overlay_gfx = rendered
                         else:
-                            if _lt_label:
-                                _seen_lower_third_labels.add(_lt_label)
-                            _lt_for_sentence = rendered
+                            # info_callout has no single "label" to dedupe on —
+                            # each occurrence is already a fresh, sentence-specific
+                            # LLM judgment call, rate-limited by its own cap in
+                            # validate_job.py instead.
+                            _pending_overlay_gfx = rendered
                     else:
                         # Standalone graphic — enqueue directly; no fetch needed.
                         _task_queue.append((None, {
@@ -570,7 +703,7 @@ def start(job_path: str) -> Optional[dict]:
                     "clip_duration": clip_duration,
                     "is_image": is_image,
                     "visual_effect": visual_effect,
-                    "lt_gfx_clip": _lt_for_sentence,  # same for all clips of sentence
+                    "overlay_gfx_clip": _pending_overlay_gfx,  # same for all clips of sentence
                     "idx": idx,
                 }))
                 clip_counter += 1
@@ -582,7 +715,7 @@ def start(job_path: str) -> Optional[dict]:
 
         # ---- Phase B: collect results in original order + post-process ----
         _last_visual_effect: str = ""
-        _lt_composited_sentences: set = set()  # lower_third applied for these sentence indices
+        _overlay_composited_sentences: set = set()  # composite-overlay graphic applied for these sentence indices
         _sentence_got_clip: set = set()
 
         for future_or_none, meta in _task_queue:
@@ -602,6 +735,42 @@ def start(job_path: str) -> Optional[dict]:
             except Exception as exc:
                 logger.warning(f"clip {meta['clip_idx']}: fetch raised — {exc}")
                 fetched = None
+            if meta["type"] == "avatar":
+                # generate_avatar_clip returns a bare path — adapt to
+                # _fetch_clip's (path, used_image) contract so the shared
+                # post-processing below applies unchanged. On failure the
+                # block falls through to the normal rescue → placeholder
+                # ladder using the first sentence's own visual_concepts.
+                fetched = (fetched, False) if fetched else None
+                if not fetched:
+                    logger.warning(
+                        f"clip {meta['clip_idx']}: avatar block failed — "
+                        "falling back to footage for the whole block"
+                    )
+                    # Unlike a failed broll slot, this sentence's own concepts
+                    # are still fresh (the primary fetch never ran for avatar
+                    # slots) — try them before the generic rescue ladder below.
+                    fetched = _fetch_clip(
+                        sentence=meta["sent"],
+                        sent_duration=meta["clip_duration"],
+                        trim_buffer=trim_buffer,
+                        source=video_source,
+                        video_aspect=video_aspect,
+                        clip_idx=meta["clip_idx"],
+                        clips_dir=clips_dir,
+                        used_urls=used_urls,
+                        fallback_terms=_all_concepts,
+                        video_topic=video_topic,
+                        video_type=video_type,
+                        recent_embeddings=recent_embs,
+                        dedup_threshold=dedup_threshold,
+                        deadline=time.monotonic() + rescue_budget_seconds,
+                        rng=job_rng,
+                        report=quality_report,
+                    )
+                    # Stamp AFTER the fetch — _fetch_clip's _record rewrites
+                    # the whole report entry.
+                    quality_report.setdefault(meta["clip_idx"], {})["avatar_failed"] = True
             # Stamp only after the fetch resolved: _fetch_*'s _record writes the
             # whole report entry, so stamping earlier would race and be lost.
             quality_report.setdefault(meta["clip_idx"], {})["sentence_idx"] = idx
@@ -727,29 +896,35 @@ def start(job_path: str) -> Optional[dict]:
                         threads=os.cpu_count() or 4,
                     )
 
-                # lower_third composite — apply on the first successful clip of the sentence.
-                # Consume the slot regardless of success so a failed ffmpeg call doesn't
-                # cause all remaining clips in the sentence to retry the same broken composite.
-                lt_gfx_clip = meta.get("lt_gfx_clip")
-                if lt_gfx_clip and idx not in _lt_composited_sentences:
-                    _lt_composited_sentences.add(idx)
-                    lt_out = clip_path.replace(".mp4", "_lt.mp4")
-                    lt_w, lt_h = video_aspect.to_resolution()
-                    lt_result = video.composite_lower_third(
-                        clip_path, lt_gfx_clip, lt_out,
-                        lt_w, lt_h, threads=os.cpu_count() or 4,
+                # Composite-over-footage graphic (lower_third or info_callout) —
+                # apply on the first successful clip of the sentence. Consume the
+                # slot regardless of success so a failed ffmpeg call doesn't cause
+                # all remaining clips in the sentence to retry the same broken
+                # composite. composite_lower_third() is fully generic (colorkey +
+                # alpha-fade + overlay) despite its name — reused unchanged here.
+                overlay_gfx_clip = meta.get("overlay_gfx_clip")
+                if overlay_gfx_clip and idx not in _overlay_composited_sentences:
+                    _overlay_composited_sentences.add(idx)
+                    overlay_out = clip_path.replace(".mp4", "_overlay.mp4")
+                    ov_w, ov_h = video_aspect.to_resolution()
+                    overlay_result = video.composite_lower_third(
+                        clip_path, overlay_gfx_clip, overlay_out,
+                        ov_w, ov_h, threads=os.cpu_count() or 4,
                     )
-                    if lt_result:
-                        clip_path = lt_result
+                    if overlay_result:
+                        clip_path = overlay_result
                     else:
                         logger.warning(
-                            f"sentence {idx+1}: lower_third composite failed — "
-                            "footage used without label overlay"
+                            f"sentence {idx+1}: composite-over-footage graphic failed — "
+                            "footage used without overlay"
                         )
 
                 _last_visual_effect = visual_effect
                 ordered_clips.append(clip_path)
-                _recent_real_clips.append(clip_path)
+                # A talking head is the worst possible anchor for a looped
+                # placeholder — keep avatar clips out of the anchor pool.
+                if meta["type"] != "avatar":
+                    _recent_real_clips.append(clip_path)
                 if used_image:
                     _img_src = (quality_report.get(meta["clip_idx"]) or {}).get("image_path", "")
                     if _img_src:
@@ -762,6 +937,8 @@ def start(job_path: str) -> Optional[dict]:
                 else:
                     video_clip_count += 1
                 _sentence_got_clip.add(idx)
+                # An avatar clip covers every sentence in its block.
+                _sentence_got_clip.update(meta.get("member_idxs", ()))
             else:
                 # Fetch failed — insert a placeholder clip of the correct duration so
                 # the video timeline stays in sync with the audio narration.
@@ -892,6 +1069,13 @@ def start(job_path: str) -> Optional[dict]:
                     video_clip_count += 1
                     _placeholder_run_len += 1
                     quality_report.setdefault(meta["clip_idx"], {})["placeholder_used"] = True
+                    # A placeholder still covers the sentence(s) on the timeline —
+                    # without this, every placeholder-filled sentence (and every
+                    # member of a failed avatar block) wrongly logs as "no clip
+                    # available" below and is misreported in quality.json.
+                    _sentence_got_clip.add(idx)
+                    if meta["type"] == "avatar":
+                        _sentence_got_clip.update(meta.get("member_idxs", ()))
                     logger.warning(
                         f"clip {meta['clip_idx']}: fetch failed — inserted "
                         f"{clip_duration:.2f}s placeholder to maintain A/V sync"

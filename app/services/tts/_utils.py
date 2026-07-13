@@ -1,9 +1,10 @@
 """Shared TTS utilities used by all engine modules."""
+import json
 import os
 import re
 import subprocess
 import unicodedata
-from typing import Union
+from typing import Optional, Union
 
 from edge_tts import SubMaker
 from loguru import logger
@@ -154,3 +155,104 @@ def get_audio_duration(target: Union[str, SubMaker]) -> float:
     else:
         logger.error(f"Invalid target type: {type(target)}")
         return 0.0
+
+
+# EBU R128 loudness targets for narration — standard online/social video levels.
+# TP (true-peak ceiling) is what actually prevents clipping; I (integrated
+# loudness) is what fixes providers that render too quiet.
+_LOUDNORM_TARGET_I = -16.0
+_LOUDNORM_TARGET_TP = -1.5
+_LOUDNORM_TARGET_LRA = 11.0
+
+
+def _measure_loudness(ffmpeg_binary: str, input_path: str) -> Optional[dict]:
+    """First pass: analyze the file's actual loudness stats via ffmpeg's
+    loudnorm filter in measure-only mode (output discarded to -f null)."""
+    cmd = [
+        ffmpeg_binary, "-i", input_path,
+        "-af", (
+            f"loudnorm=I={_LOUDNORM_TARGET_I}:TP={_LOUDNORM_TARGET_TP}:"
+            f"LRA={_LOUDNORM_TARGET_LRA}:print_format=json"
+        ),
+        "-f", "null", "-",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except Exception as exc:
+        logger.warning(f"loudness measurement failed to run: {exc}")
+        return None
+    # loudnorm prints its JSON stats block to stderr, after everything else.
+    stderr = result.stderr or ""
+    start = stderr.rfind("{")
+    end = stderr.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        return None
+    try:
+        return json.loads(stderr[start:end + 1])
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+def normalize_narration_loudness(audio_path: str) -> bool:
+    """Two-pass EBU R128 loudness normalization, applied in place.
+
+    TTS providers vary wildly in output level — some render near-silent,
+    some clip — which both hurt faster-whisper's word-level alignment
+    accuracy, so this runs right after TTS and before that alignment step.
+    Falls back to single-pass (less precise, but still corrects gross
+    over/under-loud audio) if the measurement pass fails; never raises —
+    a failed normalization just leaves the original audio in place.
+    """
+    if not os.path.exists(audio_path):
+        logger.warning(f"normalize_narration_loudness: file not found — {audio_path}")
+        return False
+
+    ffmpeg_binary = utils.get_ffmpeg_binary()
+    stats = _measure_loudness(ffmpeg_binary, audio_path)
+    if stats:
+        af = (
+            f"loudnorm=I={_LOUDNORM_TARGET_I}:TP={_LOUDNORM_TARGET_TP}:"
+            f"LRA={_LOUDNORM_TARGET_LRA}:"
+            f"measured_I={stats.get('input_i')}:"
+            f"measured_TP={stats.get('input_tp')}:"
+            f"measured_LRA={stats.get('input_lra')}:"
+            f"measured_thresh={stats.get('input_thresh')}:"
+            f"offset={stats.get('target_offset', 0)}:"
+            f"linear=true:print_format=summary"
+        )
+    else:
+        logger.warning(
+            f"loudness measurement pass failed for {audio_path} — "
+            "falling back to single-pass normalization"
+        )
+        af = (
+            f"loudnorm=I={_LOUDNORM_TARGET_I}:TP={_LOUDNORM_TARGET_TP}:"
+            f"LRA={_LOUDNORM_TARGET_LRA}"
+        )
+
+    tmp_path = audio_path + ".loudnorm.mp3"
+    cmd = [
+        ffmpeg_binary, "-y", "-loglevel", "error",
+        "-i", audio_path, "-af", af,
+        "-ar", "44100", "-c:a", "libmp3lame",
+        tmp_path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except Exception as exc:
+        logger.warning(f"loudness normalization exception — {exc}")
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        return False
+
+    if result.returncode != 0 or not os.path.exists(tmp_path) or os.path.getsize(tmp_path) <= 0:
+        logger.warning(
+            f"loudness normalization failed — {(result.stderr or '').strip()[-300:]}"
+        )
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        return False
+
+    os.replace(tmp_path, audio_path)
+    logger.info(f"normalized narration loudness → {audio_path}")
+    return True

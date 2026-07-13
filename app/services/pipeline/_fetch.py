@@ -646,7 +646,7 @@ def _fetch_clip(
     content_track = sentence.get("content_track", "broll")
     named_source_order = config.app.get(
         "named_track_image_source_order",
-        ["serper", "duckduckgo", "wikimedia", "openverse", "pexels", "pixabay", "unsplash"],
+        ["serper", "duckduckgo", "wikimedia", "pexels", "pixabay", "unsplash"],
     )
 
     args_video = (sentence, sent_duration, trim_buffer, source, video_aspect, clip_idx, clips_dir, used_urls, caption_prompt, video_ladder)

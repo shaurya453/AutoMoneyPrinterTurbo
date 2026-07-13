@@ -6,6 +6,10 @@ Visual concepts are auto-extracted as a rough scaffold only — the agent
 running this pipeline must rewrite them (and set media_type, content_track)
 in Step 2 before calling cli.py.
 
+A <<PLUG>>...<</PLUG>> marker pair in the script wraps the product-plug
+paragraph; its sentences get "is_plug": true in the output and the marker
+tokens themselves are stripped before sentence splitting.
+
 Usage:
     python sentence_prep.py --script script.txt --out job.json
     python sentence_prep.py --script script.txt --out job.json \\
@@ -49,6 +53,47 @@ def strip_markdown(text: str) -> str:
     # Horizontal rules (--- or *** on their own line)
     text = re.sub(r"^\s*[-\*]{3,}\s*$", "", text, flags=re.MULTILINE)
     return text
+
+
+# ---------------------------------------------------------------------------
+# Product-plug marker
+# ---------------------------------------------------------------------------
+
+_PLUG_RE = re.compile(r"<<PLUG>>(.*?)<</PLUG>>", re.DOTALL | re.IGNORECASE)
+
+
+def extract_plug_span(text: str) -> tuple[str, tuple[int, int] | None]:
+    """Strip <<PLUG>>...<</PLUG>> marker tokens from text, returning the
+    cleaned text and the (start, end) char span of the FIRST marked span's
+    inner content within that cleaned text. Returns (text, None) if no marker
+    is present. If more than one marker pair is found, only the first is used
+    as the plug span, but every pair's tokens are stripped so no literal
+    marker text survives into the script either way.
+    """
+    matches = list(_PLUG_RE.finditer(text))
+    if not matches:
+        return text, None
+
+    if len(matches) > 1:
+        print(
+            f"Warning: {len(matches)} <<PLUG>> marker pairs found; only the "
+            "first will be used as the plug block.",
+            file=sys.stderr,
+        )
+
+    cleaned_parts = []
+    plug_span = None
+    cursor = 0
+    for i, m in enumerate(matches):
+        cleaned_parts.append(text[cursor:m.start()])
+        inner_start = sum(len(p) for p in cleaned_parts)
+        cleaned_parts.append(m.group(1))
+        inner_end = inner_start + len(m.group(1))
+        if i == 0:
+            plug_span = (inner_start, inner_end)
+        cursor = m.end()
+    cleaned_parts.append(text[cursor:])
+    return "".join(cleaned_parts), plug_span
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +232,7 @@ def main():
         raw_text = fh.read()
 
     raw_text = strip_markdown(raw_text)
+    raw_text, plug_span = extract_plug_span(raw_text)
 
     if not raw_text.strip():
         print("Error: script file is empty.", file=sys.stderr)
@@ -197,18 +243,31 @@ def main():
     from nltk.corpus import stopwords as nltk_stopwords
     stopwords_set = set(nltk_stopwords.words("english"))
 
-    sentences = split_sentences(raw_text)
-    print(f"Sentences detected: {len(sentences)}")
+    if plug_span:
+        start, end = plug_span
+        before_sents = split_sentences(raw_text[:start])
+        plug_sents = split_sentences(raw_text[start:end])
+        after_sents = split_sentences(raw_text[end:])
+        sentences = before_sents + plug_sents + after_sents
+        plug_indices = set(range(len(before_sents), len(before_sents) + len(plug_sents)))
+        print(f"Sentences detected: {len(sentences)} ({len(plug_sents)} marked as plug block)")
+    else:
+        sentences = split_sentences(raw_text)
+        plug_indices = set()
+        print(f"Sentences detected: {len(sentences)}")
 
     sentence_entries = []
-    for sent in sentences:
+    for idx, sent in enumerate(sentences):
         terms = extract_search_terms(sent, stopwords_set, n=args.terms)
-        sentence_entries.append({
+        entry = {
             "text": sent,
             "visual_concepts": terms,
             "content_track": "broll",
             "media_type": "video",
-        })
+        }
+        if idx in plug_indices:
+            entry["is_plug"] = True
+        sentence_entries.append(entry)
 
     task_id = args.task_id or str(uuid.uuid4())
 

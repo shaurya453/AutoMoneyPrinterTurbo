@@ -15,6 +15,8 @@ from ._common import (
 _VALID_VISUAL_EFFECTS = frozenset({
     "threat", "cold", "warmth", "mystery", "sepia",
     "tech", "hacker_tech", "dream", "noir", "nature", "revelation",
+    "urgency", "euphoria", "corporate", "glitch_soft", "confusion",
+    "network", "royalty", "static_dread", "toxic",
 })
 
 _OVERLAY_DIR = os.path.normpath(
@@ -35,6 +37,18 @@ _EFFECT_OVERLAYS: dict[str, dict] = {
     "nature":      {"file": "nature_dust.mp4",       "mode": "screen",   "opacity": 1.0},
     "tech":        {"file": "tech_scanlines.mp4",    "mode": "screen",   "opacity": 1.0},
     "hacker_tech": {"file": "hacker_tech.mp4",       "mode": "screen",   "opacity": 1.0},
+    "urgency":      {"file": "urgency.mp4",          "mode": "screen",   "opacity": 1.0},
+    "euphoria":     {"file": "euphoria.mp4",         "mode": "screen",   "opacity": 1.0},
+    "corporate":    {"file": "corporate.mp4",        "mode": "screen",   "opacity": 1.0},
+    "glitch_soft":  {"file": "glitch_soft.mp4",      "mode": "screen",   "opacity": 1.0},
+    "confusion":    {"file": "confusion.mp4",        "mode": "screen",   "opacity": 1.0},
+    "network":      {"file": "polygon_grid.mp4",     "mode": "screen",   "opacity": 1.0},
+    "royalty":      {"file": "royalty.mp4",          "mode": "screen",   "opacity": 1.0},
+    "toxic":        {"file": "toxic.mp4",            "mode": "screen",   "opacity": 1.0},
+    # static_dread is bright, full-frame grayscale noise (like sepia_grain,
+    # not a sparse-on-black overlay) — screen at opacity 1.0 would whiteout
+    # the footage under it; multiply darkens instead, keeping it legible.
+    "static_dread": {"file": "static_dread.mp4",     "mode": "multiply", "opacity": 1.0},
 }
 
 _OVERLAY_FADE_DUR = 0.5   # seconds — fade-in at start, fade-out at end

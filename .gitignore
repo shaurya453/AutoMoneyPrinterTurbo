@@ -25,6 +25,8 @@ node_modules
 ./models/*
 resource/kokoro/*.onnx
 resource/kokoro/*.bin
+# User-provided avatar likenesses — never publish to GitHub
+/resource/avatars/
 
 venv/
 .venv

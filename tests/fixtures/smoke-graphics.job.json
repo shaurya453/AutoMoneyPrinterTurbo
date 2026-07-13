@@ -26,8 +26,10 @@
       "visual_concepts": ["WH-1000XM5 charging cable", "headphones battery indicator", "long flight passenger headphones"],
       "content_track": "named",
       "entity_name": "Sony WH-1000XM5",
-      "media_type": "video",
-      "visual_caption": "traveler using headphones on a long trip"
+      "media_type": "image",
+      "visual_caption": "traveler using headphones on a long trip",
+      "graphic_type": "info_callout",
+      "variables": { "labels": ["30-Hour Battery", "Adaptive ANC", "USB-C Fast Charge"] }
     },
     {
       "text": "Three things matter most when choosing a pair.",

@@ -48,6 +48,15 @@ _EFFECT_ANIM_WEIGHTS: dict[str, dict[str, int]] = {
     "sepia":       {"pan_lr": 3},
     "hacker_tech": {"zoom_in": 2},
     "noir":        {"zoom_in": 2},
+    "urgency":      {"zoom_in": 3},
+    "euphoria":     {"zoom_out": 2},
+    "corporate":    {"pan_lr": 2},
+    "glitch_soft":  {"zoom_in": 2},
+    "confusion":    {"screen_3d_lr": 2, "screen_3d_ud": 1},
+    "network":      {"pan_lr": 2},
+    "royalty":      {"zoom_in": 2},
+    "static_dread": {"zoom_in": 2},
+    "toxic":        {"pan_ud": 2},
 }
 
 

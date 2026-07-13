@@ -13,6 +13,12 @@
         {"project": "src/projects/lower-third.ts", "styles": [], "label": "left-anchored label, only variant"}
       ]
     },
+    "info_callout": {
+      "uses_bg_video": false,
+      "variants": [
+        {"project": "src/projects/info-callout.ts", "styles": [], "label": "three-box callout with leader lines, only variant"}
+      ]
+    },
     "infographic": {
       "uses_bg_video": true,
       "variants": [

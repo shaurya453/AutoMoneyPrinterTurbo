@@ -69,6 +69,13 @@ _MIN_ANIM_DUR = 2.5  # conservative cover for all 4 title-card animation variant
 _IMAGE_CLIP_MAX = 7.0  # max seconds per individual Ken Burns image clip
 _OUTRO_TAIL = 2.0  # extra footage past audio end so the fade-out plays on live content
 
+# Graphic types that composite OVER fetched footage (colorkey overlay, via
+# effects.composite_lower_third()) rather than REPLACING the footage slot
+# entirely (infographic/list, rendered standalone). The sentence still gets
+# a normal footage/Ken-Burns fetch; the graphic clip is composited onto it
+# afterward.
+_COMPOSITE_GRAPHIC_TYPES = frozenset({"lower_third", "info_callout"})
+
 
 def plan_clip_slots(timings: List[tuple], audio_duration: float) -> List[dict]:
     """Pass 1: plan per-sentence clip durations using absolute resync.
@@ -152,6 +159,7 @@ def plan_clip_slots(timings: List[tuple], audio_duration: float) -> List[dict]:
             "is_image": is_image,
             "durations": durations,
             "sent_audio_dur": sent_audio_dur,
+            "slot_start": start_k,
         })
 
     # Extend the last clip's slot by _OUTRO_TAIL so the combined video naturally
@@ -161,6 +169,50 @@ def plan_clip_slots(timings: List[tuple], audio_duration: float) -> List[dict]:
         clip_plans[-1]["durations"][-1] += _OUTRO_TAIL
 
     return clip_plans
+
+
+def plan_avatar_blocks(clip_plans: List[dict]) -> Tuple[List[dict], List[int]]:
+    """Group contiguous avatar-marked plans into blocks.
+
+    A plan joins a block when its sentence has `avatar` truthy and no
+    `graphic_type` (the portal audit guarantees mutual exclusion; this is
+    defensive against hand-edited jobs). Each block becomes ONE timeline clip,
+    lip-synced to the sum of its slot durations.
+
+    No length cap: an earlier ~15s appearance cap existed purely as an
+    assumed API-safety hedge, but live RunPod testing (2026-07-12) found no
+    failure mode tied to generation duration (15s and 30s clips both
+    succeeded identically). Blocks are never trimmed or dropped for length —
+    the second parameter (`demoted_idxs`) is always empty now and exists only
+    so callers don't need to special-case the return shape.
+
+    Pure: mutates nothing; returns (blocks, demoted_idxs). Block dicts:
+    {"first_idx", "member_idxs", "slot_start", "planned_duration"}.
+    """
+    def _is_avatar(plan: dict) -> bool:
+        sent = plan.get("sent") or {}
+        return bool(sent.get("avatar")) and not sent.get("graphic_type")
+
+    blocks: List[dict] = []
+    demoted: List[int] = []
+    i = 0
+    n = len(clip_plans)
+    while i < n:
+        if not _is_avatar(clip_plans[i]):
+            i += 1
+            continue
+        run = [i]
+        while run[-1] + 1 < n and _is_avatar(clip_plans[run[-1] + 1]):
+            run.append(run[-1] + 1)
+        i = run[-1] + 1
+
+        blocks.append({
+            "first_idx": run[0],
+            "member_idxs": list(run),
+            "slot_start": clip_plans[run[0]]["slot_start"],
+            "planned_duration": sum(sum(clip_plans[j]["durations"]) for j in run),
+        })
+    return blocks, demoted
 
 
 def _get_visual_concepts(sentence: dict) -> List[str]:

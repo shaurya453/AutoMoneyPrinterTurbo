@@ -12,6 +12,9 @@ Hard errors (exit 1):
   - video_script missing or empty
   - sentences missing or empty
   - content_track='graphic' used (no longer supported; use broll + graphic_type)
+  - any sentence has avatar=true but top-level avatar_image is missing/empty
+  - literal <<PLUG>> or <</PLUG>> marker text found in a sentence or video_script
+    (sentence_prep.py should have stripped it — would otherwise be spoken/shown)
 
 Warnings (exit 0, logged by worker):
   - video_topic missing
@@ -29,10 +32,23 @@ Warnings (exit 0, logged by worker):
   - concept[0] used > 4 times total (AGENT_GUIDE hard limit)
   - Same concept[0] on > 2 consecutive enrichable sentences
   - Unique concept[0] count below max(15, ceil(N/4)) for videos ≥ 20 sentences
-  - Unknown visual_effect value on any sentence (valid: threat/cold/warmth/mystery/sepia/tech/hacker_tech/dream/noir/nature/revelation)
+  - Unknown visual_effect value on any sentence (valid: threat/cold/warmth/mystery/sepia/tech/
+    hacker_tech/dream/noir/nature/revelation/urgency/euphoria/corporate/glitch_soft/confusion/
+    network/royalty/static_dread/toxic)
   - visual_effect set on a graphic sentence
-  - Effect-bearing sentences below 40% of broll/named sentences (target density)
-  - Any two adjacent broll/named sentences both carry a visual_effect
+  - Effect-bearing sentences below 50% of broll/named sentences (target density; adjacent
+    effect-bearing sentences are fine — an overlay persisting across clips isn't jarring)
+  - info_callout used on a sentence that is not content_track='named'
+  - info_callout variables.labels is not a list of exactly 3 non-empty strings
+  - More than 5 info_callout graphics total, or two info_callout graphics too close together
+    (own cap/spacing, separate from the infographic/list pool below — info_callout composites
+    over footage like lower_third rather than replacing it, so shares that cost class instead)
+
+Avatar warnings (talking-head blocks — see app/services/avatar.py):
+  - avatar_image path does not exist on disk
+  - avatar_image set but sentence 0 lacks avatar=true (intro is FIXED avatar)
+  - more than 2 contiguous avatar blocks
+  - avatar sentence also carrying graphic_type or visual_effect
 
 Hook Zone warnings (sentences 0–4):
   - lower_third, infographic, or list graphic_type in sentences 0–4
@@ -43,16 +59,19 @@ Hook Zone warnings (sentences 0–4):
 
 import json
 import math
+import os
 import sys
 
 _HOOK_ZONE = 5  # first N sentences constitute the hook zone (~30 s at normal narration speed)
 
-_VALID_GTYPES = frozenset({"lower_third", "infographic", "list"})
+_VALID_GTYPES = frozenset({"lower_third", "infographic", "list", "info_callout"})
 _HOOK_BANNED_GTYPES = _VALID_GTYPES  # all graphic types are banned from the hook zone
 
 _VALID_VISUAL_EFFECTS = frozenset({
     "threat", "cold", "warmth", "mystery", "sepia",
     "tech", "hacker_tech", "dream", "noir", "nature", "revelation",
+    "urgency", "euphoria", "corporate", "glitch_soft", "confusion",
+    "network", "royalty", "static_dread", "toxic",
 })
 
 _STOPWORDS = {
@@ -152,6 +171,7 @@ def main():
     concept_slot_counts: dict = {1: {}, 2: {}}  # slot → value → count (broad-slot collapse)
     enrichable: list = []         # (sentence_index, concept0) for non-graphic sentences
     non_lt_graphic_indices: list = []  # sentence indices with infographic/list graphic_type
+    info_callout_indices: list = []  # sentence indices with info_callout graphic_type (own cap/spacing)
     named_entities: set = set()   # distinct entity_name values on named sentences
 
     text_errors = []
@@ -181,7 +201,8 @@ def main():
                     f"sentence {i}: graphic_type={gtype!r} is not a valid type. "
                     f"Valid types: {sorted(_VALID_GTYPES)}"
                 )
-            if not isinstance(sent.get("variables"), dict):
+            variables = sent.get("variables")
+            if not isinstance(variables, dict):
                 warnings.append(
                     f"sentence {i}: graphic_type={gtype!r} has no 'variables' dict — "
                     "graphic will render blank. All fields (title, label, items, style, etc.) "
@@ -189,6 +210,26 @@ def main():
                 )
             if gtype_str in ("infographic", "list"):
                 non_lt_graphic_indices.append(i)
+            elif gtype_str == "info_callout":
+                info_callout_indices.append(i)
+                if track != "named":
+                    warnings.append(
+                        f"sentence {i}: info_callout used on a sentence that is not "
+                        f"content_track='named' (track={track!r}) — info_callout only makes "
+                        "sense pointing at a named-entity product image"
+                    )
+                if isinstance(variables, dict):
+                    labels = variables.get("labels")
+                    valid_labels = (
+                        isinstance(labels, list)
+                        and len(labels) == 3
+                        and all(isinstance(l, str) and l.strip() for l in labels)
+                    )
+                    if not valid_labels:
+                        warnings.append(
+                            f"sentence {i}: info_callout variables.labels must be a list of "
+                            f"exactly 3 non-empty strings, got {labels!r}"
+                        )
 
         if track in ("broll", "named") and not text:
             text_errors.append(
@@ -277,8 +318,8 @@ def main():
         if gtype in _HOOK_BANNED_GTYPES:
             warnings.append(
                 f"hook zone violation — sentence {i}: graphic_type={gtype!r} is banned "
-                f"in sentences 0–{_HOOK_ZONE - 1}; save lower_thirds, infographics, and lists "
-                "for after the viewer is hooked"
+                f"in sentences 0–{_HOOK_ZONE - 1}; save all graphics (lower_third, infographic, "
+                "list, info_callout) for after the viewer is hooked"
             )
 
         if track in ("broll", "named"):
@@ -315,6 +356,77 @@ def main():
             flush=True,
         )
         sys.exit(1)
+
+    # ── Leaked plug marker ───────────────────────────────────────────────────
+    # sentence_prep.py strips <<PLUG>>/<</PLUG>> tokens before splitting; if
+    # either survives into a sentence or video_script, it would be read aloud
+    # by TTS or shown on-screen.
+    plug_marker_hits = [
+        i for i, s in enumerate(sentences)
+        if "<<PLUG>>" in (s.get("text") or "") or "<</PLUG>>" in (s.get("text") or "")
+    ]
+    script_has_marker = "<<PLUG>>" in (data.get("video_script") or "") or \
+        "<</PLUG>>" in (data.get("video_script") or "")
+    if plug_marker_hits or script_has_marker:
+        print(
+            "VALIDATION_ERROR: literal <<PLUG>>/<</PLUG>> marker text found "
+            f"in sentence(s) {plug_marker_hits} or video_script "
+            f"({script_has_marker}) — sentence_prep.py should have stripped it",
+            flush=True,
+        )
+        sys.exit(1)
+
+    # ── Avatar checks ────────────────────────────────────────────────────────
+    avatar_image = str(data.get("avatar_image") or "").strip()
+    avatar_idxs = [i for i, s in enumerate(sentences) if s.get("avatar")]
+
+    if avatar_idxs and not avatar_image:
+        print(
+            f"VALIDATION_ERROR: {len(avatar_idxs)} sentence(s) have avatar=true "
+            "but top-level avatar_image is missing — the pipeline cannot generate "
+            "a talking head without a source image",
+            flush=True,
+        )
+        sys.exit(1)
+
+    if avatar_image:
+        if not os.path.isfile(avatar_image):
+            warnings.append(
+                f"avatar_image does not exist on disk ({avatar_image!r}) — "
+                "the pipeline will demote every avatar sentence to normal footage"
+            )
+        if avatar_idxs and 0 not in avatar_idxs:
+            warnings.append(
+                "avatar_image is set but sentence 0 lacks avatar=true — the intro "
+                "block is FIXED for the avatar whenever an image is selected"
+            )
+
+        # Group contiguous avatar sentences into blocks. No length cap — live
+        # RunPod testing (2026-07-12) found no failure mode tied to
+        # generation duration, so blocks are never demoted for being long.
+        blocks: list = []
+        for i in avatar_idxs:
+            if blocks and i == blocks[-1][-1] + 1:
+                blocks[-1].append(i)
+            else:
+                blocks.append([i])
+        if len(blocks) > 2:
+            warnings.append(
+                f"{len(blocks)} avatar blocks found — expected at most 2 "
+                "(the fixed intro plus one mid-video spot)"
+            )
+        for i in avatar_idxs:
+            if sentences[i].get("graphic_type"):
+                warnings.append(
+                    f"sentence {i}: avatar=true AND graphic_type="
+                    f"{sentences[i].get('graphic_type')!r} — mutually exclusive; "
+                    "the pipeline will ignore the avatar flag on this sentence"
+                )
+            if (sentences[i].get("visual_effect") or "").strip():
+                warnings.append(
+                    f"sentence {i}: visual_effect on an avatar sentence is "
+                    "meaningless (the avatar clip replaces footage) — remove it"
+                )
 
     # ── video_type sanity ────────────────────────────────────────────────────
     # A review/ranking that names 3+ distinct entities should be named_entity:
@@ -374,21 +486,16 @@ def main():
     effect_bearing = [e for e in enrichable_tracks if e and e in _VALID_VISUAL_EFFECTS]
     if enrichable_tracks:
         pct = len(effect_bearing) / len(enrichable_tracks)
-        if pct < 0.40:
+        if pct < 0.50:
             warnings.append(
                 f"visual_effect density too low: {len(effect_bearing)}/{len(enrichable_tracks)} "
-                f"broll/named sentences have effects ({pct:.0%} < 40% target) — "
-                "distribute effects more evenly; aim for at least 2 per every 5 sentences"
+                f"broll/named sentences have effects ({pct:.0%} < 50% target) — "
+                "distribute effects more evenly; aim for at least 1 per every 2 sentences"
             )
 
-    # Any two adjacent broll/named sentences both carrying an effect
-    for j in range(1, len(enrichable_tracks)):
-        if enrichable_tracks[j] and enrichable_tracks[j - 1]:
-            warnings.append(
-                f"visual_effect on adjacent sentences: {enrichable_tracks[j - 1]!r} then "
-                f"{enrichable_tracks[j]!r} — separate effect sentences with ≥2 plain sentences"
-            )
-            break  # one warning is enough to flag the problem
+    # No adjacency restriction: an overlay persists across a clip rather than
+    # flickering between adjacent clips, so back-to-back effect sentences are
+    # intentional at this density and not warned on.
 
     # ── Non-lower-third graphic cap and spacing ──────────────────────────────
     _NON_LT_CAP = 8
@@ -403,6 +510,25 @@ def main():
             warnings.append(
                 f"infographic/list graphics too close: sentence {non_lt_graphic_indices[k - 1]} "
                 f"and sentence {non_lt_graphic_indices[k]} are only {gap - 1} sentence(s) apart "
+                f"— separate them with ≥3 footage sentences so each graphic has room to land"
+            )
+
+    # ── info_callout cap and spacing ─────────────────────────────────────────
+    # Own counter, separate from the infographic/list pool above — info_callout
+    # composites over footage (same cost class as lower_third) rather than
+    # replacing it, so it doesn't share that pool's cap or its warning wording.
+    _INFO_CALLOUT_CAP = 5
+    if len(info_callout_indices) > _INFO_CALLOUT_CAP:
+        warnings.append(
+            f"too many info_callout graphics: {len(info_callout_indices)} "
+            f"(hard limit is ≤{_INFO_CALLOUT_CAP}); remove the least necessary ones"
+        )
+    for k in range(1, len(info_callout_indices)):
+        gap = info_callout_indices[k] - info_callout_indices[k - 1]
+        if gap < 4:
+            warnings.append(
+                f"info_callout graphics too close: sentence {info_callout_indices[k - 1]} "
+                f"and sentence {info_callout_indices[k]} are only {gap - 1} sentence(s) apart "
                 f"— separate them with ≥3 footage sentences so each graphic has room to land"
             )
 
