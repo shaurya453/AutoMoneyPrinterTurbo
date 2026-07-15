@@ -18,10 +18,12 @@ from app.services.tts.edge import azure_tts_v1, _azure_tts_chunked
 from app.services.tts.kokoro import kokoro_tts
 from app.services.tts.supertonic import supertonic_tts
 from app.services.tts.minimax import minimax_tts
+from app.services.tts.algrow import algrow_elevenlabs_tts
 
 _KOKORO_PREFIX = "kokoro:"
 _SUPERTONIC_PREFIX = "supertonic:"
 _MINIMAX_PREFIX = "minimax:"
+_ELEVENLABS_PREFIX = "elevenlabs:"
 _TTS_CHUNK_MAX_CHARS = 2500
 NO_VOICE_NAME = "no-voice"
 _NO_VOICE_ALIASES = {NO_VOICE_NAME, "none"}
@@ -49,6 +51,8 @@ def resolve_tts_engine(voice_name: str) -> tuple[str, str]:
         return "supertonic", voice_name[len(_SUPERTONIC_PREFIX):]
     if voice_name.lower().startswith(_MINIMAX_PREFIX):
         return "minimax", voice_name[len(_MINIMAX_PREFIX):]
+    if voice_name.lower().startswith(_ELEVENLABS_PREFIX):
+        return "elevenlabs", voice_name[len(_ELEVENLABS_PREFIX):]
     return engine, voice_name
 
 
@@ -80,6 +84,8 @@ def tts(
         return supertonic_tts(text, voice_name, voice_rate, voice_file)
     if engine == "minimax":
         return minimax_tts(text, voice_name, voice_rate, voice_file)
+    if engine == "elevenlabs":
+        return algrow_elevenlabs_tts(text, voice_name, voice_rate, voice_file)
     if len(text) > _TTS_CHUNK_MAX_CHARS:
         return _azure_tts_chunked(text, voice_name, voice_rate, voice_file)
     return azure_tts_v1(text, voice_name, voice_rate, voice_file)
@@ -89,5 +95,6 @@ __all__ = [
     "tts", "parse_voice_name", "is_no_voice", "get_audio_duration",
     "normalize_narration_loudness",
     "NO_VOICE_NAME", "kokoro_tts", "supertonic_tts", "minimax_tts",
+    "algrow_elevenlabs_tts",
     "azure_tts_v1",
 ]

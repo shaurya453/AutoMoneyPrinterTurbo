@@ -58,7 +58,7 @@ Re-running with the same title creates `<title> (2)`, `<title> (3)`, etc. automa
 | `app/services/media/` | Stock footage/image search and download package |
 | `app/services/media/images.py` | Image search (Pexels, Pixabay, Unsplash, Wikimedia, DDG, Serper), `download_image()` |
 | `app/services/media/videos.py` | Video search (Pexels, Pixabay, Coverr), `download_video()`, BGM download |
-| `app/services/tts/` | TTS package: edge-tts, Kokoro ONNX, Supertonic, Minimax |
+| `app/services/tts/` | TTS package: edge-tts, Kokoro ONNX, Supertonic, Minimax (routed through Algrow's cheaper proxy by default), ElevenLabs (Algrow's premade catalog only, see below) |
 | `app/services/tts/__init__.py` | `tts()` dispatcher, `NO_VOICE_NAME` |
 | `app/services/scoring/nsfw.py` | NudeNet ONNX pixel-level NSFW gate — hard-rejects before relevance |
 | `app/services/scoring/relevance.py` | CLIP ViT-B/32 ONNX relevance scoring vs. junk anchors |
@@ -214,6 +214,36 @@ Full spec: `AGENT_GUIDE.md`.
 | `openverse_client_id` / `_secret` | Openverse (CC-licensed diagrams/evidence imagery) — **currently dormant**: Cloudflare blocks this server's IP on every `api.openverse.org` endpoint (register, token, search), confirmed even with valid registered credentials (2026-07-13). Removed from `named_track_image_source_order`/`_DEFAULT_IMAGE_SOURCE_ORDER`; credentials kept in case a `[proxy]` is added later. `scripts/register_openverse.py` hits their `/v1/auth_tokens/register/` endpoint but must be run from a non-datacenter IP |
 | `[whisper]` | `model_size`, `device`, `compute_type` |
 | `[app].max_image_ratio` | Soft cap on image clip fraction (code fallback 1.0 = uncapped; portal always writes the user's choice into `job.max_image_ratio`, which wins) |
+
+### AI avatar provider switch
+
+`app/services/avatar.py` generates talking-head clips for avatar-marked sentences via `avatar_provider` config (`"segmind"` — default, active — or `"runpod"` — dormant fallback), resolved by `_provider()`. This is a **temporary, reversible** swap: RunPod's client code (`_submit_runpod`/`_extract_runpod_video_url`/`_runpod_endpoint`/`_runpod_headers`) is kept intact, just unused while `avatar_provider = "segmind"` — flip the config key to revert, same "keep dormant, don't delete" pattern as the Openverse image provider above.
+
+Segmind's client (`_submit_segmind`/`_extract_segmind_video_url`) posts to its async `POST /v2/infinite-talk` endpoint (unwrapped body, `resolution` not `size`, auth via `x-api-key` not `Authorization: Bearer`), then polls `GET /requests/{id}/status` until `COMPLETED`/`FAILED`, then fetches `GET /requests/{id}` for the final payload. Confirmed via a live probe (2026-07-14): the completed payload's `output` field is a bare URL string, not nested — `_extract_segmind_video_url` handles that as its first case, with defensive fallbacks for other shapes kept as a safety net.
+
+Both `_submit_runpod`/`_submit_segmind` return `(video_url, cost_usd)` — the real dollar cost as reported by the provider itself (RunPod: `output.cost`; Segmind: `metrics.cost`, also confirmed via the live probe), not an estimate. `generate_avatar_clip()` threads it into the per-clip `report` dict as `avatar_cost_usd`, and `_quality.py`'s `write_quality_report()` sums it (excluding dry-run entries) into `<title>.quality.json`'s `cost.avatar_cost_usd`, alongside the existing `cost.avatar_request_count`.
+
+`scripts/segmind_avatar_probe.py` is the standalone verification tool for this integration — it hits the real Segmind API once (publishing the test image/audio via `avatar.publish_dir()`/`publish_asset()`) and prints raw JSON at every stage, without touching the pipeline. Use it again if Segmind's API shape ever changes unexpectedly.
+
+### Minimax TTS: Algrow proxy (cheaper billing)
+
+`app/services/tts/minimax.py`'s `minimax_tts()` (the `"minimax:"` voice_name engine) is routed through Algrow (https://algrow.online), a multi-provider TTS proxy, by default — toggle via config `minimax_provider` = `"algrow"` (default) or `"direct"` (dormant fallback, calls Minimax's own `t2a_v2` API directly with `minimax_api_key`/`minimax_group_id`, same "keep dormant, don't delete" pattern as the avatar provider switch above).
+
+Algrow's `provider=minimax` path only accepts voice_ids **cloned inside Algrow's own account** — it has no knowledge of voices cloned directly with Minimax's own API/GroupId (confirmed live: `GET /api/voices/minimax` returned an empty list for voices that already existed directly in Minimax). `config.toml`'s `[app.minimax_algrow_voice_map]` table maps each stable `"minimax:"` voice_name (Minimax's own `moss_audio_*` id, what the portal UI and job.json actually store) to the voice_id Algrow issued for that same voice after cloning. **This table must stay the last entry in `[app]`** — a bracketed TOML subtable captures every key that follows it until the next `[section]` header.
+
+`scripts/algrow_clone_from_minimax.py` is the one-off bootstrap that populated this map: for each existing voice it generates a ~45s reference sample via Minimax's *direct* API (bypassing the algrow-provider dispatch, since the clone source must be real Minimax audio), uploads it to Algrow's `POST /api/voices/minimax/clone` (requires ≥30s of audio, consumes one of the account's limited clone slots), and prints the resulting `voice_id` to add to the map. Run it again for any new Minimax voice added in the future.
+
+Minimax's ~9.7min Algrow latency (below) broke the portal's voice-preview feature — its route only waits 120s before giving up, and a never-before-previewed voice has no cached file yet to fall back on, so the click failed with a generic "no supported source" audio error. Fix: `minimax.py` exposes a public `direct_minimax_tts()` (Minimax's own fast, synchronous API, bypassing the `minimax_provider` switch entirely) used by `scripts/minimax_preview.py` and by `algrow_clone_from_minimax.py`'s reference-sample generation — previews are a few fixed, cached-forever words, so there's no real cost benefit to routing them through Algrow, only a latency cost. Production narration is unaffected; it still goes through `minimax_tts()`'s config-driven dispatch.
+
+`app/services/tts/algrow.py` implements the async job API: `POST /api/generate-simple` (multipart form: `script`/`voice_id`/`provider="minimax"`/`speed`/`pitch`/`volume`; **Algrow rejects any single call under 200 characters** — `_split_for_algrow()` merges a too-short trailing chunk into its predecessor rather than sending it standalone) returns `{job_id, status: "pending"}`, then `GET /api/job-status/{job_id}` is polled until `"completed"` (→ `audio_url`, a permanent CDN link, downloaded directly) or `"failed"`. Confirmed live (2026-07-14) via a real end-to-end `minimax_tts()` call — that test took **~9.7 minutes**, hence `algrow_timeout_seconds = 1200`. `_run_chunked()` gives every chunk its own full deadline rather than sharing one, since a multi-chunk script would otherwise starve chunk 2+ after chunk 1 alone ate most of a shared budget.
+
+### ElevenLabs TTS: Algrow's premade catalog (`"elevenlabs:"` voices)
+
+`"elevenlabs:"` voice_names route straight to `algrow_elevenlabs_tts()` in `app/services/tts/algrow.py` (dispatched from `resolve_tts_engine()`/`tts()` in `app/services/tts/__init__.py`) — there is no direct-ElevenLabs fallback to keep dormant, this is a brand new engine. Unlike Minimax, Algrow's `provider=elevenlabs` path draws from Algrow's own large **premade voice catalog** (`GET /api/voices`, confirmed live 2026-07-14 — supports `search`/`gender`/`age`/`language`/`accent`/`sort`/`page`/`page_size` query params) — the catalog's `voice_id` is used **directly**, no cloning or `[app.minimax_algrow_voice_map]`-style mapping needed. Each catalog entry also ships its own official `preview_url` (a public, unauthenticated ElevenLabs CDN link) — confirmed live to be directly downloadable.
+
+`_algrow_submit_and_download()` is the shared generate/poll/download core used by both Minimax and ElevenLabs (`_algrow_minimax_tts_single`/`_algrow_elevenlabs_tts_single` just supply different `extra_fields` — `provider="elevenlabs"` additionally sends `model_id` (default `"eleven_multilingual_v2"`, override via `algrow_elevenlabs_model` config), `stability`/`similarity_boost` (both 0.5). A live end-to-end test (2026-07-14, voice_id `Ix8C14HEHgIQkJswik2o` / "Peter Baker") completed in **~11-16 seconds** — dramatically faster than Minimax's ~9.7 minutes on the same proxy, for reasons not fully understood (possibly per-provider backend differences on Algrow's side) — don't assume this holds for every ElevenLabs voice without spot-checking.
+
+Because ElevenLabs generation is fast enough to fit inside a normal HTTP request/response cycle, `scripts/elevenlabs_preview.py` generates portal previews through the *real* Algrow path (unlike Minimax previews, which were moved off Algrow entirely — see the preview-latency note above) — its `PREVIEW_TEXT` is padded to 210 characters specifically to clear Algrow's 200-char minimum.
 
 ---
 

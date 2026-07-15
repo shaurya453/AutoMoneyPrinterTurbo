@@ -321,8 +321,8 @@ def _start_impl(job_path: str, _avatar_state: dict) -> Optional[dict]:
     _avatar_requested = bool(_avatar_image_path) and any(s.get("avatar") for s in sentences)
     if _avatar_requested and not avatar.is_enabled():
         logger.warning(
-            "job requests an avatar but avatar_enabled/runpod_api_key are not "
-            "configured — demoting avatar sentences to normal footage"
+            "job requests an avatar but avatar_enabled/the active provider's "
+            "API key are not configured — demoting avatar sentences to normal footage"
         )
         for s in sentences:
             s.pop("avatar", None)

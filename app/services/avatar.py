@@ -1,23 +1,29 @@
 """
-app/services/avatar.py — AI avatar (talking-head) clip generation via
-RunPod's InfiniteTalk public endpoint.
+app/services/avatar.py — AI avatar (talking-head) clip generation, backed by
+either Segmind's or RunPod's InfiniteTalk model (`avatar_provider` config,
+see _provider()). Segmind is the active default; RunPod is a dormant
+fallback kept intact for easy reversion — this provider switch is meant to
+be temporary.
 
 Flow per avatar block (one contiguous run of avatar-marked sentences):
   1. Slice the block's span out of the master TTS audio (ffmpeg).
   2. Publish the slice (and, once per job, the avatar image) into a
      publicly served assets dir — InfiniteTalk only accepts URL inputs.
-  3. POST /runsync; if generation outlives the sync window, poll
-     /status/{id} until COMPLETED/FAILED or the deadline.
-  4. Download output.result (the completed video URL) and normalize to the
-     timeline geometry (scale+pad to WxH, 30fps, exact planned duration,
-     audio stripped — narration comes from the master audio at final mux).
+  3. Submit to the active provider; if generation outlives the sync/first
+     response, poll its status endpoint until COMPLETED/FAILED or the
+     deadline (RunPod: GET /status/{id}; Segmind: GET /requests/{id}/status
+     then /requests/{id} for the final payload).
+  4. Download the completed video URL and normalize to the timeline
+     geometry (scale+pad to WxH, 30fps, exact planned duration, audio
+     stripped — narration comes from the master audio at final mux).
 
 Every step degrades to None on failure — the caller (Phase B) routes a
 failed avatar block into the normal rescue → placeholder path, so this
 module must never raise out of the executor task.
 
 Feature is dark unless config.toml sets avatar_enabled = true and either
-runpod_api_key or avatar_dry_run. Never log the API key.
+the active provider's API key (segmind_api_key / runpod_api_key) or
+avatar_dry_run. Never log API keys.
 """
 
 import os
@@ -60,13 +66,21 @@ def dry_run_enabled() -> bool:
     return bool(config.app.get("avatar_dry_run", False))
 
 
+def _provider() -> str:
+    """Active avatar backend: "segmind" (default) or "runpod" (dormant)."""
+    return str(config.app.get("avatar_provider", "segmind")).strip().lower()
+
+
 def is_enabled() -> bool:
     """Feature gate: explicit opt-in AND a way to actually generate."""
     env = _env_flag("AVATAR_ENABLED")
     enabled = env if env is not None else bool(config.app.get("avatar_enabled", False))
     if not enabled:
         return False
-    return bool(config.app.get("runpod_api_key", "")) or dry_run_enabled()
+    if dry_run_enabled():
+        return True
+    key_name = "segmind_api_key" if _provider() == "segmind" else "runpod_api_key"
+    return bool(config.app.get(key_name, ""))
 
 
 # ---------------------------------------------------------------------------
@@ -203,20 +217,20 @@ def cleanup_assets(local_dir: Optional[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# RunPod client
+# RunPod client (dormant fallback — see _provider())
 # ---------------------------------------------------------------------------
 
-def _endpoint() -> str:
+def _runpod_endpoint() -> str:
     return str(
-        config.app.get("avatar_endpoint", "https://api.runpod.ai/v2/infinitetalk")
+        config.app.get("runpod_endpoint", "https://api.runpod.ai/v2/infinitetalk")
     ).rstrip("/")
 
 
-def _headers() -> dict:
+def _runpod_headers() -> dict:
     return {"Authorization": f"Bearer {config.app.get('runpod_api_key', '')}"}
 
 
-def _extract_video_url(payload: dict) -> Optional[str]:
+def _extract_runpod_video_url(payload: dict) -> Optional[str]:
     # Confirmed via a live probe (2026-07-12): InfiniteTalk's actual completed
     # payload is {"output": {"cost": ..., "result": "<url>"}} — "result", not
     # "video_url" as the (undocumented) schema might suggest. Both keys are
@@ -228,10 +242,16 @@ def _extract_video_url(payload: dict) -> Optional[str]:
     return None
 
 
-def _submit_runsync(
+def _extract_runpod_cost(payload: dict) -> Optional[float]:
+    output = payload.get("output") or {}
+    cost = output.get("cost") if isinstance(output, dict) else None
+    return float(cost) if isinstance(cost, (int, float)) else None
+
+
+def _submit_runpod(
     image_url: str, audio_url: str, size: str, prompt: str, deadline: float
-) -> Optional[str]:
-    """Submit a generation; return output video_url or None.
+) -> Tuple[Optional[str], Optional[float]]:
+    """Submit a generation; return (video_url, cost_usd), either None on failure.
 
     runsync blocks while it can, but returns IN_QUEUE/IN_PROGRESS with an id
     when generation outlives the sync window — the /status poll below is
@@ -249,35 +269,35 @@ def _submit_runsync(
     try:
         http_timeout = min(_RUNSYNC_HTTP_TIMEOUT, max(10.0, deadline - time.monotonic()))
         resp = requests.post(
-            f"{_endpoint()}/runsync", json=body, headers=_headers(), timeout=http_timeout
+            f"{_runpod_endpoint()}/runsync", json=body, headers=_runpod_headers(), timeout=http_timeout
         )
         resp.raise_for_status()
         payload = resp.json()
     except Exception as exc:
-        logger.warning(f"avatar: runsync submit failed — {exc}")
-        return None
+        logger.warning(f"avatar: runpod submit failed — {exc}")
+        return None, None
 
     status = payload.get("status", "")
     if status == "COMPLETED":
-        url = _extract_video_url(payload)
+        url = _extract_runpod_video_url(payload)
         if not url:
             logger.warning(f"avatar: COMPLETED without a usable video URL — {payload.get('output')}")
-        return url
+        return url, _extract_runpod_cost(payload)
     if status == "FAILED":
         logger.warning(f"avatar: generation FAILED — {payload.get('error') or payload.get('output')}")
-        return None
+        return None, None
 
     job_id = payload.get("id")
     if not job_id:
-        logger.warning(f"avatar: unexpected runsync response status={status!r}, no id")
-        return None
+        logger.warning(f"avatar: unexpected runpod response status={status!r}, no id")
+        return None, None
 
     # Sync window expired server-side — poll until terminal or our deadline.
     while time.monotonic() < deadline:
         time.sleep(_POLL_INTERVAL_SECONDS)
         try:
             resp = requests.get(
-                f"{_endpoint()}/status/{job_id}", headers=_headers(), timeout=30
+                f"{_runpod_endpoint()}/status/{job_id}", headers=_runpod_headers(), timeout=30
             )
             resp.raise_for_status()
             payload = resp.json()
@@ -286,15 +306,128 @@ def _submit_runsync(
             continue
         status = payload.get("status", "")
         if status == "COMPLETED":
-            url = _extract_video_url(payload)
+            url = _extract_runpod_video_url(payload)
             if not url:
                 logger.warning(f"avatar: COMPLETED without a usable video URL — {payload.get('output')}")
-            return url
+            return url, _extract_runpod_cost(payload)
         if status in ("FAILED", "CANCELLED", "TIMED_OUT"):
             logger.warning(f"avatar: generation {status} — {payload.get('error')}")
-            return None
+            return None, None
     logger.warning(f"avatar: job {job_id} still not terminal at deadline — giving up")
-    return None
+    return None, None
+
+
+# ---------------------------------------------------------------------------
+# Segmind client (active default — see _provider())
+# ---------------------------------------------------------------------------
+
+def _segmind_endpoint() -> str:
+    return str(
+        config.app.get("segmind_endpoint", "https://api.segmind.com/v2/infinite-talk")
+    ).rstrip("/")
+
+
+def _segmind_headers() -> dict:
+    return {"x-api-key": config.app.get("segmind_api_key", "")}
+
+
+def _extract_segmind_video_url(payload: dict) -> Optional[str]:
+    # Confirmed via a live probe (2026-07-14, scripts/segmind_avatar_probe.py):
+    # the completed GET /requests/{id} payload is
+    # {"status": "COMPLETED", "output": "<url>", "video": {"url": "<url>", ...}, ...}
+    # -- "output" is a bare URL string, not nested. The dict/fallback branches
+    # below are defensive for a future response-shape change, same posture as
+    # the RunPod client's _extract_runpod_video_url.
+    output = payload.get("output")
+    if isinstance(output, str) and output:
+        return output
+    if isinstance(output, dict):
+        return output.get("url") or output.get("result") or output.get("video_url") or None
+    return payload.get("video_url") or payload.get("result") or None
+
+
+def _extract_segmind_cost(payload: dict) -> Optional[float]:
+    # Confirmed via a live probe (2026-07-14): the completed payload carries
+    # {"metrics": {"cost": <float>, "inference_time": ..., "queue_time": ...,
+    # "remaining_credits": ..., "total_time": ...}, ...}.
+    metrics = payload.get("metrics") or {}
+    cost = metrics.get("cost") if isinstance(metrics, dict) else None
+    return float(cost) if isinstance(cost, (int, float)) else None
+
+
+def _submit_segmind(
+    image_url: str, audio_url: str, size: str, prompt: str, deadline: float
+) -> Tuple[Optional[str], Optional[float]]:
+    """Submit a generation to Segmind's async v2 endpoint; return
+    (video_url, cost_usd), either None on failure.
+
+    Unlike RunPod, the request body is NOT wrapped in an "input" key, and the
+    resolution field is called "resolution" rather than "size". A COMPLETED/
+    FAILED status can come back immediately; otherwise the response carries a
+    request_id that must be polled at GET /requests/{id}/status until
+    terminal, then the final payload fetched from GET /requests/{id} — all
+    under the caller's single monotonic deadline.
+    """
+    body = {
+        "image": image_url,
+        "audio": audio_url,
+        "prompt": prompt,
+        "resolution": size,
+    }
+    try:
+        http_timeout = min(_RUNSYNC_HTTP_TIMEOUT, max(10.0, deadline - time.monotonic()))
+        resp = requests.post(
+            _segmind_endpoint(), json=body, headers=_segmind_headers(), timeout=http_timeout
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:
+        logger.warning(f"avatar: segmind submit failed — {exc}")
+        return None, None
+
+    status = str(payload.get("status", "")).upper()
+    if status == "COMPLETED":
+        url = _extract_segmind_video_url(payload)
+        if not url:
+            logger.warning(f"avatar: COMPLETED without a usable video URL — {payload}")
+        return url, _extract_segmind_cost(payload)
+    if status == "FAILED":
+        logger.warning(f"avatar: segmind generation FAILED — {payload.get('error')}")
+        return None, None
+
+    request_id = payload.get("request_id") or payload.get("id")
+    if not request_id:
+        logger.warning(f"avatar: unexpected segmind submit response, no request_id — {payload}")
+        return None, None
+
+    status_url = f"https://api.segmind.com/v2/requests/{request_id}/status"
+    result_url = f"https://api.segmind.com/v2/requests/{request_id}"
+    while time.monotonic() < deadline:
+        time.sleep(_POLL_INTERVAL_SECONDS)
+        try:
+            resp = requests.get(status_url, headers=_segmind_headers(), timeout=30)
+            resp.raise_for_status()
+            status = str(resp.json().get("status", "")).upper()
+        except Exception as exc:
+            logger.warning(f"avatar: segmind status poll failed — {exc}")
+            continue
+        if status == "FAILED":
+            logger.warning("avatar: segmind generation FAILED")
+            return None, None
+        if status == "COMPLETED":
+            try:
+                resp = requests.get(result_url, headers=_segmind_headers(), timeout=30)
+                resp.raise_for_status()
+                result_payload = resp.json()
+                url = _extract_segmind_video_url(result_payload)
+            except Exception as exc:
+                logger.warning(f"avatar: segmind result fetch failed — {exc}")
+                return None, None
+            if not url:
+                logger.warning("avatar: segmind COMPLETED without a usable video URL")
+            return url, _extract_segmind_cost(result_payload)
+    logger.warning(f"avatar: segmind request {request_id} still not terminal at deadline — giving up")
+    return None, None
 
 
 def _download_video(url: str, out_path: str, deadline: float) -> bool:
@@ -388,7 +521,8 @@ def generate_avatar_clip(
             "avatar_prompt",
             "A person speaking directly to the camera, natural expression, subtle head movement",
         ))
-        video_url = _submit_runsync(image_url, audio_url, size, prompt, deadline)
+        submit = _submit_segmind if _provider() == "segmind" else _submit_runpod
+        video_url, cost_usd = submit(image_url, audio_url, size, prompt, deadline)
         if not video_url:
             return None
 
@@ -400,6 +534,8 @@ def generate_avatar_clip(
         if normalized and report is not None:
             report.setdefault(clip_idx, {})["avatar"] = True
             report[clip_idx]["avatar_size"] = size
+            if cost_usd is not None:
+                report[clip_idx]["avatar_cost_usd"] = cost_usd
         return normalized
     except Exception as exc:
         logger.warning(f"clip {clip_idx}: avatar generation exception — {exc}")

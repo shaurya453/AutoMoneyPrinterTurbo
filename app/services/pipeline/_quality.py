@@ -69,6 +69,20 @@ def write_quality_report(
         sum(e.get("catastrophic_gap_duration", 0.0) for e in catastrophic_gap_entries), 2
     )
 
+    # Paid AI-avatar (Segmind/RunPod InfiniteTalk) generations only -- avatar.py sets
+    # "avatar_dry_run" instead of a real request when AVATAR_DRY_RUN is on,
+    # and that path costs nothing, so it's excluded from the billable count.
+    billable_avatar_entries = [
+        e for e in entries if e.get("avatar") and not e.get("avatar_dry_run")
+    ]
+    avatar_request_count = len(billable_avatar_entries)
+    # Real dollar cost as reported back by the provider itself (avatar.py's
+    # _extract_runpod_cost/_extract_segmind_cost), not an estimate -- absent
+    # when the provider's response didn't carry a cost field.
+    avatar_cost_usd = round(
+        sum(e.get("avatar_cost_usd", 0.0) for e in billable_avatar_entries), 6
+    )
+
     aggregate = {
         "title": title,
         "total_clips": len(entries),
@@ -92,6 +106,8 @@ def write_quality_report(
             "tts_char_count": tts_char_count,
             "tts_provider": tts_provider,
             "vlm_usage": vlm_usage or {},
+            "avatar_request_count": avatar_request_count,
+            "avatar_cost_usd": avatar_cost_usd,
         },
     }
 

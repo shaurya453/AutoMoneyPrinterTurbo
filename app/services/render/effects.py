@@ -23,33 +23,36 @@ _OVERLAY_DIR = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "resource", "overlays")
 )
 
-# Per-effect overlay config: file basename + FFmpeg blend mode + opacity.
+# Per-effect overlay config: file basename + FFmpeg blend mode.
 # All overlays use a black background; screen blend treats black as transparent.
 _EFFECT_OVERLAYS: dict[str, dict] = {
-    "threat":      {"file": "threat_blood.mp4",     "mode": "screen",   "opacity": 1.0},
-    "cold":        {"file": "cold_snow.mp4",         "mode": "screen",   "opacity": 1.0},
-    "mystery":     {"file": "mystery_fog.mp4",       "mode": "screen",   "opacity": 1.0},
-    "dream":       {"file": "dream_bokeh.mp4",       "mode": "screen",   "opacity": 1.0},
-    "warmth":      {"file": "warmth_rays.mp4",       "mode": "screen",   "opacity": 1.0},
-    "revelation":  {"file": "revelation_flare.mp4",  "mode": "screen",   "opacity": 1.0},
-    "noir":        {"file": "noir_rain.mp4",         "mode": "screen",   "opacity": 1.0},
-    "sepia":       {"file": "sepia_grain.mp4",       "mode": "multiply", "opacity": 1.0},
-    "nature":      {"file": "nature_dust.mp4",       "mode": "screen",   "opacity": 1.0},
-    "tech":        {"file": "tech_scanlines.mp4",    "mode": "screen",   "opacity": 1.0},
-    "hacker_tech": {"file": "hacker_tech.mp4",       "mode": "screen",   "opacity": 1.0},
-    "urgency":      {"file": "urgency.mp4",          "mode": "screen",   "opacity": 1.0},
-    "euphoria":     {"file": "euphoria.mp4",         "mode": "screen",   "opacity": 1.0},
-    "corporate":    {"file": "corporate.mp4",        "mode": "screen",   "opacity": 1.0},
-    "glitch_soft":  {"file": "glitch_soft.mp4",      "mode": "screen",   "opacity": 1.0},
-    "confusion":    {"file": "confusion.mp4",        "mode": "screen",   "opacity": 1.0},
-    "network":      {"file": "polygon_grid.mp4",     "mode": "screen",   "opacity": 1.0},
-    "royalty":      {"file": "royalty.mp4",          "mode": "screen",   "opacity": 1.0},
-    "toxic":        {"file": "toxic.mp4",            "mode": "screen",   "opacity": 1.0},
+    "threat":      {"file": "threat_blood.mp4",     "mode": "screen"},
+    "cold":        {"file": "cold_snow.mp4",         "mode": "screen"},
+    "mystery":     {"file": "mystery_fog.mp4",       "mode": "screen"},
+    "dream":       {"file": "dream_bokeh.mp4",       "mode": "screen"},
+    "warmth":      {"file": "warmth_rays.mp4",       "mode": "screen"},
+    "revelation":  {"file": "revelation_flare.mp4",  "mode": "screen"},
+    "noir":        {"file": "noir_rain.mp4",         "mode": "screen"},
+    "sepia":       {"file": "sepia_grain.mp4",       "mode": "multiply"},
+    "nature":      {"file": "nature_dust.mp4",       "mode": "screen"},
+    "tech":        {"file": "tech_scanlines.mp4",    "mode": "screen"},
+    "hacker_tech": {"file": "hacker_tech.mp4",       "mode": "screen"},
+    "urgency":      {"file": "urgency.mp4",          "mode": "screen"},
+    "euphoria":     {"file": "euphoria.mp4",         "mode": "screen"},
+    "corporate":    {"file": "corporate.mp4",        "mode": "screen"},
+    "glitch_soft":  {"file": "glitch_soft.mp4",      "mode": "screen"},
+    "confusion":    {"file": "confusion.mp4",        "mode": "screen"},
+    "network":      {"file": "polygon_grid.mp4",     "mode": "screen"},
+    "royalty":      {"file": "royalty.mp4",          "mode": "screen"},
+    "toxic":        {"file": "toxic.mp4",            "mode": "screen"},
     # static_dread is bright, full-frame grayscale noise (like sepia_grain,
-    # not a sparse-on-black overlay) — screen at opacity 1.0 would whiteout
+    # not a sparse-on-black overlay) — screen at full opacity would whiteout
     # the footage under it; multiply darkens instead, keeping it legible.
-    "static_dread": {"file": "static_dread.mp4",     "mode": "multiply", "opacity": 1.0},
+    "static_dread": {"file": "static_dread.mp4",     "mode": "multiply"},
 }
+
+# Single knob for every overlay's blend strength (was 1.0 for all effects).
+_GLOBAL_OVERLAY_OPACITY = 0.75
 
 _OVERLAY_FADE_DUR = 0.5   # seconds — fade-in at start, fade-out at end
 
@@ -162,7 +165,7 @@ def apply_visual_effect(
         return clip_path
 
     blend_mode = overlay_cfg["mode"]
-    opacity    = overlay_cfg["opacity"]
+    opacity    = _GLOBAL_OVERLAY_OPACITY
 
     # Play the full overlay once, trimmed to clip duration if the clip is shorter.
     accent = min(ov_dur, clip_dur)

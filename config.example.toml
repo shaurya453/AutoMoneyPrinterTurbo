@@ -331,6 +331,31 @@ kokoro_model_path = "resource/kokoro/kokoro-v1.0.onnx"
 kokoro_voices_path = "resource/kokoro/voices-v1.0.bin"
 kokoro_lang = "en-us"
 
+# Minimax cloud TTS settings.
+# Use prefix "minimax:" in voice_name, e.g. "minimax:Wise_Woman"
+minimax_api_key   = ""
+minimax_group_id  = ""
+minimax_model     = "speech-02-hd"   # or "speech-02-turbo" for faster/cheaper
+
+# Which backend actually serves "minimax:" voice_name requests:
+#   "algrow" (default) — routes through Algrow's proxy (cheaper billing);
+#     requires the moss_audio_* voice_id to have an entry in
+#     minimax_algrow_voice_map below (Algrow uses its own cloned-voice
+#     namespace, not Minimax's — see scripts/algrow_clone_from_minimax.py).
+#   "direct" (dormant) — calls Minimax's own API above directly.
+minimax_provider = "algrow"
+
+# Algrow (https://algrow.online) — TTS proxy, cheaper than calling
+# Minimax directly, and also the source of "elevenlabs:" voices (Algrow's own
+# premade ElevenLabs catalog -- those voice_ids are used directly, no
+# cloning/mapping step like minimax_algrow_voice_map below).
+algrow_api_key = ""
+
+# Overall deadline per generate-simple call: submit + status polling +
+# download. A live end-to-end test on 2026-07-14 took ~9.7 minutes for a
+# 17s/259-char clip -- set generously above that observed latency.
+algrow_timeout_seconds = 1200
+
 # ---------------------------------------------------------------------------
 # Local storage
 # ---------------------------------------------------------------------------
@@ -342,28 +367,45 @@ kokoro_lang = "en-us"
 material_directory = ""
 
 # ---------------------------------------------------------------------------
-# AI avatar (RunPod InfiniteTalk talking-head)
+# AI avatar (talking-head: Segmind / RunPod InfiniteTalk)
 # ---------------------------------------------------------------------------
 
-# Master switch. The pipeline also requires a runpod_api_key (or
+# Master switch. The pipeline also requires the active provider's API key (or
 # avatar_dry_run) — with the feature off/unconfigured, avatar-marked jobs
 # degrade gracefully to normal footage.
 avatar_enabled = false
 
-# RunPod API key (Bearer). Never committed — config.toml is gitignored.
+# Which backend generates the talking-head clip: "segmind" (default, active)
+# or "runpod" (dormant fallback -- kept intact for easy reversion, see
+# app/services/avatar.py's _provider()).
+avatar_provider = "segmind"
+
+# Segmind API key. Only used when avatar_provider = "segmind". Never
+# committed -- config.toml is gitignored.
+segmind_api_key = ""
+
+# Segmind's async InfiniteTalk endpoint; /requests/{id}/status and
+# /requests/{id} are appended for polling.
+segmind_endpoint = "https://api.segmind.com/v2/infinite-talk"
+
+# RunPod API key (Bearer). Only used when avatar_provider = "runpod".
 runpod_api_key = ""
 
 # Public InfiniteTalk endpoint; /runsync and /status/{id} are appended.
-avatar_endpoint = "https://api.runpod.ai/v2/infinitetalk"
+# Only used when avatar_provider = "runpod".
+runpod_endpoint = "https://api.runpod.ai/v2/infinitetalk"
 
-# Generation resolution: "480p" ($0.25/gen) or "720p" ($0.50/gen).
+# Generation resolution: "480p" or "720p" (RunPod: $0.25/$0.50 per gen).
+# Segmind's `resolution` field additionally accepts "576p" if wanted later.
 # Output is normalized (scale+pad) to the timeline resolution afterward.
 avatar_size = "720p"
 
 # Overall deadline per generation: submit + status polling + download.
-# 1200s — a live probe on 2026-07-12 saw ~12 min of RunPod queue delay alone
+# 1200s -- a live probe on 2026-07-12 saw ~12 min of RunPod queue delay alone
 # before generation even started (actual compute was only ~3.8 min for a 30s
-# clip); 600s risked giving up before the queue cleared.
+# clip); 600s risked giving up before the queue cleared. A Segmind probe on
+# 2026-07-14 saw near-instant queueing (~0.04s) and ~73s inference for a 3s
+# test clip -- kept the same 1200s ceiling as a safe cap for longer clips.
 avatar_timeout_seconds = 1200
 
 # Motion prompt sent with every generation.
@@ -375,7 +417,7 @@ avatar_prompt = "A person speaking directly to the camera, natural expression, s
 avatar_public_base_url = "https://autovidgen.duckdns.org/ai-assets"
 avatar_assets_dir = "/home/deploy/portal/data/avatar-assets"
 
-# true = skip RunPod entirely and render a labeled slate clip (testing).
+# true = skip the provider entirely and render a labeled slate clip (testing).
 avatar_dry_run = false
 
 # ---------------------------------------------------------------------------
@@ -388,6 +430,13 @@ avatar_dry_run = false
 # Video encoder. libx264 is the safest default.
 # Options: "libx264", "h264_nvenc", "h264_amf", "h264_qsv", "h264_videotoolbox"
 # video_codec = "libx264"
+
+# Maps our stable "minimax:" voice_name (Minimax's own moss_audio_* id) to the
+# voice_id Algrow issued after cloning that same reference voice into its own
+# account. Filled in by scripts/algrow_clone_from_minimax.py. This table must
+# stay last in [app] -- a bracketed subtable in TOML captures every key that
+# follows it until the next [section] header.
+[app.minimax_algrow_voice_map]
 
 
 # ---------------------------------------------------------------------------

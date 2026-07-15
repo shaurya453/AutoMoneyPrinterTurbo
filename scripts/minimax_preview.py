@@ -1,5 +1,9 @@
 """Render a short Minimax TTS preview to an MP3 file.
 
+Always uses Minimax's direct API (bypassing the minimax_provider=algrow
+switch) — the portal's preview route only allows a couple minutes before it
+gives up, far shorter than Algrow's async queue (observed ~10 min per call).
+
 Usage: python scripts/minimax_preview.py <voice_name> <output_path>
 """
 import os
@@ -19,9 +23,9 @@ def main() -> None:
 
     voice_name, output_path = sys.argv[1], sys.argv[2]
 
-    from app.services.tts.minimax import minimax_tts
+    from app.services.tts.minimax import direct_minimax_tts
 
-    result = minimax_tts(
+    result = direct_minimax_tts(
         text=PREVIEW_TEXT,
         voice_name=voice_name,
         voice_rate=1.0,

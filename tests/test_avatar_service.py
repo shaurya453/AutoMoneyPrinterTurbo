@@ -1,4 +1,4 @@
-"""Avatar service: command builders, RunPod client (mocked), dry-run render."""
+"""Avatar service: command builders, RunPod + Segmind clients (mocked), dry-run render."""
 import shutil
 import types
 
@@ -49,34 +49,43 @@ def _resp(payload, status_code=200):
     return r
 
 
-def test_runsync_completed_returns_url(monkeypatch):
+def test_runpod_completed_returns_url_and_cost(monkeypatch):
     # "result" is the real key InfiniteTalk uses (confirmed via a live probe,
     # 2026-07-12) — output.video_url was an incorrect assumption from the
     # (undocumented) schema and silently dropped every successful generation.
     monkeypatch.setattr(avatar.requests, "post", lambda *a, **k: _resp(
         {"status": "COMPLETED", "output": {"cost": 0.25, "result": "https://x/video.mp4"}}
     ))
-    url = avatar._submit_runsync("img", "aud", "720p", "p", deadline=avatar.time.monotonic() + 60)
+    url, cost = avatar._submit_runpod("img", "aud", "720p", "p", deadline=avatar.time.monotonic() + 60)
     assert url == "https://x/video.mp4"
+    assert cost == 0.25
 
 
-def test_extract_video_url_prefers_result_falls_back_to_video_url():
-    assert avatar._extract_video_url({"output": {"result": "https://x/a.mp4"}}) == "https://x/a.mp4"
-    assert avatar._extract_video_url({"output": {"video_url": "https://x/b.mp4"}}) == "https://x/b.mp4"
-    assert avatar._extract_video_url({"output": {"result": "https://x/a.mp4", "video_url": "https://x/b.mp4"}}) == "https://x/a.mp4"
-    assert avatar._extract_video_url({"output": {}}) is None
-    assert avatar._extract_video_url({}) is None
+def test_extract_runpod_video_url_prefers_result_falls_back_to_video_url():
+    assert avatar._extract_runpod_video_url({"output": {"result": "https://x/a.mp4"}}) == "https://x/a.mp4"
+    assert avatar._extract_runpod_video_url({"output": {"video_url": "https://x/b.mp4"}}) == "https://x/b.mp4"
+    assert avatar._extract_runpod_video_url({"output": {"result": "https://x/a.mp4", "video_url": "https://x/b.mp4"}}) == "https://x/a.mp4"
+    assert avatar._extract_runpod_video_url({"output": {}}) is None
+    assert avatar._extract_runpod_video_url({}) is None
 
 
-def test_runsync_failed_returns_none(monkeypatch):
+def test_extract_runpod_cost():
+    assert avatar._extract_runpod_cost({"output": {"cost": 0.25}}) == 0.25
+    assert avatar._extract_runpod_cost({"output": {"cost": 0}}) == 0
+    assert avatar._extract_runpod_cost({"output": {}}) is None
+    assert avatar._extract_runpod_cost({"output": {"cost": "not-a-number"}}) is None
+    assert avatar._extract_runpod_cost({}) is None
+
+
+def test_runpod_failed_returns_none(monkeypatch):
     monkeypatch.setattr(avatar.requests, "post", lambda *a, **k: _resp(
         {"status": "FAILED", "error": "boom"}
     ))
-    assert avatar._submit_runsync("img", "aud", "720p", "p",
-                                  deadline=avatar.time.monotonic() + 60) is None
+    assert avatar._submit_runpod("img", "aud", "720p", "p",
+                                 deadline=avatar.time.monotonic() + 60) == (None, None)
 
 
-def test_runsync_in_queue_falls_back_to_status_poll(monkeypatch):
+def test_runpod_in_queue_falls_back_to_status_poll(monkeypatch):
     monkeypatch.setattr(avatar.requests, "post", lambda *a, **k: _resp(
         {"status": "IN_QUEUE", "id": "job-1"}
     ))
@@ -86,12 +95,13 @@ def test_runsync_in_queue_falls_back_to_status_poll(monkeypatch):
     ])
     monkeypatch.setattr(avatar.requests, "get", lambda *a, **k: _resp(next(polls)))
     monkeypatch.setattr(avatar.time, "sleep", lambda s: None)
-    url = avatar._submit_runsync("img", "aud", "720p", "p",
-                                 deadline=avatar.time.monotonic() + 60)
+    url, cost = avatar._submit_runpod("img", "aud", "720p", "p",
+                                      deadline=avatar.time.monotonic() + 60)
     assert url == "https://x/late.mp4"
+    assert cost == 0.25
 
 
-def test_runsync_deadline_expiry_returns_none(monkeypatch):
+def test_runpod_deadline_expiry_returns_none(monkeypatch):
     monkeypatch.setattr(avatar.requests, "post", lambda *a, **k: _resp(
         {"status": "IN_QUEUE", "id": "job-1"}
     ))
@@ -100,16 +110,104 @@ def test_runsync_deadline_expiry_returns_none(monkeypatch):
     ))
     monkeypatch.setattr(avatar.time, "sleep", lambda s: None)
     # Deadline already passed → poll loop never runs.
-    assert avatar._submit_runsync("img", "aud", "720p", "p",
-                                  deadline=avatar.time.monotonic() - 1) is None
+    assert avatar._submit_runpod("img", "aud", "720p", "p",
+                                 deadline=avatar.time.monotonic() - 1) == (None, None)
 
 
-def test_runsync_submit_exception_returns_none(monkeypatch):
+def test_runpod_submit_exception_returns_none(monkeypatch):
     def boom(*a, **k):
         raise avatar.requests.exceptions.ConnectionError("no route")
     monkeypatch.setattr(avatar.requests, "post", boom)
-    assert avatar._submit_runsync("img", "aud", "720p", "p",
-                                  deadline=avatar.time.monotonic() + 60) is None
+    assert avatar._submit_runpod("img", "aud", "720p", "p",
+                                 deadline=avatar.time.monotonic() + 60) == (None, None)
+
+
+# ---------------------------------------------------------------------------
+# Segmind client (requests monkeypatched — repo rule: no network in tests)
+# ---------------------------------------------------------------------------
+
+def test_segmind_completed_returns_url_bare_string_output(monkeypatch):
+    monkeypatch.setattr(avatar.requests, "post", lambda *a, **k: _resp(
+        {"status": "COMPLETED", "output": "https://x/video.mp4", "metrics": {"cost": 0.1979075}}
+    ))
+    url, cost = avatar._submit_segmind("img", "aud", "480p", "p", deadline=avatar.time.monotonic() + 60)
+    assert url == "https://x/video.mp4"
+    assert cost == 0.1979075
+
+
+def test_segmind_completed_returns_url_nested_output(monkeypatch):
+    monkeypatch.setattr(avatar.requests, "post", lambda *a, **k: _resp(
+        {"status": "COMPLETED", "output": {"url": "https://x/video.mp4"}}
+    ))
+    url, cost = avatar._submit_segmind("img", "aud", "480p", "p", deadline=avatar.time.monotonic() + 60)
+    assert url == "https://x/video.mp4"
+    assert cost is None
+
+
+def test_extract_segmind_video_url_handles_shape_variants():
+    assert avatar._extract_segmind_video_url({"output": "https://x/a.mp4"}) == "https://x/a.mp4"
+    assert avatar._extract_segmind_video_url({"output": {"url": "https://x/a.mp4"}}) == "https://x/a.mp4"
+    assert avatar._extract_segmind_video_url({"output": {"result": "https://x/a.mp4"}}) == "https://x/a.mp4"
+    assert avatar._extract_segmind_video_url({"output": {"video_url": "https://x/a.mp4"}}) == "https://x/a.mp4"
+    assert avatar._extract_segmind_video_url({"video_url": "https://x/a.mp4"}) == "https://x/a.mp4"
+    assert avatar._extract_segmind_video_url({"result": "https://x/a.mp4"}) == "https://x/a.mp4"
+    assert avatar._extract_segmind_video_url({"output": {}}) is None
+    assert avatar._extract_segmind_video_url({}) is None
+
+
+def test_extract_segmind_cost():
+    # Real shape confirmed via a live probe (2026-07-14).
+    assert avatar._extract_segmind_cost({"metrics": {"cost": 0.1979075}}) == 0.1979075
+    assert avatar._extract_segmind_cost({"metrics": {}}) is None
+    assert avatar._extract_segmind_cost({}) is None
+    assert avatar._extract_segmind_cost({"metrics": {"cost": "not-a-number"}}) is None
+
+
+def test_segmind_failed_returns_none(monkeypatch):
+    monkeypatch.setattr(avatar.requests, "post", lambda *a, **k: _resp(
+        {"status": "FAILED", "error": "boom"}
+    ))
+    assert avatar._submit_segmind("img", "aud", "480p", "p",
+                                  deadline=avatar.time.monotonic() + 60) == (None, None)
+
+
+def test_segmind_queued_polls_status_then_fetches_result(monkeypatch):
+    monkeypatch.setattr(avatar.requests, "post", lambda *a, **k: _resp(
+        {"status": "QUEUED", "request_id": "req-1"}
+    ))
+
+    def fake_get(url, *a, **k):
+        if url.endswith("/status"):
+            return _resp({"status": "COMPLETED"})
+        return _resp({"status": "COMPLETED", "output": "https://x/late.mp4", "metrics": {"cost": 0.33}})
+
+    monkeypatch.setattr(avatar.requests, "get", fake_get)
+    monkeypatch.setattr(avatar.time, "sleep", lambda s: None)
+    url, cost = avatar._submit_segmind("img", "aud", "480p", "p",
+                                       deadline=avatar.time.monotonic() + 60)
+    assert url == "https://x/late.mp4"
+    assert cost == 0.33
+
+
+def test_segmind_deadline_expiry_returns_none(monkeypatch):
+    monkeypatch.setattr(avatar.requests, "post", lambda *a, **k: _resp(
+        {"status": "QUEUED", "request_id": "req-1"}
+    ))
+    monkeypatch.setattr(avatar.requests, "get", lambda *a, **k: _resp(
+        {"status": "PROCESSING"}
+    ))
+    monkeypatch.setattr(avatar.time, "sleep", lambda s: None)
+    # Deadline already passed → poll loop never runs.
+    assert avatar._submit_segmind("img", "aud", "480p", "p",
+                                  deadline=avatar.time.monotonic() - 1) == (None, None)
+
+
+def test_segmind_submit_exception_returns_none(monkeypatch):
+    def boom(*a, **k):
+        raise avatar.requests.exceptions.ConnectionError("no route")
+    monkeypatch.setattr(avatar.requests, "post", boom)
+    assert avatar._submit_segmind("img", "aud", "480p", "p",
+                                  deadline=avatar.time.monotonic() + 60) == (None, None)
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +250,9 @@ def test_generate_avatar_clip_pads_audio_slice_tail(monkeypatch, tmp_path):
 
     monkeypatch.setattr(avatar, "slice_audio", fake_slice_audio)
     # Stop right after slicing — no need to hit the network for this test.
-    monkeypatch.setattr(avatar, "_submit_runsync", lambda *a, **k: None)
+    # Default provider is segmind, so that's the submit fn generate_avatar_clip
+    # will dispatch to.
+    monkeypatch.setattr(avatar, "_submit_segmind", lambda *a, **k: (None, None))
 
     avatar.generate_avatar_clip(
         image_path="unused.png", audio_file="unused.mp3",
@@ -166,15 +266,82 @@ def test_generate_avatar_clip_pads_audio_slice_tail(monkeypatch, tmp_path):
     assert seen["t_end"] == 12.0 + avatar._AUDIO_TAIL_BUFFER_SECONDS
 
 
+def test_generate_avatar_clip_records_cost_on_success(monkeypatch, tmp_path):
+    monkeypatch.setattr(avatar.config, "app", {
+        **avatar.config.app,
+        "avatar_enabled": True,
+        "avatar_size": "480p",
+    })
+    monkeypatch.setattr(avatar, "dry_run_enabled", lambda: False)
+    monkeypatch.setattr(avatar, "slice_audio", lambda *a, **k: True)
+    monkeypatch.setattr(avatar, "_submit_segmind", lambda *a, **k: ("https://x/video.mp4", 0.1979075))
+    monkeypatch.setattr(avatar, "_download_video", lambda *a, **k: True)
+    monkeypatch.setattr(avatar, "normalize_clip", lambda src, out_path, *a, **k: out_path)
+
+    report = {}
+    out = avatar.generate_avatar_clip(
+        image_path="unused.png", audio_file="unused.mp3",
+        t_start=0.0, t_end=5.0, planned_duration=5.0,
+        clips_dir=str(tmp_path), clip_idx=0, width=192, height=108,
+        image_url="https://example.com/img.png",
+        local_dir=str(tmp_path), url_prefix="https://example.com/assets",
+        report=report,
+    )
+    assert out == str(tmp_path / "clip-0000.mp4")
+    assert report[0]["avatar"] is True
+    assert report[0]["avatar_cost_usd"] == 0.1979075
+
+
+def test_generate_avatar_clip_omits_cost_when_provider_didnt_report_one(monkeypatch, tmp_path):
+    monkeypatch.setattr(avatar.config, "app", {
+        **avatar.config.app,
+        "avatar_enabled": True,
+    })
+    monkeypatch.setattr(avatar, "dry_run_enabled", lambda: False)
+    monkeypatch.setattr(avatar, "slice_audio", lambda *a, **k: True)
+    monkeypatch.setattr(avatar, "_submit_segmind", lambda *a, **k: ("https://x/video.mp4", None))
+    monkeypatch.setattr(avatar, "_download_video", lambda *a, **k: True)
+    monkeypatch.setattr(avatar, "normalize_clip", lambda src, out_path, *a, **k: out_path)
+
+    report = {}
+    avatar.generate_avatar_clip(
+        image_path="unused.png", audio_file="unused.mp3",
+        t_start=0.0, t_end=5.0, planned_duration=5.0,
+        clips_dir=str(tmp_path), clip_idx=0, width=192, height=108,
+        image_url="https://example.com/img.png",
+        local_dir=str(tmp_path), url_prefix="https://example.com/assets",
+        report=report,
+    )
+    assert report[0]["avatar"] is True
+    assert "avatar_cost_usd" not in report[0]
+
+
 def test_is_enabled_requires_key_or_dry_run(monkeypatch):
     monkeypatch.setattr(avatar.config, "app", {"avatar_enabled": True})
     assert avatar.is_enabled() is False
+
+    # Default provider (no avatar_provider key set) is segmind.
     monkeypatch.setattr(avatar.config, "app",
-                        {"avatar_enabled": True, "runpod_api_key": "k"})
+                        {"avatar_enabled": True, "segmind_api_key": "k"})
+    assert avatar.is_enabled() is True
+
+    # Explicit runpod provider.
+    monkeypatch.setattr(avatar.config, "app",
+                        {"avatar_enabled": True, "avatar_provider": "runpod"})
+    assert avatar.is_enabled() is False
+    monkeypatch.setattr(avatar.config, "app",
+                        {"avatar_enabled": True, "avatar_provider": "runpod", "runpod_api_key": "k"})
     assert avatar.is_enabled() is True
     monkeypatch.setattr(avatar.config, "app",
-                        {"avatar_enabled": False, "runpod_api_key": "k"})
+                        {"avatar_enabled": False, "avatar_provider": "runpod", "runpod_api_key": "k"})
     assert avatar.is_enabled() is False
+
+    # A segmind_api_key doesn't satisfy the runpod provider, and vice versa.
+    monkeypatch.setattr(avatar.config, "app",
+                        {"avatar_enabled": True, "avatar_provider": "runpod", "segmind_api_key": "k"})
+    assert avatar.is_enabled() is False
+
+    # Dry run bypasses the provider/key check entirely.
     monkeypatch.setattr(avatar.config, "app",
                         {"avatar_enabled": True, "avatar_dry_run": True})
     assert avatar.is_enabled() is True

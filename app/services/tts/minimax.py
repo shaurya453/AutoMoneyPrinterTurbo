@@ -1,4 +1,10 @@
-"""Minimax cloud TTS engine (speech-02-hd)."""
+"""Minimax cloud TTS engine (speech-02-hd).
+
+Routed through Algrow's proxy by default (cheaper billing, see algrow.py) —
+toggle via config `minimax_provider` = "algrow" (default) | "direct" (dormant
+fallback, calls Minimax's own API below directly with minimax_api_key/
+minimax_group_id).
+"""
 import os
 import subprocess
 import tempfile
@@ -49,9 +55,33 @@ def _minimax_tts_single(
         return False
 
 
+def _provider() -> str:
+    return str(config.app.get("minimax_provider", "algrow")).strip().lower()
+
+
 def minimax_tts(
     text: str, voice_name: str, voice_rate: float, voice_file: str
 ) -> Union[SubMaker, None]:
+    if _provider() == "algrow":
+        from app.services.tts.algrow import algrow_minimax_tts
+
+        return algrow_minimax_tts(text, voice_name, voice_rate, voice_file)
+
+    return direct_minimax_tts(text, voice_name, voice_rate, voice_file)
+
+
+def direct_minimax_tts(
+    text: str, voice_name: str, voice_rate: float, voice_file: str
+) -> Union[SubMaker, None]:
+    """Calls Minimax's own API directly, bypassing the minimax_provider switch.
+
+    Used by scripts/minimax_preview.py (voice previews are a few cached words,
+    generated once — Algrow's ~10min async queue makes it unusable for an
+    interactive preview click, but the direct API's near-instant sync response
+    is cheap enough for this narrow case) and
+    scripts/algrow_clone_from_minimax.py (the clone source must be real
+    Minimax audio, not a proxy's).
+    """
     api_key  = str(config.app.get("minimax_api_key", ""))
     group_id = str(config.app.get("minimax_group_id", ""))
     model    = str(config.app.get("minimax_model", "speech-02-hd"))
