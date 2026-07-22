@@ -36,6 +36,18 @@
         {"project": "src/projects/list-c.ts", "styles": ["cascade"], "label": "C - cascade reveal, bar sweep"},
         {"project": "src/projects/list-d.ts", "styles": ["grid"], "label": "D - card grid"}
       ]
+    },
+    "quote_card": {
+      "uses_bg_video": true,
+      "variants": [
+        {"project": "src/projects/quote-card.ts", "styles": [], "label": "attributed quote, only variant"}
+      ]
+    },
+    "timeline_card": {
+      "uses_bg_video": true,
+      "variants": [
+        {"project": "src/projects/timeline-card.ts", "styles": [], "label": "date/era marker, only variant"}
+      ]
     }
   }
 }

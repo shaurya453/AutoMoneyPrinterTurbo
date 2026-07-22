@@ -717,6 +717,12 @@ def _start_impl(job_path: str, _avatar_state: dict) -> Optional[dict]:
         _last_visual_effect: str = ""
         _overlay_composited_sentences: set = set()  # composite-overlay graphic applied for these sentence indices
         _sentence_got_clip: set = set()
+        # (cue_start_seconds, sfx_path, volume) — cue_start is the clip's
+        # position in planned_clip_durations' running sum *before* this clip
+        # is appended, i.e. an approximation of its start in the final
+        # timeline (pre-crossfade-overlap consumption — good enough for a
+        # short mood accent, not claimed frame-exact).
+        sfx_cues: list = []
 
         for future_or_none, meta in _task_queue:
             idx = meta["idx"]
@@ -886,15 +892,30 @@ def _start_impl(job_path: str, _avatar_state: dict) -> Optional[dict]:
             if fetched:
                 clip_path, used_image = fetched
                 content_track_sent = meta["sent"].get("content_track", "broll")
+                visual_grade = meta["sent"].get("visual_grade", "")
+                grain = float(meta["sent"].get("grain", 0.0) or 0.0)
+                vignette = float(meta["sent"].get("vignette", 0.0) or 0.0)
 
-                if visual_effect and content_track_sent in ("broll", "named"):
-                    effected_path = clip_path.replace(".mp4", f"_{visual_effect}.mp4")
+                if (
+                    (visual_effect or visual_grade or grain or vignette)
+                    and content_track_sent in ("broll", "named")
+                ):
+                    effected_path = clip_path.replace(".mp4", f"_{visual_effect or 'graded'}.mp4")
                     eff_w, eff_h = video_aspect.to_resolution()
                     clip_path = video.apply_visual_effect(
                         clip_path, visual_effect, effected_path,
                         width=eff_w, height=eff_h,
                         threads=os.cpu_count() or 4,
+                        grade=visual_grade, grain=grain, vignette=vignette,
                     )
+                    if visual_effect and config.app.get("sfx_enabled", True):
+                        sfx_pick = video.pick_sfx_for_mood(visual_effect, rng=job_rng)
+                        if sfx_pick:
+                            sfx_cues.append((
+                                sum(planned_clip_durations),
+                                sfx_pick["path"],
+                                sfx_pick["volume"],
+                            ))
 
                 # Composite-over-footage graphic (lower_third or info_callout) —
                 # apply on the first successful clip of the sentence. Consume the
@@ -1497,6 +1518,7 @@ def _start_impl(job_path: str, _avatar_state: dict) -> Optional[dict]:
             output_file=output_file,
             params=params,
             rng=job_rng,
+            sfx_cues=sfx_cues,
         )
     except Exception:
         logger.exception("generate_video() raised — aborting")

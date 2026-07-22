@@ -56,6 +56,41 @@ _GLOBAL_OVERLAY_OPACITY = 0.75
 
 _OVERLAY_FADE_DUR = 0.5   # seconds — fade-in at start, fade-out at end
 
+# Color grade presets (mirrors vidspeed's Grade type in src/theme.ts).
+# "vintage" uses ffmpeg's own built-in curves preset; the others are plain
+# well-known filter combos (classic sepia matrix, desaturate, cool-desaturated
+# archival look) rather than anything calibrated against a reference.
+_GRADE_FILTERS: dict[str, str] = {
+    "sepia": "colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131:0",
+    "bw": "hue=s=0",
+    "vintage": "curves=preset=vintage",
+    "aged": "eq=saturation=0.55:contrast=0.92:brightness=-0.02,colorbalance=rs=-0.05:gs=0.0:bs=0.08",
+}
+
+
+def _grade_chain_str(grade: str, grain: float, vignette: float) -> str:
+    """Build a comma-joined ffmpeg -vf fragment for grade/grain/vignette.
+
+    grain and vignette are 0..1 intensities; grade is a preset name from
+    _GRADE_FILTERS (unknown/empty names are silently skipped, not errors —
+    same "graceful no-op" convention as apply_visual_effect's unknown effect
+    handling). Returns "" if nothing was requested.
+    """
+    parts: list[str] = []
+    grade_filter = _GRADE_FILTERS.get(grade or "")
+    if grade_filter:
+        parts.append(grade_filter)
+    if grain and grain > 0:
+        strength = max(1, min(60, round(min(1.0, grain) * 40)))
+        parts.append(f"noise=alls={strength}:allf=t")
+    if vignette and vignette > 0:
+        # ffmpeg's vignette filter has no direct 0..1 strength knob — angle
+        # (radians) is the closest proxy: smaller angle = tighter/stronger
+        # vignette. Default look (angle=PI/5) at intensity=1.0.
+        angle = (3.14159265 / 5) / max(0.1, min(1.0, vignette))
+        parts.append(f"vignette=angle={angle:.4f}")
+    return ",".join(parts)
+
 
 def _build_overlay_filter(
     blend_mode: str,
@@ -65,6 +100,7 @@ def _build_overlay_filter(
     accent: float,
     fade: float,
     clip_dur: float,
+    post_chain: str = "",
 ) -> str:
     """Build the filter_complex for blending a motion overlay onto a clip.
 
@@ -111,17 +147,63 @@ def _build_overlay_filter(
     # Scale the clip to match the overlay — Pexels sometimes delivers non-standard
     # resolutions (e.g. 2048×1080) that would cause the blend to fail with -22.
     chains.append(f"[1:v]scale={width}:{height},format=gbrp[_clip]")
-    chains.append(
-        f"[_clip][{ov_label}]"
-        f"blend=all_mode={blend_mode}:all_opacity={opacity},"
-        f"format=yuv420p"
-        f"[out]"
-    )
+    if post_chain:
+        chains.append(
+            f"[_clip][{ov_label}]"
+            f"blend=all_mode={blend_mode}:all_opacity={opacity},"
+            f"format=yuv420p"
+            f"[_blended]"
+        )
+        chains.append(f"[_blended]{post_chain}[out]")
+    else:
+        chains.append(
+            f"[_clip][{ov_label}]"
+            f"blend=all_mode={blend_mode}:all_opacity={opacity},"
+            f"format=yuv420p"
+            f"[out]"
+        )
     return ";".join(chains)
 
 # Duration constants for lower_third compositing.
 _LT_ANIM_IN  = 0.40   # seconds — fade-in
 _LT_ANIM_OUT = 0.35   # seconds — fade-out
+
+
+def _apply_grade_only(
+    clip_path: str,
+    output_path: str,
+    post_chain: str,
+    threads: int,
+) -> str:
+    """Grade/grain/vignette with no mood texture — single-input ffmpeg pass."""
+    clip_dur = _probe_duration(clip_path)
+    if not clip_dur:
+        logger.warning("apply_visual_effect(grade-only): duration probe failed")
+        return clip_path
+
+    codec = _get_configured_video_codec()
+    cmd = [
+        utils.get_ffmpeg_binary(), "-y",
+        "-i", clip_path,
+        "-vf", post_chain,
+        "-map", "0:v", "-map", "0:a?", "-c:a", "copy",
+        "-c:v", codec, *_fast_preset_args(codec),
+        "-pix_fmt", "yuv420p",
+        "-threads", str(threads),
+        output_path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=300)
+        if result.returncode != 0:
+            logger.error(
+                f"apply_visual_effect(grade-only) failed: "
+                f"{result.stderr.decode('utf-8', errors='replace')[-400:]}"
+            )
+            return clip_path
+        return output_path
+    except Exception as exc:
+        logger.error(f"apply_visual_effect(grade-only) exception: {exc}")
+        return clip_path
 
 
 def apply_visual_effect(
@@ -131,8 +213,12 @@ def apply_visual_effect(
     width: int = 1920,
     height: int = 1080,
     threads: int = 4,
+    grade: str = "",
+    grain: float = 0.0,
+    vignette: float = 0.0,
 ) -> str:
-    """Composite a motion overlay onto clip_path for its full natural duration.
+    """Composite a motion overlay onto clip_path for its full natural duration,
+    optionally fused with a color grade / grain / vignette post-process.
 
     The overlay plays ONCE from start to finish (no looping). If the clip is
     shorter than the overlay, the overlay is trimmed to fit. If the clip is
@@ -145,13 +231,19 @@ def apply_visual_effect(
     A fade-in and fade-out of _OVERLAY_FADE_DUR seconds is applied.
     Returns output_path on success, clip_path unchanged on any failure.
     Audio is passed through unchanged.
-    """
-    if effect not in _VALID_VISUAL_EFFECTS:
-        return clip_path
 
-    overlay_cfg = _EFFECT_OVERLAYS.get(effect)
+    grade/grain/vignette work independently of `effect` — a clip can be
+    graded/grained/vignetted with no mood texture at all (single-input pass,
+    see _apply_grade_only), or have both fused into the one ffmpeg call that
+    already runs the texture blend, avoiding a second full transcode.
+    """
+    post_chain = _grade_chain_str(grade, grain, vignette)
+    overlay_cfg = _EFFECT_OVERLAYS.get(effect) if effect in _VALID_VISUAL_EFFECTS else None
+
     if not overlay_cfg:
-        return clip_path
+        if not post_chain:
+            return clip_path
+        return _apply_grade_only(clip_path, output_path, post_chain, threads)
 
     overlay_path = os.path.join(_OVERLAY_DIR, overlay_cfg["file"])
     if not os.path.exists(overlay_path):
@@ -173,7 +265,7 @@ def apply_visual_effect(
     fade   = min(_OVERLAY_FADE_DUR, accent / 4)
 
     filter_complex = _build_overlay_filter(
-        blend_mode, opacity, width, height, accent, fade, clip_dur
+        blend_mode, opacity, width, height, accent, fade, clip_dur, post_chain
     )
 
     codec = _get_configured_video_codec()

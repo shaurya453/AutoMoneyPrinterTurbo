@@ -443,6 +443,70 @@ def _render_bgm_wav(
     return True
 
 
+def _render_sfx_bed_wav(
+    cues: list,
+    duration: float,
+    out_path: str,
+    volume_scale: float = 1.0,
+) -> bool:
+    """Pre-render one-shot SFX cues into a single full-duration 16-bit WAV bed.
+
+    Mirrors _render_bgm_wav()'s "decode offline, mix as PCM, single ffmpeg
+    pass" approach rather than adding one raw -i input per cue to the final
+    ffmpeg command. `cues` is a list of (start_seconds, file_path, volume)
+    tuples — SFX are NOT ducked against narration (see sfx.py docstring: an
+    accent is meant to cut through, not sit under the mix). Returns True if
+    at least one cue rendered; False (and no file written) if the cue list
+    is empty or every cue failed to decode.
+    """
+    _SR = 44100
+    n_target = int(duration * _SR)
+    if n_target <= 0 or not cues:
+        return False
+
+    bed = np.zeros((n_target, 2), dtype=np.float64)
+    any_mixed = False
+
+    for start_seconds, file_path, cue_volume in cues:
+        decode = subprocess.run(
+            [
+                utils.get_ffmpeg_binary(), "-y", "-loglevel", "error",
+                "-i", file_path,
+                "-ar", str(_SR), "-ac", "2",
+                "-f", "s16le", "pipe:1",
+            ],
+            capture_output=True, timeout=60,
+        )
+        if decode.returncode != 0 or not decode.stdout:
+            logger.warning(
+                f"SFX decode failed for {file_path}: "
+                f"{decode.stderr[-200:] if decode.stderr else 'empty output'}"
+            )
+            continue
+
+        samples = np.frombuffer(decode.stdout, dtype=np.int16).reshape(-1, 2).astype(np.float64)
+        start_idx = max(0, int(start_seconds * _SR))
+        if start_idx >= n_target:
+            continue
+        end_idx = min(n_target, start_idx + len(samples))
+        clip_len = end_idx - start_idx
+        if clip_len <= 0:
+            continue
+        bed[start_idx:end_idx] += samples[:clip_len] * (cue_volume * volume_scale)
+        any_mixed = True
+
+    if not any_mixed:
+        return False
+
+    mixed = np.clip(bed, -32768, 32767).astype(np.int16)
+    with wave.open(out_path, "wb") as wf:
+        wf.setnchannels(2)
+        wf.setsampwidth(2)
+        wf.setframerate(_SR)
+        wf.writeframes(mixed.tobytes())
+    return True
+
+
 def _ass_color(hex_color: str, alpha: int = 0) -> str:
     """'#RRGGBB' → ASS '&HAABBGGRR' (ASS is BGR with inverted alpha)."""
     r, g, b = _hex_to_rgb(hex_color or "#FFFFFF")
@@ -472,6 +536,7 @@ def _generate_video_ffmpeg(
     output_file: str,
     params: VideoParams,
     rng: random.Random = random,
+    sfx_cues: Optional[list] = None,
 ) -> None:
     """Single-pass ffmpeg final render: subtitle burn-in (libass), fade-out,
     voice + pre-rendered ducked BGM mix. Replaces the MoviePy frame loop,
@@ -564,11 +629,31 @@ def _generate_video_ffmpeg(
             else:
                 logger.warning("BGM pre-render failed — continuing without BGM")
 
+        sfx_wav = ""
+        if sfx_cues and config.app.get("sfx_enabled", True):
+            sfx_candidate = os.path.join(output_dir, "temp-sfx-bed.wav")
+            if _render_sfx_bed_wav(
+                cues=sfx_cues,
+                duration=video_duration,
+                out_path=sfx_candidate,
+                volume_scale=float(config.app.get("sfx_volume_scale", 1.0)),
+            ):
+                sfx_wav = sfx_candidate
+                tmp_files.append(sfx_candidate)
+                logger.info(f"SFX bed pre-rendered: {len(sfx_cues)} cue(s)")
+
+        # Extra audio tracks beyond narration (bgm, sfx) are mixed in as
+        # additional -i inputs on top of the always-present [1:a] narration —
+        # order here must match the -i order built below.
+        extra_audio_wavs = [w for w in (bgm_wav, sfx_wav) if w]
+
         voice_vol = float(params.voice_volume or 1.0)
-        if bgm_wav:
+        if extra_audio_wavs:
+            n_inputs = 1 + len(extra_audio_wavs)
+            extra_labels = "".join(f"[{2 + i}:a]" for i in range(len(extra_audio_wavs)))
             audio_graph = (
                 f"[1:a]volume={voice_vol}[va];"
-                f"[va][2:a]amix=inputs=2:duration=longest:normalize=0[a]"
+                f"[va]{extra_labels}amix=inputs={n_inputs}:duration=longest:normalize=0[a]"
             )
         else:
             audio_graph = f"[1:a]volume={voice_vol}[a]"
@@ -580,7 +665,7 @@ def _generate_video_ffmpeg(
             utils.get_ffmpeg_binary(), "-y",
             "-i", video_path,
             "-i", audio_path,
-            *(["-i", bgm_wav] if bgm_wav else []),
+            *[arg for w in extra_audio_wavs for arg in ("-i", w)],
             "-filter_complex", filter_complex,
             "-map", "[v]", "-map", "[a]",
             "-c:v", codec, *_fast_preset_args(codec),
@@ -613,6 +698,7 @@ def generate_video(
     output_file: str,
     params: VideoParams,
     rng: random.Random = random,
+    sfx_cues: Optional[list] = None,
 ):
     aspect = VideoAspect(params.video_aspect)
     video_width, video_height = aspect.to_resolution()
@@ -635,6 +721,7 @@ def generate_video(
                 output_file=output_file,
                 params=params,
                 rng=rng,
+                sfx_cues=sfx_cues,
             )
         except Exception as exc:
             logger.warning(f"ffmpeg final render failed — falling back to MoviePy: {exc}")
@@ -797,6 +884,21 @@ def generate_video(
         except Exception as e:
             logger.error(f"failed to add bgm: {str(e)}")
 
+    sfx_audio_clips = []
+    if sfx_cues and config.app.get("sfx_enabled", True):
+        sfx_vol_scale = float(config.app.get("sfx_volume_scale", 1.0))
+        for start_seconds, sfx_path, sfx_volume in sfx_cues:
+            try:
+                sfx_audio_clips.append(
+                    AudioFileClip(sfx_path)
+                    .with_effects([afx.MultiplyVolume(sfx_volume * sfx_vol_scale)])
+                    .with_start(start_seconds)
+                )
+            except Exception as e:
+                logger.warning(f"failed to load SFX cue {sfx_path}: {e}")
+    if sfx_audio_clips:
+        audio_clip = CompositeAudioClip([audio_clip, *sfx_audio_clips])
+
     video_clip = video_clip.with_audio(audio_clip)
     output_audio_fps = int(getattr(audio_clip, "fps", 0) or 44100)
     _write_videofile_with_codec_fallback(
@@ -815,4 +917,6 @@ def generate_video(
     voice_audio_clip.close()
     if bgm_audio_clip is not None:
         bgm_audio_clip.close()
+    for _sfx_clip in sfx_audio_clips:
+        _sfx_clip.close()
     del video_clip

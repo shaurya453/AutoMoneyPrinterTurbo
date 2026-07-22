@@ -395,6 +395,56 @@ def test_info_callout_on_broll_warns(tmp_path):
     assert "info_callout used on a sentence that is not content_track='named'" in res.stdout
 
 
+def test_quote_card_empty_quote_warns(tmp_path):
+    job = _valid_job()
+    job["sentences"][0].pop("visual_effect", None)
+    job["sentences"][0]["graphic_type"] = "quote_card"
+    job["sentences"][0]["variables"] = {"quote": "  ", "attribution": "Someone"}
+    res = _run(tmp_path, job)
+    assert res.returncode == 0
+    assert "quote_card variables.quote must be a non-empty string" in res.stdout
+
+
+def test_timeline_card_empty_label_warns(tmp_path):
+    job = _valid_job()
+    job["sentences"][0].pop("visual_effect", None)
+    job["sentences"][0]["graphic_type"] = "timeline_card"
+    job["sentences"][0]["variables"] = {"label": ""}
+    res = _run(tmp_path, job)
+    assert res.returncode == 0
+    assert "timeline_card variables.label must be a non-empty string" in res.stdout
+
+
+def test_quote_card_valid_does_not_warn_on_its_own_check(tmp_path):
+    job = _valid_job()
+    job["sentences"][0].pop("visual_effect", None)
+    job["sentences"][0]["graphic_type"] = "quote_card"
+    job["sentences"][0]["variables"] = {"quote": "A real quote.", "attribution": "Someone"}
+    res = _run(tmp_path, job)
+    assert res.returncode == 0
+    assert "quote_card variables.quote must be a non-empty string" not in res.stdout
+
+
+def test_quote_card_and_timeline_card_share_non_lt_cap(tmp_path):
+    job = _valid_job()
+    filler = job["sentences"][1]
+    sentences = [
+        dict(filler, text=f"Filler sentence {i}.", visual_caption=f"filler caption {i}")
+        for i in range(5)  # keep the graphic run out of the hook zone (0-4)
+    ]
+    for i in range(10):
+        s = dict(filler)
+        s["text"] = f"Sentence number {i} about the timeline."
+        s["visual_caption"] = f"timeline caption {i}"
+        s["graphic_type"] = "quote_card" if i % 2 == 0 else "timeline_card"
+        s["variables"] = {"quote": "Q", "attribution": "A"} if i % 2 == 0 else {"label": "1999"}
+        sentences.append(s)
+    job["sentences"] = sentences
+    res = _run(tmp_path, job)
+    assert res.returncode == 0
+    assert "too many infographic/list/quote_card/timeline_card graphics" in res.stdout
+
+
 def test_info_callout_cap_and_spacing_independent_of_other_pool(tmp_path):
     job = _valid_job()
     filler = job["sentences"][1]  # broll, no visual_effect

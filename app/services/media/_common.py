@@ -5,14 +5,17 @@ images.py or videos.py.
 """
 import os
 import random
+import re
 import threading
 import time
+from typing import Optional
 
 import requests
 from loguru import logger
 from PIL import Image, UnidentifiedImageError
 
 from app.config import config
+from app.services.media._search_cache import cached_get_json, cached_post_json
 from app.utils import utils
 
 # ---------------------------------------------------------------------------
@@ -141,6 +144,28 @@ def set_provider_cooldown(provider: str, seconds: float) -> None:
     with _blocked_hosts_lock:
         _provider_cooldowns[provider] = time.monotonic() + seconds
 
+
+# Run-length cooldown for quota exhaustion (won't self-heal within a single
+# job, unlike a transient 429 rate-limit) — distinct from the short 429
+# backoffs elsewhere in this module.
+_QUOTA_EXHAUSTION_COOLDOWN_SECONDS = 6 * 3600
+
+_QUOTA_EXHAUSTION_PATTERNS = re.compile(
+    r"payment required|quota|usage limit|out of credit|insufficient credit|"
+    r"exceeded.{0,20}(limit|quota)|monthly limit|api limit reached",
+    re.IGNORECASE,
+)
+
+
+def is_quota_exhaustion(status_code: Optional[int], response_text: str = "") -> bool:
+    """True if a response looks like hard quota exhaustion rather than a
+    transient rate-limit — HTTP 402 (Payment Required) is an unambiguous
+    signal on its own; other codes need a matching phrase in the body since
+    429/403 are also used for ordinary short-lived rate-limiting."""
+    if status_code == 402:
+        return True
+    return bool(response_text) and bool(_QUOTA_EXHAUSTION_PATTERNS.search(response_text))
+
 # ---------------------------------------------------------------------------
 # TLS verification
 # ---------------------------------------------------------------------------
@@ -218,6 +243,31 @@ def _api_get_json(url: str, headers: dict = None, timeout: tuple = _HTTP_TIMEOUT
         r.raise_for_status()
         return r.json()
     raise last_exc
+
+
+def _cached_api_get_json(
+    provider: str, url: str, headers: dict = None, timeout: tuple = _HTTP_TIMEOUT_API
+) -> dict:
+    """_api_get_json(), wrapped with the provider search-response cache
+    (see _search_cache.py). `provider` scopes the cache key so different
+    providers hitting structurally similar URLs never collide."""
+    return cached_get_json(
+        provider, url,
+        lambda: _api_get_json(url, headers=headers, timeout=timeout),
+        header_names=tuple((headers or {}).keys()),
+    )
+
+
+def _cached_api_post_json(
+    provider: str, url: str, json_body: dict, headers: dict = None, timeout: tuple = _HTTP_TIMEOUT_API
+) -> dict:
+    """_api_post_json(), wrapped with the provider search-response cache —
+    POST analog of _cached_api_get_json(), see _search_cache.py."""
+    return cached_post_json(
+        provider, url, json_body,
+        lambda: _api_post_json(url, json_body, headers=headers, timeout=timeout),
+        header_names=tuple((headers or {}).keys()),
+    )
 
 
 def _api_post_json(url: str, json_body: dict, headers: dict = None, timeout: tuple = _HTTP_TIMEOUT_API) -> dict:

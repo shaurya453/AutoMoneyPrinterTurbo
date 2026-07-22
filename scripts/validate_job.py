@@ -51,7 +51,8 @@ Avatar warnings (talking-head blocks — see app/services/avatar.py):
   - avatar sentence also carrying graphic_type or visual_effect
 
 Hook Zone warnings (sentences 0–4):
-  - lower_third, infographic, or list graphic_type in sentences 0–4
+  - any graphic_type (lower_third/infographic/list/info_callout/quote_card/timeline_card)
+    in sentences 0–4
   - media_type='image' on a broll sentence in sentences 0–4
   - Fewer than 2 visual_effects across sentences 0–4
   - Any visual_concepts slot left empty in sentences 0–4
@@ -64,7 +65,10 @@ import sys
 
 _HOOK_ZONE = 5  # first N sentences constitute the hook zone (~30 s at normal narration speed)
 
-_VALID_GTYPES = frozenset({"lower_third", "infographic", "list", "info_callout"})
+_VALID_GTYPES = frozenset({
+    "lower_third", "infographic", "list", "info_callout",
+    "quote_card", "timeline_card",
+})
 _HOOK_BANNED_GTYPES = _VALID_GTYPES  # all graphic types are banned from the hook zone
 
 _VALID_VISUAL_EFFECTS = frozenset({
@@ -208,8 +212,25 @@ def main():
                     "graphic will render blank. All fields (title, label, items, style, etc.) "
                     "must be inside variables: {}"
                 )
-            if gtype_str in ("infographic", "list"):
+            if gtype_str in ("infographic", "list", "quote_card", "timeline_card"):
+                # quote_card/timeline_card are full-replace like infographic/list
+                # (not composited over footage like lower_third/info_callout),
+                # so they share the same cost class/spacing cap.
                 non_lt_graphic_indices.append(i)
+                if gtype_str == "quote_card" and isinstance(variables, dict):
+                    quote = variables.get("quote")
+                    if not (isinstance(quote, str) and quote.strip()):
+                        warnings.append(
+                            f"sentence {i}: quote_card variables.quote must be a non-empty string, "
+                            f"got {quote!r}"
+                        )
+                if gtype_str == "timeline_card" and isinstance(variables, dict):
+                    label = variables.get("label")
+                    if not (isinstance(label, str) and label.strip()):
+                        warnings.append(
+                            f"sentence {i}: timeline_card variables.label must be a non-empty "
+                            f"string, got {label!r}"
+                        )
             elif gtype_str == "info_callout":
                 info_callout_indices.append(i)
                 if track != "named":
@@ -318,8 +339,8 @@ def main():
         if gtype in _HOOK_BANNED_GTYPES:
             warnings.append(
                 f"hook zone violation — sentence {i}: graphic_type={gtype!r} is banned "
-                f"in sentences 0–{_HOOK_ZONE - 1}; save all graphics (lower_third, infographic, "
-                "list, info_callout) for after the viewer is hooked"
+                f"in sentences 0–{_HOOK_ZONE - 1}; save all graphics ({', '.join(sorted(_VALID_GTYPES))}) "
+                "for after the viewer is hooked"
             )
 
         if track in ("broll", "named"):
@@ -498,17 +519,21 @@ def main():
     # intentional at this density and not warned on.
 
     # ── Non-lower-third graphic cap and spacing ──────────────────────────────
+    # Pool covers every full-replace graphic type (infographic/list/quote_card/
+    # timeline_card) — all share the same cost class since they replace the
+    # footage slot entirely, unlike lower_third/info_callout which composite.
     _NON_LT_CAP = 8
     if len(non_lt_graphic_indices) > _NON_LT_CAP:
         warnings.append(
-            f"too many infographic/list graphics: {len(non_lt_graphic_indices)} "
-            f"(hard limit is ≤{_NON_LT_CAP}); remove the least necessary ones"
+            f"too many infographic/list/quote_card/timeline_card graphics: "
+            f"{len(non_lt_graphic_indices)} (hard limit is ≤{_NON_LT_CAP}); "
+            "remove the least necessary ones"
         )
     for k in range(1, len(non_lt_graphic_indices)):
         gap = non_lt_graphic_indices[k] - non_lt_graphic_indices[k - 1]
         if gap < 4:  # gap < 4 means fewer than 3 sentences between the two graphics
             warnings.append(
-                f"infographic/list graphics too close: sentence {non_lt_graphic_indices[k - 1]} "
+                f"graphics too close: sentence {non_lt_graphic_indices[k - 1]} "
                 f"and sentence {non_lt_graphic_indices[k]} are only {gap - 1} sentence(s) apart "
                 f"— separate them with ≥3 footage sentences so each graphic has room to land"
             )

@@ -15,7 +15,8 @@ from app.services.media._common import (
     _HTTP_TIMEOUT_IMAGE,
     _SLOW_IMAGE_DOMAINS,
     _api_get_json,
-    _api_post_json,
+    _cached_api_get_json,
+    _cached_api_post_json,
     _get_tls_verify,
     _is_valid_raster_image,
     _touch_cache_file,
@@ -23,6 +24,7 @@ from app.services.media._common import (
     get_api_key,
     is_failed_url,
     is_host_blocked,
+    is_quota_exhaustion,
     mark_failed_url,
     provider_on_cooldown,
     register_host_failure,
@@ -31,6 +33,11 @@ from app.services.media._common import (
 )
 from app.services.scoring import nsfw, relevance, vlm
 from app.utils import utils
+
+# Run-length cooldown applied once a provider signals hard quota exhaustion
+# (see is_quota_exhaustion() in _common.py) — distinct from the short 429
+# backoffs already used elsewhere in this file for transient rate-limiting.
+_QUOTA_COOLDOWN_SECONDS = 6 * 3600
 
 # ---------------------------------------------------------------------------
 # Watermark detection
@@ -259,6 +266,8 @@ def search_images_pexels(
     rank_tokens: List[str] = None, avoid_tokens: List[str] = None,
 ) -> List[str]:
     """Return up to n image URLs from Pexels Photos API."""
+    if provider_on_cooldown("pexels"):
+        return []
     try:
         api_key = get_api_key("pexels_api_keys")
     except ValueError:
@@ -273,7 +282,7 @@ def search_images_pexels(
     params = {"query": search_term, "per_page": per_page, "orientation": "landscape"}
     url = f"https://api.pexels.com/v1/search?{urlencode(params)}"
     try:
-        photos = _api_get_json(url, headers=headers).get("photos", [])
+        photos = _cached_api_get_json("pexels", url, headers=headers).get("photos", [])
         results = [
             {"image": p["src"].get("large2x") or p["src"]["original"],
              "title": p.get("alt") or "", "url": p.get("url") or "", "source": ""}
@@ -282,7 +291,12 @@ def search_images_pexels(
         ]
         return [r["image"] for r in _rank_results(results, rank_tokens or [], avoid_tokens or [], n)]
     except Exception as e:
-        logger.error(f"Pexels image search failed: {e}")
+        if isinstance(e, requests.HTTPError) and e.response is not None \
+                and is_quota_exhaustion(e.response.status_code, e.response.text):
+            set_provider_cooldown("pexels", _QUOTA_COOLDOWN_SECONDS)
+            logger.warning("Pexels quota exhausted — pausing Pexels searches for the rest of this run")
+        else:
+            logger.error(f"Pexels image search failed: {e}")
         return []
 
 
@@ -291,6 +305,8 @@ def search_images_pixabay(
     rank_tokens: List[str] = None, avoid_tokens: List[str] = None,
 ) -> List[str]:
     """Return up to n image URLs from Pixabay Images API."""
+    if provider_on_cooldown("pixabay"):
+        return []
     try:
         api_key = get_api_key("pixabay_api_keys")
     except ValueError:
@@ -305,7 +321,7 @@ def search_images_pixabay(
     }
     url = f"https://pixabay.com/api/?{urlencode(params)}"
     try:
-        hits = _api_get_json(url).get("hits", [])
+        hits = _cached_api_get_json("pixabay", url).get("hits", [])
         results = [
             {"image": h.get("largeImageURL") or h.get("webformatURL"),
              "title": h.get("tags") or "", "url": h.get("pageURL") or "", "source": ""}
@@ -314,7 +330,12 @@ def search_images_pixabay(
         ]
         return [r["image"] for r in _rank_results(results, rank_tokens or [], avoid_tokens or [], n)]
     except Exception as e:
-        logger.error(f"Pixabay image search failed: {e}")
+        if isinstance(e, requests.HTTPError) and e.response is not None \
+                and is_quota_exhaustion(e.response.status_code, e.response.text):
+            set_provider_cooldown("pixabay", _QUOTA_COOLDOWN_SECONDS)
+            logger.warning("Pixabay quota exhausted — pausing Pixabay searches for the rest of this run")
+        else:
+            logger.error(f"Pixabay image search failed: {e}")
         return []
 
 
@@ -334,7 +355,7 @@ def search_images_unsplash(
     params = {"query": search_term, "per_page": n, "orientation": "landscape"}
     url = f"https://api.unsplash.com/search/photos?{urlencode(params)}"
     try:
-        results = _api_get_json(url, headers=headers).get("results", [])
+        results = _cached_api_get_json("unsplash", url, headers=headers).get("results", [])
         return [
             p["urls"].get("full") or p["urls"].get("regular")
             for p in results
@@ -376,7 +397,7 @@ def search_images_wikimedia(
     url = f"https://commons.wikimedia.org/w/api.php?{urlencode(params)}"
     headers = {"User-Agent": "MoneyPrinterTurbo/1.0 (documentary-pipeline)"}
     try:
-        pages = _api_get_json(url, headers=headers).get("query", {}).get("pages", {})
+        pages = _cached_api_get_json("wikimedia", url, headers=headers).get("query", {}).get("pages", {})
         urls = []
         for page in pages.values():
             title_ext = os.path.splitext(page.get("title", ""))[-1].lower()
@@ -401,6 +422,149 @@ def search_images_wikimedia(
             )
         else:
             logger.error(f"Wikimedia image search failed: {e}")
+        return []
+
+
+def search_images_nasa(
+    search_term: str, n: int = 5,
+    rank_tokens: List[str] = None, avoid_tokens: List[str] = None,  # metadata too thin to rank
+) -> List[str]:
+    """Return up to n image URLs from NASA's Image and Video Library (no API key required).
+
+    Public-domain historical/space imagery — a natural fit for documentary
+    content. Each search hit's `href` points at a per-asset manifest
+    (".../image/<nasa_id>/collection.json"); the manifest always contains a
+    "~large.jpg" sibling at the same path, so the large-size URL is derived
+    directly from nasa_id instead of issuing a second request per candidate.
+    """
+    if provider_on_cooldown("nasa"):
+        return []
+    params = {"q": search_term, "media_type": "image"}
+    url = f"https://images-api.nasa.gov/search?{urlencode(params)}"
+    try:
+        items = _cached_api_get_json("nasa", url).get("collection", {}).get("items", [])
+        urls = []
+        for item in items[:n * 2]:
+            data = (item.get("data") or [{}])[0]
+            nasa_id = data.get("nasa_id")
+            href = item.get("href") or ""
+            if not nasa_id or not href:
+                continue
+            base = href.rsplit("/", 1)[0]
+            urls.append(f"{base}/{nasa_id}~large.jpg")
+            if len(urls) >= n:
+                break
+        return urls
+    except Exception as e:
+        if isinstance(e, requests.HTTPError) and e.response is not None \
+                and is_quota_exhaustion(e.response.status_code, e.response.text):
+            set_provider_cooldown("nasa", _QUOTA_COOLDOWN_SECONDS)
+            logger.warning("NASA Image Library quota exhausted — pausing NASA searches for the rest of this run")
+        else:
+            logger.error(f"NASA image search failed: {e}")
+        return []
+
+
+def search_images_archive_org(
+    search_term: str, n: int = 5,
+    rank_tokens: List[str] = None, avoid_tokens: List[str] = None,  # metadata too thin to rank
+) -> List[str]:
+    """Return up to n image URLs from the Internet Archive (no API key required).
+
+    Public-domain/CC archival imagery — search returns item identifiers only,
+    so each candidate needs one metadata lookup to find its actual image file
+    (unlike NASA, the filename isn't derivable from the identifier). Capped
+    at n candidates to bound the extra requests.
+    """
+    if provider_on_cooldown("archive_org"):
+        return []
+    search_params = {
+        "q": f"mediatype:image AND ({search_term})",
+        "fl[]": "identifier",
+        "rows": str(n),
+        "output": "json",
+    }
+    search_url = f"https://archive.org/advancedsearch.php?{urlencode(search_params)}"
+    try:
+        docs = _cached_api_get_json("archive_org", search_url).get("response", {}).get("docs", [])
+        urls = []
+        for doc in docs:
+            identifier = doc.get("identifier")
+            if not identifier:
+                continue
+            try:
+                meta = _cached_api_get_json("archive_org", f"https://archive.org/metadata/{identifier}")
+            except Exception:
+                continue
+            files = meta.get("files", [])
+            candidates = [
+                f for f in files
+                if f.get("name", "").lower().endswith((".jpg", ".jpeg", ".png"))
+                and "thumb" not in f.get("name", "").lower()
+            ]
+            if not candidates:
+                continue
+            best = max(candidates, key=lambda f: int(f.get("size") or 0))
+            urls.append(f"https://archive.org/download/{identifier}/{best['name']}")
+        return urls
+    except Exception as e:
+        if isinstance(e, requests.HTTPError) and e.response is not None \
+                and is_quota_exhaustion(e.response.status_code, e.response.text):
+            set_provider_cooldown("archive_org", _QUOTA_COOLDOWN_SECONDS)
+            logger.warning("Internet Archive quota exhausted — pausing archive.org searches for the rest of this run")
+        else:
+            logger.error(f"Internet Archive image search failed: {e}")
+        return []
+
+
+def search_images_smithsonian(
+    search_term: str, n: int = 5,
+    rank_tokens: List[str] = None, avoid_tokens: List[str] = None,  # metadata too thin to rank
+) -> List[str]:
+    """Return up to n image URLs from the Smithsonian Open Access API.
+
+    Requires a free api.data.gov key (`smithsonian_api_keys` in config.toml —
+    self-serve, instant registration). CC0 museum/archival imagery — strong
+    fit for documentary content. Only a fraction of records carry
+    online_media, so results are filtered post-hoc rather than assumed.
+    """
+    if provider_on_cooldown("smithsonian"):
+        return []
+    try:
+        api_key = get_api_key("smithsonian_api_keys")
+    except ValueError:
+        logger.warning("smithsonian_api_keys not configured, skipping Smithsonian image search")
+        return []
+    params = {
+        "q": f"{search_term} AND online_media_type:Images",
+        "api_key": api_key,
+        "rows": n * 3,  # over-fetch — most records have no online_media
+    }
+    url = f"https://api.si.edu/openaccess/api/v1.0/search?{urlencode(params)}"
+    try:
+        rows = _cached_api_get_json("smithsonian", url).get("response", {}).get("rows", [])
+        urls = []
+        for row in rows:
+            media = (
+                row.get("content", {})
+                .get("descriptiveNonRepeating", {})
+                .get("online_media", {})
+                .get("media", [])
+            )
+            for m in media:
+                if m.get("type") == "Images" and m.get("content"):
+                    urls.append(m["content"])
+                    break
+            if len(urls) >= n:
+                break
+        return urls
+    except Exception as e:
+        if isinstance(e, requests.HTTPError) and e.response is not None \
+                and is_quota_exhaustion(e.response.status_code, e.response.text):
+            set_provider_cooldown("smithsonian", _QUOTA_COOLDOWN_SECONDS)
+            logger.warning("Smithsonian quota exhausted — pausing Smithsonian searches for the rest of this run")
+        else:
+            logger.error(f"Smithsonian image search failed: {e}")
         return []
 
 
@@ -603,7 +767,7 @@ def search_images_serper(
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
     body = {"q": search_term, "num": n * 3}
     try:
-        data = _api_post_json("https://google.serper.dev/images", body, headers=headers)
+        data = _cached_api_post_json("serper", "https://google.serper.dev/images", body, headers=headers)
     except Exception as e:
         logger.error(f"Serper image search failed: {e}")
         return []
@@ -733,6 +897,9 @@ _IMAGE_PROVIDERS = {
     "openverse": search_images_openverse,
     "duckduckgo": search_images_ddg,
     "serper": search_images_serper,
+    "nasa": search_images_nasa,
+    "archive_org": search_images_archive_org,
+    "smithsonian": search_images_smithsonian,
 }
 
 # "openverse" deliberately excluded: Cloudflare blocks this server's IP on

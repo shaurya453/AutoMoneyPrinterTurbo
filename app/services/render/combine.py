@@ -7,6 +7,7 @@ from typing import List, Optional
 from loguru import logger
 from moviepy import AudioFileClip
 
+from app.config import config
 from app.models.schema import (
     VideoAspect,
     VideoConcatMode,
@@ -52,6 +53,31 @@ _TRANSITION_DISPATCH = {
     VideoTransitionMode.slide_out.value: lambda clip, side: slideout_transition(clip, _CLIP_TRANSITION_SECONDS, side),
     VideoTransitionMode.shuffle.value: "shuffle",
 }
+
+# Names ffmpeg's xfade filter accepts (confirmed via `ffmpeg -h filter=xfade`
+# on this build, 8.0.1) — whitelisted so a bad config.toml value degrades to
+# the safe default instead of failing the whole concat.
+_XFADE_TRANSITIONS = frozenset({
+    "fade", "wipeleft", "wiperight", "wipeup", "wipedown",
+    "slideleft", "slideright", "slideup", "slidedown",
+    "circlecrop", "circleopen", "circleclose", "dissolve",
+    "hblur", "wipetl", "wipetr", "wipebl", "wipebr",
+})
+
+
+def _configured_xfade_transition() -> str:
+    """The xfade transition name used by the crossfade concat path.
+
+    `hblur` reads as a fast horizontal-blur "whip" between cuts — set
+    `crossfade_transition = "hblur"` in config.toml to use it in place of
+    the default plain dissolve.
+    """
+    name = str(config.app.get("crossfade_transition", "fade") or "fade")
+    if name not in _XFADE_TRANSITIONS:
+        logger.warning(f"unknown crossfade_transition '{name}' — falling back to 'fade'")
+        return "fade"
+    return name
+
 
 _SHUFFLE_TRANSITIONS = [
     lambda clip, side: fadein_transition(clip, _CLIP_TRANSITION_SECONDS),
@@ -122,6 +148,7 @@ def concat_video_clips_with_crossfade(
     # inputs carry different timebases (e.g. a stream-copied source clip at
     # 1/90000 next to a freshly encoded one at 1/15360).
     n = len(clip_files)
+    transition_name = _configured_xfade_transition()
     filter_parts = []
     for i in range(n):
         filter_parts.append(f"[{i}:v]settb=AVTB[t{i}]")
@@ -132,7 +159,7 @@ def concat_video_clips_with_crossfade(
         offset = max(0.0, offset)
         label_out = f"[v{i}]" if i < n - 1 else "[vout]"
         filter_parts.append(
-            f"{prev_label}[t{i}]xfade=transition=fade"
+            f"{prev_label}[t{i}]xfade=transition={transition_name}"
             f":duration={cf:.4f}:offset={offset:.4f}{label_out}"
         )
         prev_label = label_out

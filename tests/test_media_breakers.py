@@ -65,6 +65,19 @@ def test_provider_cooldown_set_and_expire():
     assert not _common.provider_on_cooldown("unsplash")
 
 
+def test_quota_exhaustion_402_is_unambiguous():
+    assert _common.is_quota_exhaustion(402, "")
+    assert _common.is_quota_exhaustion(402, "anything")
+
+
+def test_quota_exhaustion_needs_phrase_match_on_other_codes():
+    assert _common.is_quota_exhaustion(403, "Usage limit exceeded for this key")
+    assert _common.is_quota_exhaustion(429, "monthly limit reached, upgrade your plan")
+    assert not _common.is_quota_exhaustion(429, "too many requests, please slow down")
+    assert not _common.is_quota_exhaustion(403, "Forbidden")
+    assert not _common.is_quota_exhaustion(500, "")
+
+
 def test_save_image_skips_failed_url_without_network():
     url = "https://dead.example.com/photo.jpg"
     _common.mark_failed_url(url)

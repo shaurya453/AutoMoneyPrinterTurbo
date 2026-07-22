@@ -3,6 +3,7 @@ from app.services.render.combine import combine_videos
 from app.services.render.effects import apply_visual_effect, composite_lower_third
 from app.services.render.generate import generate_video, get_bgm_file
 from app.services.render.ken_burns import render_ken_burns_clip
+from app.services.render.sfx import pick_sfx_for_mood
 
 __all__ = [
     "XFADE_CLIP_LIMIT",
@@ -12,5 +13,6 @@ __all__ = [
     "generate_video",
     "get_bgm_file",
     "get_ffmpeg_binary",
+    "pick_sfx_for_mood",
     "render_ken_burns_clip",
 ]

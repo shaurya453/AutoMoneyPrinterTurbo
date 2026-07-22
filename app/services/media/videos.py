@@ -13,7 +13,7 @@ from app.config import config
 from app.models.schema import MaterialInfo, VideoAspect
 from app.services.media._common import (
     _HTTP_TIMEOUT_MEDIA,
-    _api_get_json,
+    _cached_api_get_json,
     _download_bytes,
     _get_tls_verify,
     _touch_cache_file,
@@ -148,7 +148,7 @@ def search_videos_pexels(
     logger.info(f"searching videos: {query_url}, with proxies: {config.proxy}")
 
     try:
-        response = _api_get_json(query_url, headers=headers)
+        response = _cached_api_get_json("pexels_video", query_url, headers=headers)
         video_items = []
         if "videos" not in response:
             logger.error(f"search videos failed: {response}")
@@ -224,7 +224,7 @@ def search_videos_pixabay(
     logger.info(f"searching videos: {query_url}, with proxies: {config.proxy}")
 
     try:
-        response = _api_get_json(query_url)
+        response = _cached_api_get_json("pixabay_video", query_url)
         video_items = []
         if "hits" not in response:
             logger.error(f"search videos failed: {response}")
@@ -316,7 +316,7 @@ def search_videos_coverr(
 
     logger.info(f"searching Coverr: {api_url}")
     try:
-        response = _api_get_json(api_url, headers=headers)
+        response = _cached_api_get_json("coverr", api_url, headers=headers)
         video_items = []
         hits = response.get("hits", [])
         target_pixels = video_width * video_height
@@ -467,7 +467,7 @@ def search_bgm_pixabay(search_term: str, n: int = 3) -> List[str]:
     }
     url = f"https://pixabay.com/api/music/?{urlencode(params)}"
     try:
-        hits = _api_get_json(url).get("hits", [])
+        hits = _cached_api_get_json("pixabay_bgm", url).get("hits", [])
         return [h["audio"] for h in hits if h.get("audio")]
     except Exception as e:
         logger.error(f"Pixabay BGM search failed: {e}")

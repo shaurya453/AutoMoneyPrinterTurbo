@@ -51,7 +51,18 @@ serper_api_keys = []
 # product/person/place/event that stock-photo libraries don't carry.
 # wikimedia/openverse rank ahead of stock libraries here: stock rarely carries
 # named entities or evidence imagery (diagrams, schematics), open archives often do.
-named_track_image_source_order = ["serper", "duckduckgo", "wikimedia", "pexels", "pixabay", "unsplash"]
+# nasa/archive_org/smithsonian are free archival/documentary sources (public-
+# domain space/historical imagery, museum collections) -- grouped with the
+# other open archives, ahead of commercial stock. All three silently return
+# no results (nasa/archive_org) or skip (smithsonian, needs an API key) if
+# the subject isn't in their collections, so ordering them early costs
+# nothing when they come up empty.
+named_track_image_source_order = ["serper", "duckduckgo", "wikimedia", "nasa", "archive_org", "smithsonian", "pexels", "pixabay", "unsplash"]
+
+# Smithsonian Open Access API key -- free, instant self-serve registration
+# at https://api.data.gov/signup/. If unset, Smithsonian is silently skipped
+# (same "skip if unconfigured" convention as serper_api_keys above).
+smithsonian_api_keys = []
 
 # ---------------------------------------------------------------------------
 # Openverse (openly licensed images: Flickr Commons, Wikimedia, museums) —
@@ -310,6 +321,37 @@ subtitle_provider = "edge"
 # 0.15 = BGM drops to 15% of its normal level under speech.
 # Set to 1.0 to disable ducking entirely.
 bgm_duck_ratio = 0.15
+
+# ---------------------------------------------------------------------------
+# SFX (one-shot sound effects, mood-triggered — see app/services/render/sfx.py)
+# ---------------------------------------------------------------------------
+
+# Master on/off switch for the SFX layer.
+sfx_enabled = true
+
+# Global multiplier applied on top of each cue's own library volume.
+sfx_volume_scale = 1.0
+
+# ---------------------------------------------------------------------------
+# Crossfade transition style (concat_video_clips_with_crossfade in combine.py)
+# ---------------------------------------------------------------------------
+
+# ffmpeg xfade transition name used between clips. "fade" is a plain dissolve;
+# "hblur" reads as a fast horizontal-blur "whip" cut. See _XFADE_TRANSITIONS
+# in combine.py for the full whitelist.
+crossfade_transition = "fade"
+
+# ---------------------------------------------------------------------------
+# Provider search-response cache (app/services/media/_search_cache.py)
+# ---------------------------------------------------------------------------
+
+# Caches raw provider SEARCH responses (not downloaded assets, which already
+# have their own cache_images/cache_videos/cache_bgm dirs). Default true —
+# unlike vidspeed's default-off, AMPT's job lifecycle re-runs the same
+# title's queries on portal's automatic "<title> (2)", "(3)"... retries, so
+# the win is bigger and staleness risk is low within a TTL window.
+search_cache_enabled = true
+search_cache_ttl_seconds = 86400
 
 # ---------------------------------------------------------------------------
 # TLS / network

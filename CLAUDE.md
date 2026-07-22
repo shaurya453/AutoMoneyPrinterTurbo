@@ -52,11 +52,13 @@ Re-running with the same title creates `<title> (2)`, `<title> (3)`, etc. automa
 | `app/services/render/` | FFmpeg/MoviePy rendering package |
 | `app/services/render/ken_burns.py` | Ken Burns animations, `render_ken_burns_clip()` |
 | `app/services/render/combine.py` | `combine_videos()`, xfade concat, `XFADE_CLIP_LIMIT` |
-| `app/services/render/generate.py` | `generate_video()`, subtitle burn-in, BGM ducking, `get_bgm_file()` |
-| `app/services/render/effects.py` | `apply_visual_effect()`, `composite_lower_third()` |
+| `app/services/render/generate.py` | `generate_video()`, subtitle burn-in, BGM ducking, `get_bgm_file()`, SFX bed mixing (`_render_sfx_bed_wav()`) |
+| `app/services/render/effects.py` | `apply_visual_effect()`, `composite_lower_third()`, color grade/grain/vignette (`_grade_chain_str()`, per-sentence `visual_grade`/`grain`/`vignette` fields, fused into the same ffmpeg pass as the mood-texture blend when both fire) |
+| `app/services/render/sfx.py` | Mood-triggered one-shot SFX library, `pick_sfx_for_mood()` — mirrors `_EFFECT_OVERLAYS`' mood vocabulary |
 | `app/services/render/_common.py` | Shared codec helpers, `SubClippedVideoClip`, `close_clip()` |
 | `app/services/media/` | Stock footage/image search and download package |
-| `app/services/media/images.py` | Image search (Pexels, Pixabay, Unsplash, Wikimedia, DDG, Serper), `download_image()` |
+| `app/services/media/_search_cache.py` | SQLite-backed cache for provider search *responses* (distinct from the downloaded-asset caches below), `cached_get_json()`/`cached_post_json()` |
+| `app/services/media/images.py` | Image search (Pexels, Pixabay, Unsplash, Wikimedia, DDG, Serper, NASA, Internet Archive, Smithsonian), `download_image()` |
 | `app/services/media/videos.py` | Video search (Pexels, Pixabay, Coverr), `download_video()`, BGM download |
 | `app/services/tts/` | TTS package: edge-tts, Kokoro ONNX, Supertonic, Minimax (routed through Algrow's cheaper proxy by default), ElevenLabs (Algrow's premade catalog only, see below) |
 | `app/services/tts/__init__.py` | `tts()` dispatcher, `NO_VOICE_NAME` |
@@ -72,6 +74,7 @@ Re-running with the same title creates `<title> (2)`, `<title> (3)`, etc. automa
 | `resource/backgrounds/` | Gradient background MP4s served by Revideo/Vite via symlinks in `revideo-worker/public/` |
 | `resource/graphics/` | Static compositing assets (e.g. `lower_third_shadow.png`) |
 | `resource/overlays/` | Motion overlay MP4s blended during rendering (screen / multiply modes) |
+| `resource/sfx/` | One-shot SFX mp3s (ported from vidspeed's `public/effects/sfx/`), keyed by `app/services/render/sfx.py::_SFX_LIBRARY` |
 | `storage/tasks/<title>/` | Per-job working directory |
 
 ### Revideo motion-graphics worker
@@ -86,8 +89,12 @@ Lives at `revideo-worker/` (inside the repository root).
 | `src/projects/info-callout.ts` | Revideo project for `info_callout` (single variant) |
 | `src/projects/infographic{,-b,-c,-d}.ts` | Revideo projects for infographic variants A–D |
 | `src/projects/list{,-b,-c,-d}.ts` | Revideo projects for list variants A–D |
+| `src/projects/quote-card.ts` | Revideo project for `quote_card` (single variant) |
+| `src/projects/timeline-card.ts` | Revideo project for `timeline_card` (single variant) |
 | `src/scenes/lower-third.tsx` | Lower third — left-anchored label with semi-transparent backdrop, fade in/out |
 | `src/scenes/info-callout.tsx` | Info callout — 3 fixed-position text boxes with animated leader lines to dots near centre, staggered reveal scaled to clip duration |
+| `src/scenes/quote-card.tsx` | Quote card — full-replace attributed quote (large serif quote-mark + quote + muted attribution line) |
+| `src/scenes/timeline-card.tsx` | Timeline card — full-replace date/era marker, minimal one/two-line chapter break |
 | `src/scenes/infographic{,-b,-c,-d}.tsx` | Scene files: A vert bars · B horiz bars · C lollipop · D callouts |
 | `src/scenes/list{,-b,-c,-d}.tsx` | Scene files: A bullets · B numbered · C cascade · D card grid |
 | `package.json` | `@revideo/{core,2d,renderer,vite-plugin,ui}` v0.10.4 |
@@ -108,7 +115,11 @@ Lives at `revideo-worker/` (inside the repository root).
 6. **Clip-fetch resilience** — rescue fetch → placeholder → position-aware gap-fill → tail gap-fill (see below)
 7. **Outro extension** — last clip looped to reach `audio_duration + 2 s`
 8. **`combine_videos()`** — sequential concat with xfade crossfade → `temp/combined.mp4`
-9. **`generate_video()`** — subtitles (Pillow), fade-out, BGM duck → `final.mp4`
+9. **`generate_video()`** — subtitles (Pillow), fade-out, BGM duck, SFX mix → `final.mp4`
+
+### SFX (one-shot sound effects)
+
+Phase B's `apply_visual_effect()` call site in `_orchestrate.py` also calls `render.pick_sfx_for_mood(visual_effect, rng=job_rng)` whenever a mood texture actually fires, appending `(cue_start, path, volume)` to a `sfx_cues` list (cue start = the running sum of `planned_clip_durations` *before* this clip is appended — an approximation of the clip's position in the final timeline, not frame-exact against the post-crossfade output, which is fine for a short mood accent). `sfx_cues` threads through to `generate_video()`, which pre-renders every cue into one full-duration WAV bed (`_render_sfx_bed_wav()`, mirroring `_render_bgm_wav()`'s "decode to PCM, mix offline" approach) and mixes it in as an extra `amix` input alongside narration and BGM. SFX are **not** ducked against narration — they're meant to cut through at their moment (same design choice vidspeed made). Toggle via `config.toml`'s `sfx_enabled`/`sfx_volume_scale`. Library/mood grouping: `app/services/render/sfx.py`.
 
 ### Clip-fetch resilience (rescue → placeholder → gap-fill)
 
@@ -170,7 +181,7 @@ Python calls `node revideo-worker/render.js` via `subprocess.run()` with a JSON 
 }
 ```
 
-`render.js` maps `type`+`variant` → Revideo project file via `VARIANT_POOL`, which (like `graphics.py`'s `_POOL_SIZES`/`STYLE_MAP`/`_BG_VIDEOS`) is derived from `revideo-worker/variants.json` at load time. `graphics.py` picks the variant, enforcing no-consecutive-repeat rotation unless a named `style` overrides it. Adding a new type or variant = new `src/scenes/foo.tsx` + new `src/projects/foo.ts` + one entry in `variants.json` — no Python or render.js change.
+`render.js` maps `type`+`variant` → Revideo project file via `VARIANT_POOL`, which (like `graphics.py`'s `_POOL_SIZES`/`STYLE_MAP`/`_BG_VIDEOS`) is derived from `revideo-worker/variants.json` at load time. `graphics.py` picks the variant, enforcing no-consecutive-repeat rotation unless a named `style` overrides it. Adding a new *variant* of an existing type = new `src/scenes/foo.tsx` + new `src/projects/foo.ts` + one entry in `variants.json` — no Python or render.js change. Adding a wholly new *type* also needs one Python-side edit: `scripts/validate_job.py`'s `_VALID_GTYPES` allowlist (and its cost-class grouping — composite-over-footage like `lower_third`/`info_callout`, or full-replace like `infographic`/`list`/`quote_card`/`timeline_card`).
 
 The rendered H.264 MP4 slots into `temp/clips/` identically to any stock clip — `combine_videos()` sees no difference.
 
@@ -182,8 +193,12 @@ The rendered H.264 MP4 slots into `temp/clips/` identically to any stock clip �
 | `info_callout` | single | `labels[]` (exactly 3 short strings) — named-entity images only, composites over footage like `lower_third` |
 | `infographic` | A: vertical bars · B: horizontal bars · C: lollipop · D: number callouts | `title`, `labels[]`, `values[]`, `unit` |
 | `list` | A: bullets · B: numbered · C: cascade reveal · D: card grid | `items[]`, `title` |
+| `quote_card` | single | `quote` (required), `attribution` (optional) — attributed quote, full-replace |
+| `timeline_card` | single | `label` (required, e.g. "1969"), `sublabel` (optional) — date/era marker, full-replace |
 
 Named style hints (e.g. `"style": "callouts"`) map to specific variants — see `AGENT_GUIDE.md`. The pipeline rotates variants automatically when no style is specified to avoid consecutive repeats.
+
+**`quote_card`/`timeline_card` are AMPT-side plumbing only as of this writing** — like `infographic`/`list`, they're assigned by portal's graphics-audit pass (`worker.mjs`), never the enrichment agent. Portal's prompt/schema needs its own update to actually start choosing them; until then they render correctly if a job.json sets them by hand (e.g. for testing) but nothing in the current pipeline will assign one automatically.
 
 ---
 
@@ -212,8 +227,20 @@ Full spec: `AGENT_GUIDE.md`.
 | `unsplash_api_keys` | Image fallback |
 | `serper_api_keys` | Google Images for `content_track: "named"` |
 | `openverse_client_id` / `_secret` | Openverse (CC-licensed diagrams/evidence imagery) — **currently dormant**: Cloudflare blocks this server's IP on every `api.openverse.org` endpoint (register, token, search), confirmed even with valid registered credentials (2026-07-13). Removed from `named_track_image_source_order`/`_DEFAULT_IMAGE_SOURCE_ORDER`; credentials kept in case a `[proxy]` is added later. `scripts/register_openverse.py` hits their `/v1/auth_tokens/register/` endpoint but must be run from a non-datacenter IP |
+| `smithsonian_api_keys` | Smithsonian Open Access (CC0 museum/archival imagery) — free instant self-serve key at api.data.gov/signup. Skipped silently if unset, same convention as `serper_api_keys` |
 | `[whisper]` | `model_size`, `device`, `compute_type` |
 | `[app].max_image_ratio` | Soft cap on image clip fraction (code fallback 1.0 = uncapped; portal always writes the user's choice into `job.max_image_ratio`, which wins) |
+| `[app].crossfade_transition` | ffmpeg xfade transition name for `combine_videos()`'s concat (default `"fade"`; `"hblur"` reads as a fast horizontal-blur "whip" cut — see `_XFADE_TRANSITIONS` in `combine.py`) |
+
+### Archival image providers (NASA / Internet Archive / Smithsonian)
+
+Free, public-domain/CC0 sources added to `named_track_image_source_order` for documentary/historical named-entity subjects (space, historical events, museum artifacts) — deliberately *not* added to `_DEFAULT_IMAGE_SOURCE_ORDER` (generic broll queries rarely match their collections and would just burn API calls). NASA's search response derives its own large-size image URL from `nasa_id` (no second request per candidate); Internet Archive's search only returns item identifiers, so each candidate needs one `archive.org/metadata/<id>` lookup to find its actual image file; Smithsonian requires an API key and most records carry no `online_media` at all, so results are filtered post-hoc. DVIDS (military/government imagery) was considered and dropped — its API requires a manually-requested key, not the instant self-serve registration the other three offer.
+
+`app/services/media/_common.py::is_quota_exhaustion()` distinguishes hard quota exhaustion (HTTP 402, or a phrase like "usage limit"/"quota" in the body) from an ordinary transient 429 — on a match, `set_provider_cooldown()` is given a 6-hour cooldown instead of the short rate-limit backoffs used elsewhere, since quota exhaustion won't self-heal within a single job run. Wired into the three new providers plus Pexels/Pixabay (previously had no cooldown handling at all).
+
+### Provider search-response cache
+
+`app/services/media/_search_cache.py` caches the raw JSON *search responses* from every provider (SQLite, WAL mode, `storage/search_cache.sqlite3`) — distinct from `cache_images/`/`cache_videos/`/`cache_bgm/`, which cache the *downloaded asset files*. `_common.py::_cached_api_get_json()`/`_cached_api_post_json()` wrap the shared `_api_get_json()`/`_api_post_json()` HTTP helpers and are what every provider in `images.py`/`videos.py` actually calls now (except the dormant Openverse path, which never succeeds anyway). Cache key = `sha256(provider, url-with-secret-params-redacted, header-names, POST-body)` — redacting API-key query params means a rotated key doesn't fragment the cache, and the POST body is folded in for Serper (whose fixed-URL endpoint carries the actual query in the body). Controlled by `search_cache_enabled`/`search_cache_ttl_seconds` in `config.toml` (default on, 24h TTL) — matters most for portal's automatic same-title retries (`<title> (2)`, `(3)`...), which otherwise re-issue the exact same `visual_concepts` queries against every provider from scratch.
 
 ### AI avatar provider switch
 
