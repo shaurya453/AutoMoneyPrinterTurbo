@@ -330,7 +330,9 @@ bgm_duck_ratio = 0.15
 sfx_enabled = true
 
 # Global multiplier applied on top of each cue's own library volume.
-sfx_volume_scale = 1.0
+# Every cue is also hard-capped to 3.5s (with a short fade-out) regardless of
+# its source file's length — see _SFX_MAX_CUE_SECONDS in generate.py.
+sfx_volume_scale = 0.5
 
 # ---------------------------------------------------------------------------
 # Crossfade transition style (concat_video_clips_with_crossfade in combine.py)

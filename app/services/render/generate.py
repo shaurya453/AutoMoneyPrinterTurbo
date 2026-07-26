@@ -443,6 +443,13 @@ def _render_bgm_wav(
     return True
 
 
+# Longer library assets (e.g. ticking-clock at ~9s, ambience loops like
+# noir-rain at 90s) are one-shot *accents*, not beds — cap every cue to this
+# many seconds so a long source file doesn't turn into background ambience.
+_SFX_MAX_CUE_SECONDS = 3.5
+_SFX_FADE_OUT_SECONDS = 0.25  # tail fade so a mid-file trim doesn't click
+
+
 def _render_sfx_bed_wav(
     cues: list,
     duration: float,
@@ -466,6 +473,8 @@ def _render_sfx_bed_wav(
 
     bed = np.zeros((n_target, 2), dtype=np.float64)
     any_mixed = False
+    max_cue_samples = int(_SFX_MAX_CUE_SECONDS * _SR)
+    fade_samples = int(_SFX_FADE_OUT_SECONDS * _SR)
 
     for start_seconds, file_path, cue_volume in cues:
         decode = subprocess.run(
@@ -485,6 +494,12 @@ def _render_sfx_bed_wav(
             continue
 
         samples = np.frombuffer(decode.stdout, dtype=np.int16).reshape(-1, 2).astype(np.float64)
+        if len(samples) > max_cue_samples:
+            samples = samples[:max_cue_samples].copy()
+            fade_len = min(fade_samples, len(samples))
+            if fade_len > 0:
+                fade = np.linspace(1.0, 0.0, fade_len)[:, None]
+                samples[-fade_len:] *= fade
         start_idx = max(0, int(start_seconds * _SR))
         if start_idx >= n_target:
             continue

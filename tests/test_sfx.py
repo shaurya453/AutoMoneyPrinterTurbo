@@ -79,3 +79,60 @@ def test_render_sfx_bed_wav_no_cues_returns_false(tmp_path):
     out = tmp_path / "bed.wav"
     assert generate._render_sfx_bed_wav([], duration=5.0, out_path=str(out)) is False
     assert not out.exists()
+
+
+def test_render_sfx_bed_wav_caps_long_cue_duration(tmp_path):
+    long_tone = tmp_path / "long.mp3"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+         "-i", "sine=frequency=440:duration=9", "-b:a", "96k", str(long_tone)],
+        check=True,
+    )
+
+    out = tmp_path / "bed.wav"
+    ok = generate._render_sfx_bed_wav(
+        cues=[(0.0, str(long_tone), 1.0)],
+        duration=12.0,
+        out_path=str(out),
+    )
+    assert ok and out.exists()
+
+    with wave.open(str(out)) as wf:
+        n = wf.getnframes()
+        sr = wf.getframerate()
+        pcm = np.frombuffer(wf.readframes(n), dtype=np.int16).reshape(-1, 2).astype(np.float64)
+
+    def rms(t0, t1):
+        seg = pcm[int(t0 * sr):int(t1 * sr)]
+        return np.sqrt((seg ** 2).mean())
+
+    assert rms(0.5, 1.0) > 100, "cue should be audible near its start"
+    assert rms(5.0, 6.0) < 50, "a 9s source should be silent well past the 3.5s cue cap"
+
+
+def test_render_sfx_bed_wav_applies_volume_scale(tmp_path):
+    tone = tmp_path / "tone.mp3"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+         "-i", "sine=frequency=440:duration=1", "-b:a", "96k", str(tone)],
+        check=True,
+    )
+
+    def render_rms(volume_scale):
+        out = tmp_path / f"bed_{volume_scale}.wav"
+        generate._render_sfx_bed_wav(
+            cues=[(1.0, str(tone), 1.0)],
+            duration=3.0,
+            out_path=str(out),
+            volume_scale=volume_scale,
+        )
+        with wave.open(str(out)) as wf:
+            n = wf.getnframes()
+            sr = wf.getframerate()
+            pcm = np.frombuffer(wf.readframes(n), dtype=np.int16).reshape(-1, 2).astype(np.float64)
+        seg = pcm[int(1.1 * sr):int(1.8 * sr)]
+        return np.sqrt((seg ** 2).mean())
+
+    full = render_rms(1.0)
+    half = render_rms(0.5)
+    assert half < full * 0.6 and half > full * 0.4, "volume_scale=0.5 should roughly halve cue amplitude"
